@@ -83,6 +83,471 @@ def _decode_raw_body(s: str) -> bytes:
         # Fallback: legacy latin-1 encoding
         return bytes(ord(c) for c in s)
 
+def _remap_sprite_raw_body(raw_body: bytes, id_map: Dict[int, int]) -> bytes:
+    """Remap charID references inside a DefineSprite raw body.
+
+    raw_body = frameCount(2) + sub-tags.  Sub-tags containing charID refs:
+      PlaceObject2 (26): flags(1) + depth(2) [+ charId(2) if flags & 0x02]
+      PlaceObject3 (70): flags(2) + depth(2) [+ charId(2) if flags & 0x02]
+      RemoveObject (5):  charId(2) + depth(2)
+
+    All other sub-tags are passed through unchanged.
+    """
+    if not id_map or len(raw_body) < 4:
+        return raw_body
+
+    out = bytearray(raw_body[:2])  # frameCount
+    offset = 2
+    while offset < len(raw_body):
+        if offset + 2 > len(raw_body):
+            out.extend(raw_body[offset:])
+            break
+        tag_code_and_length = struct.unpack_from('<H', raw_body, offset)[0]
+        tag_type = tag_code_and_length >> 6
+        length = tag_code_and_length & 0x3f
+        header_size = 2
+        if length == 0x3f:
+            if offset + 6 > len(raw_body):
+                out.extend(raw_body[offset:])
+                break
+            length = struct.unpack_from('<I', raw_body, offset + 2)[0]
+            header_size = 6
+
+        tag_start = offset
+        tag_end = offset + header_size + length
+        tag_data_start = offset + header_size
+
+        if tag_type == 26 and length >= 3:  # PlaceObject2
+            flags = raw_body[tag_data_start]
+            if flags & 0x02 and length >= 5:
+                old_cid = struct.unpack_from('<H', raw_body, tag_data_start + 3)[0]
+                new_cid = id_map.get(old_cid, old_cid)
+                if new_cid != old_cid:
+                    chunk = bytearray(raw_body[tag_start:tag_end])
+                    cid_offset = header_size + 3
+                    struct.pack_into('<H', chunk, cid_offset, new_cid)
+                    out.extend(chunk)
+                    offset = tag_end
+                    continue
+        elif tag_type == 70 and length >= 4:  # PlaceObject3
+            flags = struct.unpack_from('<H', raw_body, tag_data_start)[0]
+            if flags & 0x02 and length >= 6:
+                old_cid = struct.unpack_from('<H', raw_body, tag_data_start + 4)[0]
+                new_cid = id_map.get(old_cid, old_cid)
+                if new_cid != old_cid:
+                    chunk = bytearray(raw_body[tag_start:tag_end])
+                    cid_offset = header_size + 4
+                    struct.pack_into('<H', chunk, cid_offset, new_cid)
+                    out.extend(chunk)
+                    offset = tag_end
+                    continue
+        elif tag_type == 5 and length >= 4:  # RemoveObject (has charId)
+            old_cid = struct.unpack_from('<H', raw_body, tag_data_start)[0]
+            new_cid = id_map.get(old_cid, old_cid)
+            if new_cid != old_cid:
+                chunk = bytearray(raw_body[tag_start:tag_end])
+                struct.pack_into('<H', chunk, header_size, new_cid)
+                out.extend(chunk)
+                offset = tag_end
+                continue
+
+        # Pass through unchanged
+        out.extend(raw_body[tag_start:tag_end])
+        offset = tag_end
+
+        if tag_type == 0:  # End
+            break
+
+    return bytes(out)
+
+
+def _remap_shape_raw_body(raw_body: bytes, tag_type: int,
+                          id_map: Dict[int, int]) -> bytes:
+    """Remap bitmap charID references inside a DefineShape raw body.
+
+    raw_body = tag data AFTER the 2-byte charID.  Fill styles of type
+    0x40–0x43 (bitmap fills) contain a UI16 bitmapId that must be remapped.
+
+    This parses just enough of the shape structure to find fill style
+    bitmapId fields and patch them.  All other bytes are unchanged.
+    """
+    if not id_map or len(raw_body) < 6:
+        return raw_body
+
+    buf = bytearray(raw_body)
+
+    try:
+        # ── Skip shape bounds RECT (bit-packed) ──
+        bit_offset = 0
+        nbits = (buf[0] >> 3) & 0x1f
+        total_bits = 5 + nbits * 4
+        byte_offset = (total_bits + 7) // 8
+
+        # DefineShape4 (tag 83): extra edge-bounds RECT + 1 byte flags
+        if tag_type == 83:
+            nbits2 = (buf[byte_offset] >> 3) & 0x1f
+            total_bits2 = 5 + nbits2 * 4
+            byte_offset += (total_bits2 + 7) // 8
+            byte_offset += 1  # flags byte
+
+        # ── Parse fill style array ──
+        def _remap_fill_styles(off: int) -> int:
+            """Parse fill style array starting at off, remap bitmap IDs.
+            Returns offset after the array."""
+            count = buf[off]; off += 1
+            if tag_type not in (2,) and count == 0xff:
+                count = buf[off] | (buf[off+1] << 8); off += 2
+            for _ in range(count):
+                ft = buf[off]; off += 1
+                if ft == 0:
+                    # Solid fill: RGB (tags 2,22) or RGBA (tags 32,83)
+                    off += 4 if tag_type in (32, 83) else 3
+                elif ft in (0x10, 0x12):
+                    # Gradient fill: MATRIX + GRADIENT
+                    off = _skip_matrix(off)
+                    off = _skip_gradient(off)
+                elif ft == 0x13:
+                    # Focal gradient: MATRIX + FOCALGRADIENT
+                    off = _skip_matrix(off)
+                    off = _skip_focal_gradient(off)
+                elif ft in (0x40, 0x41, 0x42, 0x43):
+                    # Bitmap fill: UI16 bitmapId + MATRIX
+                    old_cid = buf[off] | (buf[off+1] << 8)
+                    new_cid = id_map.get(old_cid, old_cid)
+                    buf[off] = new_cid & 0xff
+                    buf[off+1] = (new_cid >> 8) & 0xff
+                    off += 2
+                    off = _skip_matrix(off)
+                else:
+                    # Unknown fill type — abort to avoid corruption
+                    return off
+            return off
+
+        def _skip_matrix(off: int) -> int:
+            """Skip a byte-aligned MATRIX record."""
+            byte_val = buf[off]
+            bit_pos = 0
+            def read_bits(n):
+                nonlocal off, byte_val, bit_pos
+                result = 0
+                for _ in range(n):
+                    result = (result << 1) | ((byte_val >> (7 - bit_pos)) & 1)
+                    bit_pos += 1
+                    if bit_pos >= 8:
+                        bit_pos = 0
+                        off += 1
+                        if off < len(buf):
+                            byte_val = buf[off]
+                return result
+
+            has_scale = read_bits(1)
+            if has_scale:
+                nbits_s = read_bits(5)
+                read_bits(nbits_s)  # scaleX
+                read_bits(nbits_s)  # scaleY
+            has_rotate = read_bits(1)
+            if has_rotate:
+                nbits_r = read_bits(5)
+                read_bits(nbits_r)  # rotateSkew0
+                read_bits(nbits_r)  # rotateSkew1
+            nbits_t = read_bits(5)
+            read_bits(nbits_t)  # translateX
+            read_bits(nbits_t)  # translateY
+            # Align to byte boundary
+            if bit_pos > 0:
+                off += 1
+            return off
+
+        def _skip_gradient(off: int) -> int:
+            """Skip a GRADIENT record (byte-aligned at start)."""
+            byte_val = buf[off]
+            bit_pos = 0
+            def read_bits(n):
+                nonlocal off, byte_val, bit_pos
+                result = 0
+                for _ in range(n):
+                    result = (result << 1) | ((byte_val >> (7 - bit_pos)) & 1)
+                    bit_pos += 1
+                    if bit_pos >= 8:
+                        bit_pos = 0
+                        off += 1
+                        if off < len(buf):
+                            byte_val = buf[off]
+                return result
+            spread = read_bits(2)
+            interp = read_bits(2)
+            num_grads = read_bits(4)
+            # Align
+            if bit_pos > 0:
+                off += 1
+            # Each gradient record: UI8 ratio + color
+            color_size = 4 if tag_type in (32, 83) else 3
+            off += num_grads * (1 + color_size)
+            return off
+
+        def _skip_focal_gradient(off: int) -> int:
+            """Skip a FOCALGRADIENT record."""
+            byte_val = buf[off]
+            bit_pos = 0
+            def read_bits(n):
+                nonlocal off, byte_val, bit_pos
+                result = 0
+                for _ in range(n):
+                    result = (result << 1) | ((byte_val >> (7 - bit_pos)) & 1)
+                    bit_pos += 1
+                    if bit_pos >= 8:
+                        bit_pos = 0
+                        off += 1
+                        if off < len(buf):
+                            byte_val = buf[off]
+                return result
+            spread = read_bits(2)
+            interp = read_bits(2)
+            num_grads = read_bits(4)
+            if bit_pos > 0:
+                off += 1
+            color_size = 4 if tag_type in (32, 83) else 3
+            off += num_grads * (1 + color_size)
+            off += 2  # FIXED8 focalPoint
+            return off
+
+        _remap_fill_styles(byte_offset)
+    except (IndexError, KeyError):
+        # If parsing fails, return original body unchanged to avoid corruption
+        return raw_body
+
+    return bytes(buf)
+
+
+def _remap_morph_shape_raw_body(raw_body: bytes, tag_type: int,
+                                id_map: Dict[int, int]) -> bytes:
+    """Remap bitmap charID references inside a DefineMorphShape raw body.
+
+    MorphShape has start fill styles and end fill styles, both may contain
+    bitmap fills.  The structure after charID:
+      StartBounds RECT + EndBounds RECT
+      [MorphShape2: StartEdgeBounds RECT + EndEdgeBounds RECT + UI8 flags]
+      Offset UI32 (points to end edges)
+      FillStyleCount + MorphFillStyles[]
+    """
+    if not id_map or len(raw_body) < 10:
+        return raw_body
+
+    buf = bytearray(raw_body)
+    try:
+        off = 0
+
+        def _skip_rect(o: int) -> int:
+            nbits = (buf[o] >> 3) & 0x1f
+            total = 5 + nbits * 4
+            return o + (total + 7) // 8
+
+        # StartBounds + EndBounds
+        off = _skip_rect(off)
+        off = _skip_rect(off)
+
+        # MorphShape2 (tag 84): extra edge bounds + flags
+        if tag_type == 84:
+            off = _skip_rect(off)
+            off = _skip_rect(off)
+            off += 1  # flags
+
+        off += 4  # Offset (UI32)
+
+        # MorphFillStyleCount
+        count = buf[off]; off += 1
+        if count == 0xff:
+            count = buf[off] | (buf[off+1] << 8); off += 2
+
+        # MorphFillStyles — each has start+end fill data
+        for _ in range(count):
+            ft = buf[off]; off += 1
+            if ft == 0:
+                # Solid: StartColor RGBA + EndColor RGBA
+                off += 8  # 4+4
+            elif ft in (0x10, 0x12):
+                # Gradient: StartMatrix + EndMatrix + start gradient + end gradient
+                off = _skip_morph_matrix(buf, off)
+                off = _skip_morph_matrix(buf, off)
+                off = _skip_morph_gradient(buf, off)
+            elif ft == 0x13:
+                off = _skip_morph_matrix(buf, off)
+                off = _skip_morph_matrix(buf, off)
+                off = _skip_morph_gradient(buf, off)
+            elif ft in (0x40, 0x41, 0x42, 0x43):
+                # Bitmap: bitmapId (UI16) + StartMatrix + EndMatrix
+                old_cid = buf[off] | (buf[off+1] << 8)
+                new_cid = id_map.get(old_cid, old_cid)
+                buf[off] = new_cid & 0xff
+                buf[off+1] = (new_cid >> 8) & 0xff
+                off += 2
+                off = _skip_morph_matrix(buf, off)
+                off = _skip_morph_matrix(buf, off)
+            else:
+                break  # unknown type — stop
+    except (IndexError, KeyError):
+        return raw_body
+
+    return bytes(buf)
+
+
+def _skip_morph_matrix(buf: bytearray, off: int) -> int:
+    """Skip a byte-aligned MATRIX in a buffer."""
+    byte_val = buf[off]
+    bit_pos = 0
+
+    def read_bits(n):
+        nonlocal off, byte_val, bit_pos
+        result = 0
+        for _ in range(n):
+            result = (result << 1) | ((byte_val >> (7 - bit_pos)) & 1)
+            bit_pos += 1
+            if bit_pos >= 8:
+                bit_pos = 0
+                off += 1
+                if off < len(buf):
+                    byte_val = buf[off]
+        return result
+
+    has_scale = read_bits(1)
+    if has_scale:
+        nb = read_bits(5)
+        read_bits(nb); read_bits(nb)
+    has_rotate = read_bits(1)
+    if has_rotate:
+        nb = read_bits(5)
+        read_bits(nb); read_bits(nb)
+    nb = read_bits(5)
+    read_bits(nb); read_bits(nb)
+    if bit_pos > 0:
+        off += 1
+    return off
+
+
+def _skip_morph_gradient(buf: bytearray, off: int) -> int:
+    """Skip a morph gradient record (spread+interp+numGrads, then RGBA pairs)."""
+    byte_val = buf[off]
+    bit_pos = 0
+
+    def read_bits(n):
+        nonlocal off, byte_val, bit_pos
+        result = 0
+        for _ in range(n):
+            result = (result << 1) | ((byte_val >> (7 - bit_pos)) & 1)
+            bit_pos += 1
+            if bit_pos >= 8:
+                bit_pos = 0
+                off += 1
+                if off < len(buf):
+                    byte_val = buf[off]
+        return result
+
+    spread = read_bits(2)
+    interp = read_bits(2)
+    num_grads = read_bits(4)
+    if bit_pos > 0:
+        off += 1
+    # Each morph gradient entry: ratio(1) + startColor(4) + ratio(1) + endColor(4) = 10
+    off += num_grads * 10
+    return off
+
+
+def _remap_text_raw_body(raw_body: bytes, tag_type: int,
+                         id_map: Dict[int, int]) -> bytes:
+    """Remap font charID references inside a DefineText/DefineText2 raw body.
+
+    raw_body = tag data AFTER the 2-byte charID.  Text records contain
+    font ID references (UI16) that must be remapped.
+
+    Layout: RECT bounds + MATRIX + UI8 glyphBits + UI8 advanceBits + TextRecords
+    """
+    if not id_map or len(raw_body) < 8:
+        return raw_body
+
+    buf = bytearray(raw_body)
+    try:
+        # Skip RECT bounds
+        off = 0
+        nbits = (buf[0] >> 3) & 0x1f
+        total_bits = 5 + nbits * 4
+        off = (total_bits + 7) // 8
+
+        # Skip MATRIX
+        off = _skip_morph_matrix(buf, off)
+
+        glyph_bits = buf[off]; off += 1
+        advance_bits = buf[off]; off += 1
+
+        # Parse text records
+        while off < len(buf):
+            flags = buf[off]; off += 1
+            if flags == 0:
+                break
+
+            has_font = bool(flags & 0x08)
+            has_color = bool(flags & 0x04)
+            has_y_off = bool(flags & 0x02)
+            has_x_off = bool(flags & 0x01)
+
+            if has_font:
+                old_fid = buf[off] | (buf[off+1] << 8)
+                new_fid = id_map.get(old_fid, old_fid)
+                buf[off] = new_fid & 0xff
+                buf[off+1] = (new_fid >> 8) & 0xff
+                off += 2
+            if has_color:
+                off += 3  # RGB
+                if tag_type == 33:  # DefineText2 has RGBA
+                    off += 1
+            if has_y_off:
+                off += 2
+            if has_x_off:
+                off += 2
+            if has_font:
+                off += 2  # textHeight
+
+            glyph_count = buf[off]; off += 1
+            # Glyph entries are bit-packed: glyphBits + advanceBits per entry
+            total_glyph_bits = glyph_count * (glyph_bits + advance_bits)
+            off += (total_glyph_bits + 7) // 8
+
+    except (IndexError, KeyError):
+        return raw_body
+
+    return bytes(buf)
+
+
+def _remap_edit_text_raw_body(raw_body: bytes,
+                              id_map: Dict[int, int]) -> bytes:
+    """Remap font charID reference inside a DefineEditText raw body.
+
+    Layout after charID: RECT bounds + UI8 flags1 + UI8 flags2 + [UI16 fontID]
+    """
+    if not id_map or len(raw_body) < 4:
+        return raw_body
+
+    buf = bytearray(raw_body)
+    try:
+        # Skip RECT bounds
+        nbits = (buf[0] >> 3) & 0x1f
+        total_bits = 5 + nbits * 4
+        off = (total_bits + 7) // 8
+
+        flags1 = buf[off]; off += 1
+        flags2 = buf[off]; off += 1
+        has_font = bool(flags1 & 0x01)
+
+        if has_font:
+            old_fid = buf[off] | (buf[off+1] << 8)
+            new_fid = id_map.get(old_fid, old_fid)
+            buf[off] = new_fid & 0xff
+            buf[off+1] = (new_fid >> 8) & 0xff
+    except (IndexError, KeyError):
+        return raw_body
+
+    return bytes(buf)
+
+
 # ── SDK detection ────────────────────────────────────────────────────────
 SDK_SEARCH_PATHS = [
     r"C:\aflex_sdk",
@@ -476,8 +941,8 @@ def build_timeline_tags(
 
     for frame in range(1, total_frames + 1):
         # Current display list
-        frame_ctrl = controller[frame] if frame < len(controller) and controller[frame] else None
-        frame_pm = place_map[frame] if frame < len(place_map) and place_map[frame] else None
+        frame_ctrl = controller[frame] if frame < len(controller) and controller[frame] is not None else None
+        frame_pm = place_map[frame] if frame < len(place_map) and place_map[frame] is not None else None
         frame_dk = None
         if depth_keys and frame < len(depth_keys):
             frame_dk = depth_keys[frame]
@@ -644,8 +1109,9 @@ def build_timeline_tags(
 # ── AS3 compilation ──────────────────────────────────────────────────────
 
 def _sanitize_class_name(sym: str) -> str:
-    """Convert a symbol export name to a valid AS3 class identifier."""
-    name = re.sub(r'[^a-zA-Z0-9_]', '_', sym)
+    """Convert a symbol export name to a valid AS3 class identifier.
+    Preserves dots (package separators in fully-qualified AS3 names)."""
+    name = re.sub(r'[^a-zA-Z0-9_.]', '_', sym)
     if name and name[0].isdigit():
         name = '_' + name
     return name or '_unnamed'
@@ -1491,17 +1957,21 @@ class N2DCompiler:
                 raw_aux_map[76] = body
             elif tag_type in (73, 74, 88):  # FontAlignZones, CSMTextSettings, FontName
                 # These reference font/text char IDs by the first UI16 in the body.
-                # The ref_cid is the ORIGINAL SWF char ID, which equals the
-                # library ID.  Re-key to the NEW SWF ID so the aux tags
-                # appear after the correct definition in the output.
+                # The ref_cid is the ORIGINAL SWF char ID.  We need to map:
+                #   original charID → lib_id (via swfCharId) → new SWF ID.
                 ref_cid = struct.unpack_from('<H', body, 0)[0] if len(body) >= 2 else 0
-                new_swf_id = self._lib_to_swf_id.get(ref_cid)
+                # Build reverse map: original swfCharId → lib_id
+                target_lib_id = None
+                for lib in self.libs:
+                    if lib.get('swfCharId') == ref_cid:
+                        target_lib_id = lib['id']
+                        break
+                new_swf_id = self._lib_to_swf_id.get(target_lib_id) if target_lib_id is not None else None
                 if new_swf_id is not None and len(body) >= 2:
                     body = struct.pack('<H', new_swf_id) + body[2:]
                     self._font_aux_tags.setdefault(new_swf_id, []).append((tag_type, body))
                 else:
-                    # Fallback: keep original charId (may be unused)
-                    self._font_aux_tags.setdefault(ref_cid, []).append((tag_type, body))
+                    log.warning('Font aux tag %d references unknown charId %d — skipped', tag_type, ref_cid)
             elif tag_type in (24, 45, 86):  # Protect, SoundStreamHead2, SceneAndFrameLabel
                 raw_aux_tags.extend(build_tag(tag_type, body, force_long=(tag_type == 86)))
 
@@ -1779,6 +2249,16 @@ class N2DCompiler:
             if ci is not None:
                 self._char_idx_to_swf_id[ci] = swf_id
 
+        # ── 5. Build original swfCharId → new swf_id mapping ──
+        #    Used to remap charID references inside rawTagBody blobs.
+        self._orig_to_new_id: Dict[int, int] = {}
+        for lib in self.libs:
+            orig_cid = lib.get("swfCharId")
+            lid = lib["id"]
+            new_id = self._lib_to_swf_id.get(lid)
+            if orig_cid is not None and new_id is not None:
+                self._orig_to_new_id[orig_cid] = new_id
+
     # ── Unified asset emission ──────────────────────────────────────────
 
     def _emit_font_aux_for(self, swf_id: int):
@@ -1867,6 +2347,7 @@ class N2DCompiler:
         if lib.get("rawTagBody"):
             raw_body = _decode_raw_body(lib["rawTagBody"])
             tag_type = lib.get("rawTagType", 32)  # DefineShape3
+            raw_body = _remap_shape_raw_body(raw_body, tag_type, self._orig_to_new_id)
             tag_data = struct.pack('<H', swf_id) + raw_body
             self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
             return
@@ -1915,6 +2396,7 @@ class N2DCompiler:
         if lib.get("rawTagBody"):
             raw_body = _decode_raw_body(lib["rawTagBody"])
             tag_type = lib.get("rawTagType", 84)  # DefineMorphShape2
+            raw_body = _remap_morph_shape_raw_body(raw_body, tag_type, self._orig_to_new_id)
             tag_data = struct.pack('<H', swf_id) + raw_body
             self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
             return
@@ -1950,6 +2432,11 @@ class N2DCompiler:
         if lib.get("rawTagBody"):
             raw_body = _decode_raw_body(lib["rawTagBody"])
             tag_type = lib.get("rawTagType", 37)  # DefineEditText
+            # DefineText/DefineText2 have font ID refs; DefineEditText has fontID at fixed offset
+            if tag_type in (11, 33):  # DefineText, DefineText2
+                raw_body = _remap_text_raw_body(raw_body, tag_type, self._orig_to_new_id)
+            elif tag_type == 37 and len(raw_body) >= 2:  # DefineEditText
+                raw_body = _remap_edit_text_raw_body(raw_body, self._orig_to_new_id)
             tag_data = struct.pack('<H', swf_id) + raw_body
             self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
             return
@@ -1983,6 +2470,9 @@ class N2DCompiler:
         if lib.get("rawTagBody"):
             raw_body = _decode_raw_body(lib["rawTagBody"])
             tag_type = lib.get("rawTagType", 39)  # DefineSprite
+            # Remap charID references inside sprite sub-tags
+            if tag_type == 39:  # DefineSprite
+                raw_body = _remap_sprite_raw_body(raw_body, self._orig_to_new_id)
             tag_data = struct.pack('<H', swf_id) + raw_body
             self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
             return
@@ -2058,6 +2548,17 @@ class N2DCompiler:
             if lib.get("rawTagBody"):
                 raw_body = _decode_raw_body(lib["rawTagBody"])
                 tag_type = lib.get("rawTagType", 39)
+                # Remap charID references inside raw bodies
+                if tag_type == 39:
+                    raw_body = _remap_sprite_raw_body(raw_body, self._orig_to_new_id)
+                elif tag_type in (2, 22, 32, 83):
+                    raw_body = _remap_shape_raw_body(raw_body, tag_type, self._orig_to_new_id)
+                elif tag_type in (46, 84):
+                    raw_body = _remap_morph_shape_raw_body(raw_body, tag_type, self._orig_to_new_id)
+                elif tag_type in (11, 33):
+                    raw_body = _remap_text_raw_body(raw_body, tag_type, self._orig_to_new_id)
+                elif tag_type == 37:
+                    raw_body = _remap_edit_text_raw_body(raw_body, self._orig_to_new_id)
                 tag_data = struct.pack('<H', swf_id) + raw_body
                 buf.extend(build_tag(tag_type, tag_data, force_long=True))
             pending = self._font_aux_tags.get(swf_id)
@@ -2072,12 +2573,21 @@ class N2DCompiler:
         log.debug('_build_root_timeline: entry')
         main = self.id_to_lib.get(0)
         if not main:
+            print("  WARNING: No main container (id=0) found — empty root timeline")
             return build_tag_show_frame() + build_tag_end()
 
         tp = to_publish(main, self._lib_to_char_idx, self.id_to_lib)
         total_frames = main.get("totalFrame", 1)
         labels = main.get("labels", [])
         actions = main.get("actions", [])
+
+        # Diagnostic: report root timeline stats
+        n_layers = len(main.get("layers", []))
+        n_chars = sum(len(l.get("characters", [])) for l in main.get("layers", []))
+        n_dict = len(tp.get("dictionary", []))
+        n_po = len(tp.get("placeObjects", []))
+        print(f"  Root timeline: {total_frames} frames, {n_layers} layers, "
+              f"{n_chars} characters, {n_dict} dict entries, {n_po} placeObjects")
 
         timeline_tags = build_timeline_tags(
             total_frames, tp, labels, actions, self._char_idx_to_swf_id,
@@ -2193,6 +2703,17 @@ class N2DCompiler:
         # 3. Auxiliary tags (Protect, SceneAndFrameLabel, SoundStreamHead2)
         if raw_aux_tags:
             all_tags.extend(raw_aux_tags)
+        else:
+            # Generate fallback auxiliary tags when rawGlobalTags is missing
+            # Protect tag (24): empty body, signals the SWF is protected
+            all_tags.extend(build_tag(24, b''))
+            # SceneAndFrameLabel (86): single scene "Scene 1" at offset 0
+            scene_body = bytearray()
+            scene_body.extend(struct.pack('<B', 1))  # scene count (encoded UB30)
+            scene_body.extend(struct.pack('<B', 0))  # scene 0 offset (encoded UB30)
+            scene_body.extend(b'Scene 1\x00')        # scene name
+            scene_body.extend(struct.pack('<B', 0))  # frame label count
+            all_tags.extend(build_tag(86, bytes(scene_body), force_long=True))
 
         # 4. All definition tags (bitmaps, shapes, sounds, fonts, morphShapes, texts, containers)
         #    Font/text auxiliary tags (73, 74, 88) are emitted inline by
@@ -2204,11 +2725,9 @@ class N2DCompiler:
             all_tags.extend(doabc_tags)
 
         # 5. SymbolClass — map exported symbols + document class
-        #    Use raw SymbolClass from OG SWF if available (preserves entry order).
-        raw_symbolclass = raw_aux_map.get(76)  # tag type 76 = SymbolClass
-        if raw_symbolclass is not None:
-            all_tags.extend(build_tag(76, raw_symbolclass))
-        else:
+        #    Always rebuild SymbolClass with new charIDs (charIDs change every
+        #    compilation so raw passthrough from the original SWF is invalid).
+        if True:
             #    For AS3, each symbol needs to map to its ABC class name.
             #    - Bitmaps: use DefineBitsLossless2 ID (bmp_id), class extends BitmapData
             #    - Sounds: use DefineSound ID, class extends Sound

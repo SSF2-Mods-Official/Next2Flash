@@ -55,10 +55,11 @@ def _get_swf_to_n2d():
 
 def _get_compile_n2d():
     global _compile_n2d
-    if _compile_n2d is None:
-        log.debug('_get_compile_n2d: lazy-importing compile_n2d module')
-        import compile_n2d as mod
-        _compile_n2d = mod
+    import compile_n2d as mod
+    import importlib
+    importlib.reload(mod)
+    _compile_n2d = mod
+    log.debug('_get_compile_n2d: (re)loaded compile_n2d module')
     return _compile_n2d
 
 

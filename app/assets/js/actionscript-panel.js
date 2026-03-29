@@ -54,6 +54,34 @@
   /* ================================================================== */
   function init() {
     _log.debug('AS Panel initializing');
+
+    /* ----- Ensure AS panel DOM elements exist ----- */
+    var jsArea = document.getElementById('controller-area-js');
+    if (jsArea && !document.getElementById('as-script-list')) {
+      var toolbar = document.createElement('div');
+      toolbar.id = 'as-panel-toolbar';
+      toolbar.innerHTML =
+        '<div class="as-search-area"><i></i>' +
+        '<input type="text" id="as-search" placeholder="Search scripts…" autocomplete="off"></div>' +
+        '<button id="as-add-script-btn">+ New Script</button>';
+      jsArea.insertBefore(toolbar, jsArea.firstChild);
+
+      var list = document.createElement('div');
+      list.id = 'as-script-list';
+      jsArea.insertBefore(list, toolbar.nextSibling);
+
+      var ec = document.createElement('div');
+      ec.id = 'as-editor-container';
+      ec.className = 'none';
+      ec.innerHTML =
+        '<div id="as-editor-header"><span id="as-editor-filename"></span>' +
+        '<span id="as-editor-expand" title="Open in new tab">\u21F1</span>' +
+        '<span id="as-editor-close" title="Close">&times;</span></div>' +
+        '<div id="as-editor"></div>';
+      jsArea.appendChild(ec);
+      _log.info('AS Panel: created missing DOM elements');
+    }
+
     elScriptList = document.getElementById('as-script-list');
     elSearch = document.getElementById('as-search');
     elAddBtn = document.getElementById('as-add-script-btn');
@@ -1208,7 +1236,12 @@
             // tool's simplified data, losing frames and tag fidelity.
             Object.keys(meta).forEach(function (k) {
               if (k === '_layerCustom' || k === '_contentHash') return;
-              if (lib[k] === undefined) {
+              // For critical roundtrip fields, overwrite if the tool's
+              // save set them to null/empty/"" (not just undefined).
+              var isCritical = (k === 'rawTagBody' || k === 'rawTagType' ||
+                k === 'swfCharId' || k === 'fontData' || k === 'fontTagType' ||
+                k === 'fontAuxTags' || k === 'totalFrame');
+              if (lib[k] === undefined || (isCritical && !lib[k] && meta[k])) {
                 lib[k] = meta[k];
                 if (k === 'rawTagBody') injectedCount++;
               }

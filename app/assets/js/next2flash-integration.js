@@ -306,7 +306,10 @@
             var blobSource = _importedN2DBlob
               ? Promise.resolve(_importedN2DBlob)
               : _loadImportedBlobFromIDB();
-            var fallback = !json.rootTimelineDefIds
+            var needsFallback = !json.rootTimelineDefIds
+              || !json.scripts || json.scripts.length === 0
+              || !json.rawGlobalTags || json.rawGlobalTags.length === 0;
+            var fallback = needsFallback
               ? blobSource.then(function (blob) {
                   return blob ? _parseN2DBlob(blob) : null;
                 })
@@ -322,26 +325,50 @@
                 if (json.swfVersion === undefined && origJson.swfVersion !== undefined) {
                   json.swfVersion = origJson.swfVersion;
                 }
+                // Restore scripts if missing
+                if ((!json.scripts || json.scripts.length === 0) && origJson.scripts && origJson.scripts.length > 0) {
+                  json.scripts = origJson.scripts;
+                  _log.info('Restored scripts from blob:', json.scripts.length);
+                }
+                // Restore rawGlobalTags if missing
+                if ((!json.rawGlobalTags || json.rawGlobalTags.length === 0) && origJson.rawGlobalTags && origJson.rawGlobalTags.length > 0) {
+                  json.rawGlobalTags = origJson.rawGlobalTags;
+                  _log.info('Restored rawGlobalTags from blob:', json.rawGlobalTags.length);
+                }
+                // Restore swfCompressed if missing
+                if (json.swfCompressed === undefined && origJson.swfCompressed !== undefined) {
+                  json.swfCompressed = origJson.swfCompressed;
+                }
                 // Restore rawTagBody for libraries that are missing it
                 if (Array.isArray(json.libraries) && Array.isArray(origJson.libraries)) {
                   var origMap = {};
                   origJson.libraries.forEach(function (lib) {
-                    if (lib && lib.rawTagBody) origMap[lib.id] = lib;
+                    if (lib) origMap[lib.id] = lib;
                   });
                   var restored = 0;
+                  var framesRestored = 0;
                   json.libraries.forEach(function (lib) {
-                    if (lib && !lib.rawTagBody && origMap[lib.id]) {
-                      lib.rawTagBody = origMap[lib.id].rawTagBody;
-                      if (origMap[lib.id].rawTagType !== undefined) lib.rawTagType = origMap[lib.id].rawTagType;
+                    if (!lib) return;
+                    var orig = origMap[lib.id];
+                    if (!orig) return;
+                    if (!lib.rawTagBody && orig.rawTagBody) {
+                      lib.rawTagBody = orig.rawTagBody;
+                      if (orig.rawTagType !== undefined) lib.rawTagType = orig.rawTagType;
+                      if (orig.swfCharId !== undefined && !lib.swfCharId) lib.swfCharId = orig.swfCharId;
+                      if (orig.fontAuxTags && !lib.fontAuxTags) lib.fontAuxTags = orig.fontAuxTags;
                       restored++;
                     }
-                    // Also restore totalFrame for root container
-                    if (lib && lib.id === 0 && lib.totalFrame === undefined && origMap[0] && origMap[0].totalFrame !== undefined) {
-                      lib.totalFrame = origMap[0].totalFrame;
+                    // Restore totalFrame for any container where tool returned 1 but original had more
+                    if ((!lib.totalFrame || lib.totalFrame <= 1) && orig.totalFrame > 1) {
+                      lib.totalFrame = orig.totalFrame;
+                      framesRestored++;
                     }
                   });
                   if (restored > 0) {
                     _log.info('Restored rawTagBody from blob for', restored, 'libraries');
+                  }
+                  if (framesRestored > 0) {
+                    _log.info('Restored totalFrame from blob for', framesRestored, 'libraries');
                   }
                 }
               }
