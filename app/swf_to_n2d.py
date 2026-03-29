@@ -42,6 +42,14 @@ from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
+# NumPy optional — used for fast palette-indexed bitmap decoding (fmt==3)
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None
+    _HAS_NUMPY = False
+
 from swf_shape_to_recodes import parse_define_shape_to_recodes, parse_define_morph_shape_to_recodes
 
 # AS3 Weaver — pure-Python AVM2/ABC decompiler
@@ -1529,6 +1537,14 @@ def decode_lossless_to_rgba(tag_type: int, body_after_char_id: bytes) -> Tuple[i
             pixel_data = decompressed[palette_bytes:]
             # Each row is padded to 4-byte boundary
             row_stride = (width + 3) & ~3
+            if _HAS_NUMPY:
+                pal = _np.frombuffer(palette, dtype=_np.uint8).reshape(-1, 4)
+                n_full = min(height, len(pixel_data) // row_stride) if row_stride else 0
+                rows = _np.frombuffer(pixel_data[:n_full * row_stride], dtype=_np.uint8).reshape(n_full, row_stride)
+                indices = _np.clip(rows[:, :width], 0, len(pal) - 1)
+                rgba_arr = _np.zeros((height, width, 4), dtype=_np.uint8)
+                rgba_arr[:n_full] = pal[indices]
+                return width, height, rgba_arr.tobytes()
             rgba = bytearray(width * height * 4)
             for y in range(height):
                 row_off = y * row_stride
@@ -1550,6 +1566,17 @@ def decode_lossless_to_rgba(tag_type: int, body_after_char_id: bytes) -> Tuple[i
             palette = decompressed[:palette_bytes]
             pixel_data = decompressed[palette_bytes:]
             row_stride = (width + 3) & ~3
+            if _HAS_NUMPY:
+                pal_rgb = _np.frombuffer(palette, dtype=_np.uint8).reshape(-1, 3)
+                pal = _np.empty((color_table_size, 4), dtype=_np.uint8)
+                pal[:, :3] = pal_rgb
+                pal[:, 3] = 255
+                n_full = min(height, len(pixel_data) // row_stride) if row_stride else 0
+                rows = _np.frombuffer(pixel_data[:n_full * row_stride], dtype=_np.uint8).reshape(n_full, row_stride)
+                indices = _np.clip(rows[:, :width], 0, len(pal) - 1)
+                rgba_arr = _np.zeros((height, width, 4), dtype=_np.uint8)
+                rgba_arr[:n_full] = pal[indices]
+                return width, height, rgba_arr.tobytes()
             rgba = bytearray(width * height * 4)
             for y in range(height):
                 row_off = y * row_stride
@@ -1961,7 +1988,9 @@ class N2DBuilder:
         step(f"Created {len(self.folder_ids)} library folders")
 
         # Phase 1: Build bitmap library entries with decoded RGBA buffers.
-        # The tool's Bitmap class needs a latin-1 string in `buffer` to render.
+        # Buffer is stored as base64 with "b64:" prefix — ~3-4x smaller than
+        # latin-1 after json.dumps(ensure_ascii=True) + quote() encoding.
+        # The JS Bitmap setter detects the prefix and decodes via atob().
         bitmap_count = 0
         decode_ok = 0
 
@@ -1974,7 +2003,7 @@ class N2DBuilder:
 
             width, height = self.bitmap_dims.get(cid, (0, 0))
 
-            # Decode RGBA from raw SWF tag data
+            # Decode RGBA from raw SWF tag data (once — cached in buffer_str)
             buffer_str = ''
             if cid in self.raw_tag_data:
                 tag_type, body = self.raw_tag_data[cid]
@@ -1989,7 +2018,8 @@ class N2DBuilder:
                     if dw and dh:
                         width, height = dw, dh
                 if rgba:
-                    buffer_str = rgba.decode('latin-1')
+                    # Store as "b64:<base64>" — JS setter handles the prefix
+                    buffer_str = 'b64:' + base64.b64encode(rgba).decode('ascii')
                     decode_ok += 1
 
             entry = {
@@ -2903,8 +2933,12 @@ class N2DBuilder:
             # Try pre-decoded buffer first
             buf = lib.get('buffer', '')
             if buf:
+                if buf.startswith('b64:'):
+                    rgba_bytes = base64.b64decode(buf[4:])
+                else:
+                    rgba_bytes = buf.encode('latin-1')
                 bitmap_map[lid] = {
-                    'buffer': list(buf.encode('latin-1')),
+                    'buffer': list(rgba_bytes),
                     'width': w,
                     'height': h,
                 }
@@ -3095,111 +3129,131 @@ def save_project_folder(data: dict, folder_path: str):
 
     # ── Extract bitmaps ──────────────────────────────────────────────
     step("Extracting bitmaps...")
-    for lib in data.get('libraries', []):
-        if not lib or lib.get('type') != 'bitmap':
-            continue
+
+    def _extract_bitmap(lib):
+        """Decode one bitmap entry and write PNG/JPG to bitmaps_dir.
+        Returns 1 if saved, 0 otherwise.  Modifies lib['externalFile'] in place.
+        """
         cid = lib.get('swfCharId', lib.get('id', 0))
         name = _safe_filename(lib.get('name', f'bitmap_{cid}'))
         raw_b64 = lib.get('rawTagBody', '')
         tag_type = lib.get('rawTagType', 36)
 
         if not raw_b64:
-            continue
+            return 0
 
         raw_body = base64.b64decode(raw_b64)
 
-        # JPEG types → extract as .jpg directly
-        if tag_type in (TAG_DEFINE_BITS, TAG_DEFINE_BITS_JPEG2,
-                        TAG_DEFINE_BITS_JPEG3, TAG_DEFINE_BITS_JPEG4):
-            # For JPEG3/4 with alpha, we need PNG; plain JPEG2 → jpg
-            if tag_type == TAG_DEFINE_BITS_JPEG2:
-                # raw_body is tag body *after* charId — SWF JPEG2 body = image data
-                img_data = raw_body
-                # strip erroneous prefix
-                if len(img_data) >= 4 and img_data[:4] == b'\xff\xd9\xff\xd8':
-                    img_data = img_data[4:]
-                fname = f"{cid}_{name}.jpg"
-                fpath = os.path.join(bitmaps_dir, fname)
-                with open(fpath, 'wb') as f:
-                    f.write(img_data)
-                lib['externalFile'] = f'bitmaps/{fname}'
-                bitmap_count += 1
-                continue
+        # JPEG2 → write raw JPEG bytes directly (already efficient, no decode)
+        if tag_type == TAG_DEFINE_BITS_JPEG2:
+            img_data = raw_body
+            if len(img_data) >= 4 and img_data[:4] == b'\xff\xd9\xff\xd8':
+                img_data = img_data[4:]
+            fname = f"{cid}_{name}.jpg"
+            with open(os.path.join(bitmaps_dir, fname), 'wb') as f:
+                f.write(img_data)
+            lib['externalFile'] = f'bitmaps/{fname}'
+            return 1
 
-            # JPEG3/4 have alpha — decode to RGBA and save as PNG
-            full_tag_data = struct.pack('<H', cid) + raw_body
-            w, h, rgba = decode_jpeg_to_rgba(tag_type, full_tag_data)
-            if w > 0 and h > 0 and rgba:
-                fname = f"{cid}_{name}.png"
-                fpath = os.path.join(bitmaps_dir, fname)
+        # All other types → save as PNG
+        fname = f"{cid}_{name}.png"
+        fpath = os.path.join(bitmaps_dir, fname)
+
+        # Fast path: reuse pre-decoded RGBA from build_all() — avoids third decode
+        buf = lib.get('buffer', '')
+        w = lib.get('width', 0)
+        h = lib.get('height', 0)
+        if buf and w and h:
+            if buf.startswith('b64:'):
+                rgba = base64.b64decode(buf[4:])
+            else:
+                rgba = buf.encode('latin-1')
+            if rgba and len(rgba) == w * h * 4:
                 try:
                     from PIL import Image
-                    img = Image.frombytes('RGBA', (w, h), rgba)
-                    img.save(fpath, 'PNG')
+                    Image.frombytes('RGBA', (w, h), rgba).save(fpath)
                     lib['externalFile'] = f'bitmaps/{fname}'
-                    bitmap_count += 1
+                    return 1
                 except ImportError:
-                    step(f"  [WARN] PIL unavailable, cannot save PNG for bitmap {cid}")
-                continue
+                    pass  # fall through to raw-decode path
 
-        # Lossless types → decode to RGBA and save as PNG
+        # Fallback: decode from raw SWF tag body
+        rgba = w = h = b''
         if tag_type in (TAG_DEFINE_BITS_LOSSLESS, TAG_DEFINE_BITS_LOSSLESS2):
             w, h, rgba = decode_lossless_to_rgba(tag_type, raw_body)
-            if w > 0 and h > 0 and rgba:
-                fname = f"{cid}_{name}.png"
-                fpath = os.path.join(bitmaps_dir, fname)
-                try:
-                    from PIL import Image
-                    img = Image.frombytes('RGBA', (w, h), rgba)
-                    img.save(fpath, 'PNG')
-                    lib['externalFile'] = f'bitmaps/{fname}'
-                    bitmap_count += 1
-                except ImportError:
-                    step(f"  [WARN] PIL unavailable, cannot save PNG for bitmap {cid}")
-            continue
+        elif tag_type in (TAG_DEFINE_BITS, TAG_DEFINE_BITS_JPEG3, TAG_DEFINE_BITS_JPEG4):
+            full_tag_data = struct.pack('<H', cid) + raw_body
+            w, h, rgba = decode_jpeg_to_rgba(tag_type, full_tag_data)
+
+        if w and h and rgba:
+            try:
+                from PIL import Image
+                Image.frombytes('RGBA', (w, h), rgba).save(fpath)
+                lib['externalFile'] = f'bitmaps/{fname}'
+                return 1
+            except ImportError:
+                step(f"  [WARN] PIL unavailable, cannot save PNG for bitmap {cid}")
+        return 0
+
+    bitmap_libs = [lib for lib in data.get('libraries', [])
+                   if lib and lib.get('type') == 'bitmap']
+    if bitmap_libs:
+        with ThreadPoolExecutor(max_workers=min(8, len(bitmap_libs))) as ex:
+            bitmap_count = sum(ex.map(_extract_bitmap, bitmap_libs))
 
     step(f"Extracted {bitmap_count} bitmaps")
 
     # ── Extract sounds ───────────────────────────────────────────────
     step("Extracting sounds...")
-    for lib in data.get('libraries', []):
-        if not lib or lib.get('type') != 'sound':
-            continue
+
+    def _detect_audio_ext(data: bytes) -> str:
+        """Detect audio format from magic bytes."""
+        if data[:3] == b'ID3' or (len(data) >= 2 and data[0] == 0xff and data[1] & 0xe0 == 0xe0):
+            return 'mp3'
+        if data[:4] == b'RIFF':
+            return 'wav'
+        if data[:4] == b'OggS':
+            return 'ogg'
+        return 'bin'
+
+    def _extract_sound(lib):
+        """Write one sound entry to sounds_dir. Returns 1 if saved, 0 otherwise."""
         cid = lib.get('swfCharId', lib.get('id', 0))
         name = _safe_filename(lib.get('name', f'sound_{cid}'))
+
+        # Fast path: reuse pre-decoded/pre-converted buffer from build_all()
+        buf = lib.get('buffer', '')
+        if buf:
+            audio_bytes = base64.b64decode(buf)
+            ext = _detect_audio_ext(audio_bytes)
+            fname = f"{cid}_{name}.{ext}"
+            fpath = os.path.join(sounds_dir, fname)
+            with open(fpath, 'wb') as f:
+                f.write(audio_bytes)
+            lib['externalFile'] = f'sounds/{fname}'
+            return 1
+
+        # Fallback: decode from raw SWF tag body
         raw_b64 = lib.get('rawTagBody', '')
-
         if not raw_b64:
-            continue
-
+            return 0
         raw_body = base64.b64decode(raw_b64)
         fmt_name, audio_bytes, _rate = extract_sound_buffer(raw_body)
-
         if not audio_bytes:
-            continue
-
-        if fmt_name == 'mp3':
-            fname = f"{cid}_{name}.mp3"
-        elif fmt_name == 'wav':
-            fname = f"{cid}_{name}.wav"
-        elif fmt_name == 'nellymoser':
-            # Try converting Nellymoser → MP3 via ffmpeg
-            mp3_bytes = convert_nellymoser_to_mp3(audio_bytes, _rate)
-            if mp3_bytes:
-                fname = f"{cid}_{name}.mp3"
-                audio_bytes = mp3_bytes
-            else:
-                step(f"  [WARN] ffmpeg unavailable, storing raw Nellymoser for sound {cid}")
-                fname = f"{cid}_{name}.nellymoser.bin"
-        else:
-            # Store raw data with format hint
-            fname = f"{cid}_{name}.{fmt_name}.bin"
-
+            return 0
+        ext = 'mp3' if fmt_name == 'mp3' else 'wav' if fmt_name == 'wav' else 'bin'
+        fname = f"{cid}_{name}.{ext}"
         fpath = os.path.join(sounds_dir, fname)
         with open(fpath, 'wb') as f:
             f.write(audio_bytes)
         lib['externalFile'] = f'sounds/{fname}'
-        sound_count += 1
+        return 1
+
+    sound_libs = [lib for lib in data.get('libraries', [])
+                  if lib and lib.get('type') == 'sound']
+    if sound_libs:
+        with ThreadPoolExecutor(max_workers=min(8, len(sound_libs))) as ex:
+            sound_count = sum(ex.map(_extract_sound, sound_libs))
 
     step(f"Extracted {sound_count} sounds")
 

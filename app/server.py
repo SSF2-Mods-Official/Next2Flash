@@ -461,34 +461,58 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             name = os.path.splitext(filename)[0] if filename else "converted"
             log.info('_handle_swf_to_project: converting %s (%d bytes)', filename, len(swf_data))
 
+            _t0 = time.time()
+            def _tick(label):
+                elapsed = time.time() - _t0
+                print(f"[IMPORT {elapsed:6.2f}s] {label}", flush=True)
+
+            _tick(f"start — {len(swf_data):,} bytes")
+
             mod = _get_swf_to_n2d()
 
             header, tags = mod.parse_swf(swf_data)
+            _tick(f"parse_swf: {len(tags)} tags")
+
             builder = mod.N2DBuilder(header, name=name)
             builder.catalog_swf_tags(tags)
+            _tick(f"catalog_swf_tags: {len(builder.char_types)} chars, "
+                  f"{len(builder.global_raw_tags)} raw tags")
 
             scripts, frame_scripts = mod.decompile_all_scripts(builder.global_raw_tags)
             builder.frame_scripts = frame_scripts
             if scripts:
                 builder.scripts.extend(scripts)
+            _tick(f"decompile_all_scripts: {len(scripts)} scripts, "
+                  f"{len(frame_scripts)} frames with scripts")
 
             builder.build_all()
+            _tick("build_all")
+
             builder.build_main_timeline(tags)
+            _tick("build_main_timeline")
+
             builder._embed_bitmap_data_in_recodes()
+            _tick("_embed_bitmap_data_in_recodes")
 
             n2d_json = builder.to_n2d_json()
+            _tick(f"to_n2d_json: {len(n2d_json.get('libraries', []))} libs")
 
             # Save as project folder
             project_dir = os.path.join(SERVER_DIR, "converted", name)
             mod.save_project_folder(n2d_json, project_dir)
+            _tick("save_project_folder")
 
             with self._project_lock:
                 Next2FlashHandler._current_project_dir = project_dir
 
-            # Return zlib-compressed N2D for loading into the tool
+            # Return zlib-compressed N2D for loading into the tool.
+            # Tool pipeline: zlib inflate → decodeURIComponent → JSON.parse.
+            # Only % needs encoding (%25); full quote() is ~100x slower for no benefit.
             json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
-            url_encoded = quote(json_str, safe="")
+            _tick(f"json.dumps: {len(json_str):,} chars")
+            url_encoded = json_str.replace('%', '%25')
             compressed = zlib.compress(url_encoded.encode("ascii"), 1)
+            _tick(f"zlib.compress: {len(compressed):,} bytes → DONE")
 
             self.send_response(200)
             self._cors_headers()

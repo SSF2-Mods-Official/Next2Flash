@@ -145,14 +145,26 @@ class Bitmap extends Instance
 
             case "string":
                 if (!this._$binary) {
-                    let length = binary.length;
+                    if (binary.startsWith("b64:")) {
+                        // Base64-encoded RGBA from the N2D import pipeline.
+                        // Faster to transfer than latin-1 through URL-encoding.
+                        // _$binary stays "" so get buffer() computes it lazily.
+                        const decoded = atob(binary.slice(4));
+                        const length  = decoded.length;
+                        this._$buffer = new Uint8Array(length);
+                        for (let idx = 0; idx < length; ++idx) {
+                            this._$buffer[idx] = decoded.charCodeAt(idx);
+                        }
+                    } else {
+                        let length = binary.length;
 
-                    this._$buffer = new Uint8Array(length);
-                    for (let idx = 0; idx < length; ++idx) {
-                        this._$buffer[idx] = binary.charCodeAt(idx) & 0xff;
+                        this._$buffer = new Uint8Array(length);
+                        for (let idx = 0; idx < length; ++idx) {
+                            this._$buffer[idx] = binary.charCodeAt(idx) & 0xff;
+                        }
+
+                        this._$binary = binary;
                     }
-
-                    this._$binary = binary;
                 }
                 break;
 
