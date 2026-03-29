@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Script Editor — Next2Flash</title>
+<style>
+html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #1e1e1e; color: #ccc; font-family: Arial, sans-serif; }
+#bar { display: flex; align-items: center; padding: 6px 12px; background: #2a2a2a; border-bottom: 1px solid #444; }
+#fname { flex: 1; font: bold 13px/1.4 Arial, sans-serif; color: #90caf9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#save-btn { padding: 4px 14px; background: #3a6; color: #fff; border: none; border-radius: 3px; cursor: pointer; font: bold 12px Arial; margin-right: 8px; }
+#save-btn:hover { background: #4b7; }
+#status { font: 11px Arial; color: #888; min-width: 60px; text-align: right; }
+#editor { position: absolute; top: 38px; left: 0; right: 0; bottom: 0; }
+#editor-ta { width: 100%; height: 100%; background: #272822; color: #f8f8f2; border: none; padding: 8px; font: 13px/1.5 "Courier New", monospace; resize: none; outline: none; box-sizing: border-box; }
+#loading { display: flex; align-items: center; justify-content: center; height: 100%; font: 16px Arial; color: #888; }
+</style>
+</head>
+<body>
+<div id="bar">
+    <span id="fname">Loading…</span>
+    <button id="save-btn">Save (Ctrl+S)</button>
+    <span id="status">Loading</span>
+</div>
+<div id="editor"><div id="loading">Loading script…</div></div>
+
+<script src="assets/js/ace.js"></script>
+<script src="assets/js/ext-language_tools.js"></script>
+<script src="assets/js/ext-searchbox.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    // Read script index from URL query: ?index=N
+    var params = new URLSearchParams(window.location.search);
+    var scriptIndex = parseInt(params.get('index'), 10);
+
+    var fnameEl = document.getElementById('fname');
+    var statusEl = document.getElementById('status');
+    var editorDiv = document.getElementById('editor');
+    var loadingEl = document.getElementById('loading');
+
+    // Load scripts from localStorage (same origin as main app)
+    var scripts = [];
+    try {
+        var raw = localStorage.getItem('n2d_as_scripts');
+        if (raw) scripts = JSON.parse(raw);
+    } catch (e) { /* ignore */ }
+
+    if (isNaN(scriptIndex) || scriptIndex < 0 || scriptIndex >= scripts.length) {
+        fnameEl.textContent = 'Error';
+        loadingEl.textContent = 'Script not found (index=' + scriptIndex + ', available=' + scripts.length + ')';
+        statusEl.textContent = 'Error';
+        statusEl.style.color = '#e74c3c';
+        return;
+    }
+
+    var script = scripts[scriptIndex];
+    var path = script.path || script.name || 'unknown';
+    var source = script.source || '';
+    var isDirty = false;
+
+    document.title = script.name + ' — Next2Flash Editor';
+    fnameEl.textContent = path;
+    statusEl.textContent = 'Ready';
+
+    // Remove loading placeholder
+    if (loadingEl) loadingEl.remove();
+
+    // Set up Ace editor (fallback to textarea)
+    var editor = null, ta = null;
+    try {
+        editor = ace.edit('editor');
+        editor.setTheme('ace/theme/monokai');
+        editor.session.setMode('ace/mode/actionscript');
+        editor.setOptions({
+            enableBasicAutocompletion: true,
+            enableSnippets: true,
+            enableLiveAutocompletion: true,
+            fontSize: '13px',
+            showPrintMargin: false,
+            wrap: true
+        });
+        editor.setValue(source, -1);
+        editor.focus();
+        editor.on('change', function () {
+            isDirty = true;
+            statusEl.textContent = 'Modified';
+            statusEl.style.color = '#f0ad4e';
+        });
+        editor.commands.addCommand({
+            name: 'save',
+            bindKey: { win: 'Ctrl-S', mac: 'Command-S' },
+            exec: save
+        });
+        editor.commands.addCommand({
+            name: 'find',
+            bindKey: { win: 'Ctrl-F', mac: 'Command-F' },
+            exec: function (e) {
+                ace.config.loadModule('ace/ext/searchbox', function (s) { if (s && s.Search) s.Search(e); });
+            }
+        });
+    } catch (e) {
+        // Fallback textarea
+        ta = document.createElement('textarea');
+        ta.id = 'editor-ta';
+        ta.value = source;
+        ta.spellcheck = false;
+        editorDiv.innerHTML = '';
+        editorDiv.appendChild(ta);
+        ta.focus();
+        ta.addEventListener('input', function () {
+            isDirty = true;
+            statusEl.textContent = 'Modified';
+            statusEl.style.color = '#f0ad4e';
+        });
+        ta.addEventListener('keydown', function (ev) {
+            if ((ev.ctrlKey || ev.metaKey) && ev.key === 's') {
+                ev.preventDefault();
+                save();
+            }
+        });
+    }
+
+    function save() {
+        var val = editor ? editor.getValue() : ta.value;
+
+        // Update localStorage directly (same origin)
+        try {
+            var stored = localStorage.getItem('n2d_as_scripts');
+            if (stored) {
+                var arr = JSON.parse(stored);
+                if (arr[scriptIndex]) {
+                    arr[scriptIndex].source = val;
+                    localStorage.setItem('n2d_as_scripts', JSON.stringify(arr));
+                }
+            }
+        } catch (e) { /* fallthrough to postMessage */ }
+
+        // Also notify opener window
+        if (window.opener && !window.opener.closed) {
+            window.opener.postMessage({
+                type: 'n2d-as-script-save',
+                path: path,
+                source: val
+            }, '*');
+        }
+
+        isDirty = false;
+        statusEl.textContent = 'Saved';
+        statusEl.style.color = '#2ecc71';
+        setTimeout(function () {
+            statusEl.textContent = 'Ready';
+            statusEl.style.color = '#888';
+        }, 2000);
+    }
+
+    document.getElementById('save-btn').addEventListener('click', save);
+
+    // Auto-save on close
+    window.addEventListener('beforeunload', function () {
+        if (isDirty) save();
+    });
+
+    // Listen for updates from main window
+    window.addEventListener('message', function (e) {
+        if (e.data && e.data.type === 'n2d-as-script-update' && e.data.path === path) {
+            if (editor) editor.setValue(e.data.source, -1);
+            else if (ta) ta.value = e.data.source;
+            isDirty = false;
+        }
+    });
+
+    // Periodically sync from localStorage (in case edits happen in main window)
+    setInterval(function () {
+        if (isDirty) return; // Don't overwrite unsaved changes
+        try {
+            var stored = localStorage.getItem('n2d_as_scripts');
+            if (stored) {
+                var arr = JSON.parse(stored);
+                if (arr[scriptIndex] && arr[scriptIndex].source !== (editor ? editor.getValue() : ta.value)) {
+                    if (editor) editor.setValue(arr[scriptIndex].source, -1);
+                    else if (ta) ta.value = arr[scriptIndex].source;
+                }
+            }
+        } catch (e) { /* ignore */ }
+    }, 3000);
+})();
+</script>
+</body>
+</html>

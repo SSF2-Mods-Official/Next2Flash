@@ -1,0 +1,2296 @@
+#!/usr/bin/env python3
+"""
+Compile a next2D .n2D file into an AS3 SWF.
+
+Usage:
+    python compile_n2d.py <input.n2D> -o <output.swf> --shared <shared_dir>
+
+This script:
+  1. Loads the .n2D file (zlib-compressed, URI-encoded JSON)
+  2. Converts all libraries → SWF tags (bitmaps, shapes, sounds, movieclips)
+  3. Compiles AS3 code from the shared directory with mxmlc
+  4. Assembles the final SWF
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import io
+import json
+import logging
+import os
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import zlib
+from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import unquote
+
+log = logging.getLogger(__name__)
+
+from swf_writer import (
+    NEXT2D_BLEND_MAP,
+    BitWriter,
+    TAG_DEFINE_SHAPE3,
+    TAG_DO_ABC,
+    _nbits_signed_list,
+    build_define_sprite,
+    build_file_attributes,
+    build_frame_label,
+    build_place_object2,
+    build_place_object3,
+    build_remove_object2,
+    build_set_background_color,
+    build_swf_file,
+    build_symbol_class,
+    build_export_assets,
+    build_tag,
+    build_tag_end,
+    build_tag_show_frame,
+    encode_filter_list,
+    twips,
+    write_cxform_alpha,
+    write_matrix,
+    write_rect,
+)
+from bitmap_converter import build_define_bits_lossless2
+from shape_converter import (
+    build_define_shape3,
+    build_define_morph_shape,
+    parse_next2d_shape_buffer,
+)
+from text_converter import build_define_edit_text
+
+# SWF tag IDs not imported above
+TAG_DEFINE_SOUND = 14
+
+
+def _decode_raw_body(s: str) -> bytes:
+    """Decode a raw binary body string — supports both base64 and latin-1 encoding.
+
+    Base64 strings contain only [A-Za-z0-9+/=] and are tried first.
+    Falls back to latin-1 for backward compatibility with older N2D files.
+    """
+    if not s:
+        return b''
+    try:
+        return base64.b64decode(s)
+    except Exception:
+        # Fallback: legacy latin-1 encoding
+        return bytes(ord(c) for c in s)
+
+# ── SDK detection ────────────────────────────────────────────────────────
+SDK_SEARCH_PATHS = [
+    r"C:\aflex_sdk",
+    r"C:\flex_sdk",
+    r"C:\apache-flex-sdk",
+]
+
+
+def find_sdk() -> Optional[str]:
+    env = os.environ.get("FLEX_HOME") or os.environ.get("AIR_SDK_HOME")
+    if env and os.path.isdir(env):
+        return env
+    for p in SDK_SEARCH_PATHS:
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+# ── n2D file loading ─────────────────────────────────────────────────────
+
+def load_n2d(path: str) -> dict:
+    """Load an .n2D file → parsed JSON dict.
+
+    Supports:
+      - ZIP format (PK magic): project.json + bitmaps/*.bin entries
+      - Legacy zlib format (full URI-encoded or minimal % escaping)
+    """
+    log.info('load_n2d: loading %s', path)
+    with open(path, "rb") as f:
+        raw = f.read()
+
+    # Detect ZIP format by magic bytes
+    if raw[:2] == b'PK':
+        import zipfile as _zipfile
+        import io as _io
+        with _zipfile.ZipFile(_io.BytesIO(raw)) as zf:
+            data = json.loads(zf.read('project.json'))
+            # Bitmap pixel buffers are NOT needed for SWF compilation
+            # (rawTagBody contains the original compressed bitmap data).
+            return data
+
+    decompressed = zlib.decompress(raw)
+    text = decompressed.decode("utf-8")
+    # Try unquote first (handles both full URI-encoding and minimal % escaping)
+    try:
+        return json.loads(unquote(text))
+    except (json.JSONDecodeError, ValueError):
+        # If unquote produced invalid JSON, try direct parse
+        return json.loads(text)
+
+
+# ── WAV → DefineSound ────────────────────────────────────────────────────
+
+def build_define_sound(char_id: int, wav_bytes: bytes) -> bytes:
+    """Convert raw WAV bytes to a DefineSound tag (uncompressed little-endian PCM)."""
+    log.debug("build_define_sound: char_id=%d, wav_bytes=%d", char_id, len(wav_bytes))
+    assert wav_bytes[:4] == b"RIFF", "Not a WAV file"
+    assert wav_bytes[8:12] == b"WAVE", "Not a WAV file"
+
+    audio_format = 1
+    num_channels = 1
+    sample_rate = 22050
+    bits_per_sample = 16
+    pcm_data = b""
+
+    pos = 12
+    while pos < len(wav_bytes) - 8:
+        chunk_id = wav_bytes[pos:pos + 4]
+        chunk_size = struct.unpack_from("<I", wav_bytes, pos + 4)[0]
+        if chunk_id == b"fmt ":
+            audio_format = struct.unpack_from("<H", wav_bytes, pos + 8)[0]
+            num_channels = struct.unpack_from("<H", wav_bytes, pos + 10)[0]
+            sample_rate = struct.unpack_from("<I", wav_bytes, pos + 12)[0]
+            bits_per_sample = struct.unpack_from("<H", wav_bytes, pos + 22)[0]
+        elif chunk_id == b"data":
+            pcm_data = wav_bytes[pos + 8:pos + 8 + chunk_size]
+            break
+        pos += 8 + chunk_size
+
+    # Map sample rate to SWF rate code
+    rate_map = {5512: 0, 11025: 1, 22050: 2, 44100: 3}
+    swf_rate = 3  # default 44100
+    for sr, code in sorted(rate_map.items()):
+        if sample_rate <= sr:
+            swf_rate = code
+            break
+
+    is_16bit = 1 if bits_per_sample == 16 else 0
+    is_stereo = 1 if num_channels >= 2 else 0
+    # Format 3 = uncompressed little-endian
+    flags = (3 << 4) | (swf_rate << 2) | (is_16bit << 1) | is_stereo
+
+    bytes_per_sample = (bits_per_sample // 8) * num_channels
+    sample_count = len(pcm_data) // bytes_per_sample if bytes_per_sample > 0 else 0
+
+    body = io.BytesIO()
+    body.write(struct.pack("<H", char_id))
+    body.write(struct.pack("<B", flags))
+    body.write(struct.pack("<I", sample_count))
+    body.write(pcm_data)
+    return build_tag(TAG_DEFINE_SOUND, body.getvalue())
+
+
+# ── toPublish equivalent ─────────────────────────────────────────────────
+
+def _get_place(places_list: List[dict], frame: int) -> Optional[dict]:
+    """Return the place data for `frame` (nearest earlier keyframe)."""
+    best = None
+    for pl in places_list:
+        if pl["frame"] <= frame:
+            if best is None or pl["frame"] > best["frame"]:
+                best = pl
+    return best
+
+
+def _has_exact_place(places_list: List[dict], frame: int) -> bool:
+    return any(pl["frame"] == frame for pl in places_list)
+
+
+def to_publish(container: dict, lib_to_char_idx: Dict[int, int],
+               id_to_lib: Optional[Dict[int, dict]] = None) -> dict:
+    """
+    Python port of the tool's toPublish() method.
+
+    Converts layers/characters/places → controller/dictionary/placeMap/placeObjects
+    that the SWF timeline builder expects.
+    """
+    log.debug("to_publish: container id=%s layers=%d", container.get('id'), len(container.get('layers', [])))
+    # Build set of morphShape lib IDs for ratio computation
+    morph_lib_ids: Set[int] = set()
+    if id_to_lib:
+        for lid, lib in id_to_lib.items():
+            if lib.get("isMorphShape") or lib.get("rawTagType") in (46, 84):
+                morph_lib_ids.add(lid)
+    layers = container.get("layers", [])
+    dictionary: List[dict] = []
+    # Use dicts keyed by frame to build sparse arrays
+    ctrl: Dict[int, Dict[int, int]] = {}   # frame → {depth: dict_idx}
+    pmap: Dict[int, Dict[int, int]] = {}   # frame → {depth: po_idx}
+    place_objects: List[dict] = []
+
+    p = 0  # accumulated depth offset across layers
+
+    # Iterate layers bottom-to-top (reversed)
+    for layer in reversed(layers):
+        if layer.get("disable", False):
+            p += 1
+            continue
+        if layer.get("mode") == 3:  # GUIDE
+            p += 1
+            continue
+
+        # Use original SWF depth if preserved, else sequential fallback
+        swf_depth_val = layer.get('swfDepth')
+        if swf_depth_val is not None:
+            layer_depth = swf_depth_val - 1  # convert 1-based SWF depth to 0-based key
+        else:
+            layer_depth = p
+
+        characters = layer.get("characters", [])
+
+        for char in characters:
+            dict_idx = len(dictionary)
+            lib_id = char["libraryId"]
+            char_idx = lib_to_char_idx.get(lib_id)
+            if char_idx is None:
+                # Referenced library not in character map — skip
+                continue
+
+            sf = char["startFrame"]
+            ef = char["endFrame"]
+
+            dictionary.append({
+                "name": char.get("name", ""),
+                "characterId": char_idx,
+                "startFrame": sf,
+                "endFrame": ef,
+                "clipDepth": 0,
+                "reinstated": char.get("reinstated", False),
+            })
+
+            places_list = char.get("places", [])
+            last_po_idx = 0
+
+            # Check if this character is a morph shape
+            is_morph = lib_id in morph_lib_ids
+            morph_tween_start = sf  # frame where this morph tween begins
+
+            for frame in range(sf, ef):
+                place = _get_place(places_list, frame)
+                if place is None:
+                    continue
+
+                if frame not in ctrl:
+                    ctrl[frame] = {}
+                if frame not in pmap:
+                    pmap[frame] = {}
+
+                # If exact keyframe, create new placeObject
+                if _has_exact_place(places_list, frame):
+                    last_po_idx = len(place_objects)
+                    # Only include colorTransform when actually present and
+                    # non-identity so the PlaceObject has_cx flag matches OG.
+                    raw_ct = place.get("colorTransform")
+                    if raw_ct == [1, 1, 1, 1, 0, 0, 0, 0] or raw_ct == [1.0, 1.0, 1.0, 1.0, 0, 0, 0, 0]:
+                        raw_ct = None
+                    po_entry = {
+                        "matrix": place.get("matrix", [1, 0, 0, 1, 0, 0]),
+                        "colorTransform": raw_ct,
+                        "blendMode": place.get("blendMode", "normal"),
+                        "surfaceFilterList": None,
+                    }
+                    # Pass through ratio from OG PlaceObject if stored
+                    if place.get("ratio") is not None:
+                        po_entry["ratio"] = place["ratio"]
+                    # For morph shapes, compute ratio based on frame
+                    # within the tween span
+                    elif is_morph:
+                        morph_dur = ef - sf
+                        if morph_dur > 1:
+                            frame_in_tween = frame - morph_tween_start
+                            po_entry["ratio"] = int(65536 * frame_in_tween / morph_dur)
+                        else:
+                            po_entry["ratio"] = 0
+                    place_objects.append(po_entry)
+                elif is_morph:
+                    # Non-keyframe in morph tween: emit a new placeObject
+                    # with updated ratio
+                    morph_dur = ef - sf
+                    frame_in_tween = frame - morph_tween_start
+                    ratio_val = int(65536 * frame_in_tween / morph_dur)
+                    last_po_idx = len(place_objects)
+                    raw_ct_m = place.get("colorTransform")
+                    if raw_ct_m == [1, 1, 1, 1, 0, 0, 0, 0] or raw_ct_m == [1.0, 1.0, 1.0, 1.0, 0, 0, 0, 0]:
+                        raw_ct_m = None
+                    place_objects.append({
+                        "matrix": place.get("matrix", [1, 0, 0, 1, 0, 0]),
+                        "colorTransform": raw_ct_m,
+                        "blendMode": place.get("blendMode", "normal"),
+                        "surfaceFilterList": None,
+                        "ratio": ratio_val,
+                    })
+
+                depth = layer_depth + place.get("depth", 0)
+                ctrl[frame][depth] = dict_idx
+                pmap[frame][depth] = last_po_idx
+
+        p += 1
+
+    # Build compacted arrays
+    if not ctrl:
+        return {
+            "dictionary": [], "controller": [],
+            "placeMap": [], "placeObjects": [],
+        }
+
+    max_frame = max(ctrl.keys())
+    controller_out: List[Optional[List]] = [None] * (max_frame + 1)
+    placemap_out: List[Optional[List]] = [None] * (max_frame + 1)
+    depthkeys_out: List[Optional[List]] = [None] * (max_frame + 1)
+
+    for frame in range(1, max_frame + 1):
+        if frame in ctrl:
+            # Sort by depth to maintain consistent ordering
+            depths = sorted(ctrl[frame].keys())
+            controller_out[frame] = [ctrl[frame][d] for d in depths]
+            placemap_out[frame] = [pmap[frame][d] for d in depths]
+            depthkeys_out[frame] = list(depths)
+
+    return {
+        "dictionary": dictionary,
+        "controller": controller_out,
+        "placeMap": placemap_out,
+        "placeObjects": place_objects,
+        "depthKeys": depthkeys_out,
+    }
+
+
+# ── Bitmap → DefineShape3 with bitmap fill ───────────────────────────────
+
+def build_bitmap_fill_shape(
+    shape_id: int, bitmap_id: int,
+    w: int, h: int,
+) -> bytes:
+    """Build a DefineShape3 that renders a bitmap fill covering w×h pixels."""
+    log.debug("build_bitmap_fill_shape: shape_id=%d bitmap_id=%d %dx%d", shape_id, bitmap_id, w, h)
+    xmin_tw = 0
+    ymin_tw = 0
+    xmax_tw = twips(w)
+    ymax_tw = twips(h)
+
+    body = io.BytesIO()
+    body.write(struct.pack("<H", shape_id))
+    body.write(write_rect(xmin_tw, xmax_tw, ymin_tw, ymax_tw))
+
+    # Fill style array: 1 clipped bitmap fill
+    body.write(struct.pack("<B", 1))       # count = 1
+    body.write(struct.pack("<B", 0x41))    # type = clipped bitmap (non-smoothed)
+    body.write(struct.pack("<H", bitmap_id))
+    # Bitmap fill matrix: identity at 20 twips/pixel
+    body.write(write_matrix(20.0, 0, 0, 20.0, 0, 0))
+
+    # Line style array: empty
+    body.write(struct.pack("<B", 0))
+
+    # Shape records: rectangle
+    bw = BitWriter()
+    num_fill_bits = 1
+    num_line_bits = 0
+    bw.write_ub(4, num_fill_bits)
+    bw.write_ub(4, num_line_bits)
+
+    # StyleChange: move to (0, 0), set FillStyle0 = 1
+    bw.write_ub(1, 0)  # non-edge
+    bw.write_ub(5, 0x03)  # StateMoveTo + StateFillStyle0
+    bw.write_ub(5, 1)  # MoveBits = 1
+    bw.write_sb(1, 0)
+    bw.write_sb(1, 0)
+    bw.write_ub(num_fill_bits, 1)  # FillStyle0 = 1
+
+    # Line right (dx = xmax_tw)
+    dx = xmax_tw
+    bw.write_ub(1, 1); bw.write_ub(1, 1)  # edge, straight
+    nb = max(_nbits_signed_list([dx]), 2) - 2
+    bw.write_ub(4, nb)
+    bw.write_ub(1, 0); bw.write_ub(1, 0)  # horiz
+    bw.write_sb(nb + 2, dx)
+
+    # Line down (dy = ymax_tw)
+    dy = ymax_tw
+    bw.write_ub(1, 1); bw.write_ub(1, 1)
+    nb = max(_nbits_signed_list([dy]), 2) - 2
+    bw.write_ub(4, nb)
+    bw.write_ub(1, 0); bw.write_ub(1, 1)  # vert
+    bw.write_sb(nb + 2, dy)
+
+    # Line left (dx = -xmax_tw)
+    bw.write_ub(1, 1); bw.write_ub(1, 1)
+    nb = max(_nbits_signed_list([-dx]), 2) - 2
+    bw.write_ub(4, nb)
+    bw.write_ub(1, 0); bw.write_ub(1, 0)  # horiz
+    bw.write_sb(nb + 2, -dx)
+
+    # Line up (dy = -ymax_tw)
+    bw.write_ub(1, 1); bw.write_ub(1, 1)
+    nb = max(_nbits_signed_list([-dy]), 2) - 2
+    bw.write_ub(4, nb)
+    bw.write_ub(1, 0); bw.write_ub(1, 1)  # vert
+    bw.write_sb(nb + 2, -dy)
+
+    # End shape
+    bw.write_ub(6, 0)
+    body.write(bw.get_bytes())
+
+    return build_tag(TAG_DEFINE_SHAPE3, body.getvalue())
+
+
+# ── Timeline builder ─────────────────────────────────────────────────────
+
+def build_timeline_tags(
+    total_frames: int,
+    tp: dict,
+    labels: List[dict],
+    actions: List[dict],
+    char_id_map: Dict[int, int],
+    bitmap_char_ids: Optional[Set[int]] = None,
+) -> bytes:
+    """
+    Build SWF timeline tags (PlaceObject2/3, RemoveObject2, ShowFrame, etc.)
+    from toPublish() output.
+
+    char_id_map: character_array_index → SWF character ID
+    """
+    log.debug("build_timeline_tags: total_frames=%d labels=%d actions=%d", total_frames, len(labels or []), len(actions or []))
+    controller = tp["controller"]
+    dictionary = tp["dictionary"]
+    place_map = tp["placeMap"]
+    place_objects = tp["placeObjects"]
+    depth_keys = tp.get("depthKeys")
+
+    labels_by_frame: Dict[int, str] = {}
+    for lbl in (labels or []):
+        labels_by_frame[lbl["frame"]] = lbl["name"]
+
+    actions_by_frame: Dict[int, str] = {}
+    for act in (actions or []):
+        actions_by_frame[act["frame"]] = act.get("action", "")
+
+    out = bytearray()
+    prev_display: Dict[int, Tuple[int, int, int]] = {}  # swf_depth → (dict_idx, swf_char_id, po_idx)
+
+    for frame in range(1, total_frames + 1):
+        # Current display list
+        frame_ctrl = controller[frame] if frame < len(controller) and controller[frame] else None
+        frame_pm = place_map[frame] if frame < len(place_map) and place_map[frame] else None
+        frame_dk = None
+        if depth_keys and frame < len(depth_keys):
+            frame_dk = depth_keys[frame]
+
+        cur_display: Dict[int, Tuple[int, int, int]] = {}
+
+        # ----- Two-pass emission: collect removes + places separately -----
+        # OG SWF emits: RemoveObject2 ... FrameLabel ... PlaceObject2 ...
+        # We need to collect all removes first, then emit them before the label.
+
+        remove_buf = bytearray()
+        place_buf = bytearray()
+
+        if frame_ctrl and frame_pm:
+            for slot_idx, dict_idx in enumerate(frame_ctrl):
+                if dict_idx is None:
+                    continue
+                if dict_idx < 0 or dict_idx >= len(dictionary):
+                    continue
+
+                tag_info = dictionary[dict_idx]
+                char_array_idx = tag_info.get("characterId", 0)
+                swf_char_id = char_id_map.get(char_array_idx, 1)
+                # Use stable depth key if available, otherwise fall back to slot index
+                if frame_dk and slot_idx < len(frame_dk):
+                    swf_depth = frame_dk[slot_idx] + 1  # depth keys are 0-based, SWF depths are 1-based
+                else:
+                    swf_depth = slot_idx + 1
+
+                # Place object data
+                po_idx = frame_pm[slot_idx] if slot_idx < len(frame_pm) else None
+
+                cur_display[swf_depth] = (dict_idx, swf_char_id, po_idx)
+
+                # Skip PlaceObject emission if this depth is unchanged from
+                # the previous frame (same character AND same placeObject)
+                if swf_depth in prev_display:
+                    prev_dict, prev_char, prev_po = prev_display[swf_depth]
+                    if prev_char == swf_char_id and prev_po == po_idx:
+                        continue  # nothing changed — character persists via ShowFrame
+
+                po = place_objects[po_idx] if (
+                    po_idx is not None and 0 <= po_idx < len(place_objects)
+                ) else {}
+
+                # Matrix
+                mat_data = po.get("matrix")
+                if mat_data and len(mat_data) >= 6:
+                    mat_bytes = write_matrix(
+                        mat_data[0], mat_data[1], mat_data[2],
+                        mat_data[3], mat_data[4], mat_data[5],
+                    )
+                else:
+                    mat_bytes = write_matrix()
+
+                # Color transform
+                ct_data = po.get("colorTransform")
+                ct_bytes = None
+                if ct_data and len(ct_data) >= 8:
+                    ct_bytes = write_cxform_alpha(
+                        ct_data[0], ct_data[1], ct_data[2], ct_data[3],
+                        ct_data[4], ct_data[5], ct_data[6], ct_data[7],
+                    )
+
+                # Blend mode
+                blend_str = po.get("blendMode")
+                blend_mode = NEXT2D_BLEND_MAP.get(blend_str) if blend_str else None
+                # Blend mode 1 (normal) doesn't need PO3 — treat as None
+                if blend_mode == 1:
+                    blend_mode = None
+                # "normal" (1) is the default — no need to upgrade to PO3
+                if blend_mode == 1:
+                    blend_mode = None
+
+                # Filters
+                filters = po.get("surfaceFilterList")
+                filter_bytes = encode_filter_list(filters) if filters else None
+
+                # Morph ratio
+                po_ratio = po.get("ratio")
+
+                # Move vs place
+                was_present = swf_depth in prev_display
+
+                if was_present:
+                    prev_dict, prev_char, prev_po = prev_display[swf_depth]
+                    # The 'reinstated' flag means the OG SWF used
+                    # RemoveObject2 + PlaceObject (new instance) at this span start.
+                    is_reinstated = tag_info.get("reinstated", False)
+                    # Only trigger remove+place on the FIRST frame of a reinstated
+                    # span (when dict_idx changes), not on every frame within it.
+                    dict_changed = (prev_dict != dict_idx)
+
+                    if is_reinstated and dict_changed:
+                        # OG pattern: remove old then place fresh (new instance)
+                        remove_buf.extend(build_remove_object2(swf_depth))
+                        is_move = False
+                        place_char_id = swf_char_id
+                    elif prev_char != swf_char_id:
+                        # Different character at same depth → swap in-place
+                        # OG SWF uses PlaceObject with MOVE + character_id.
+                        is_move = True
+                        place_char_id = swf_char_id
+                    else:
+                        # Same instance, same char — just update transform
+                        is_move = True
+                        place_char_id = None
+                else:
+                    is_move = False
+                    place_char_id = swf_char_id
+
+                instance_name = tag_info.get("name") or None
+
+                # Only use PO3+has_image when actually placing/changing a bitmap character,
+                # not for move-only updates (same character, different transform)
+                is_bitmap_place = (bitmap_char_ids is not None
+                                   and swf_char_id in bitmap_char_ids
+                                   and place_char_id is not None)
+                needs_po3 = (blend_mode is not None) or (filter_bytes is not None) or is_bitmap_place
+
+                if needs_po3:
+                    tag_bytes = build_place_object3(
+                        depth=swf_depth,
+                        character_id=place_char_id,
+                        matrix=mat_bytes,
+                        color_transform=ct_bytes,
+                        name=instance_name if not is_move else None,
+                        blend_mode=blend_mode,
+                        filters_data=filter_bytes,
+                        is_move=is_move,
+                        ratio=po_ratio,
+                        has_image=is_bitmap_place,
+                    )
+                else:
+                    tag_bytes = build_place_object2(
+                        depth=swf_depth,
+                        character_id=place_char_id,
+                        matrix=mat_bytes,
+                        color_transform=ct_bytes,
+                        name=instance_name if not is_move else None,
+                        is_move=is_move,
+                        ratio=po_ratio,
+                    )
+                place_buf.extend(tag_bytes)
+
+        # Emit "no longer present" removes
+        for depth in sorted(prev_display):
+            if depth not in cur_display:
+                remove_buf.extend(build_remove_object2(depth))
+
+        # Final emission order: removes → frame label → places → ShowFrame
+        out.extend(remove_buf)
+        if frame in labels_by_frame:
+            out.extend(build_frame_label(labels_by_frame[frame]))
+        out.extend(place_buf)
+
+        # ShowFrame
+        out.extend(build_tag_show_frame())
+        prev_display = cur_display
+
+    return bytes(out)
+
+
+# ── AS3 compilation ──────────────────────────────────────────────────────
+
+def _sanitize_class_name(sym: str) -> str:
+    """Convert a symbol export name to a valid AS3 class identifier."""
+    name = re.sub(r'[^a-zA-Z0-9_]', '_', sym)
+    if name and name[0].isdigit():
+        name = '_' + name
+    return name or '_unnamed'
+
+
+def _escape_as3_string(s: str) -> str:
+    """Escape a string for embedding in AS3 source code."""
+    return (s.replace('\\', '\\\\')
+             .replace('"', '\\"')
+             .replace('\n', '\\n')
+             .replace('\r', '\\r')
+             .replace('\t', '\\t'))
+
+
+def _strip_block_comments(code: str) -> str:
+    """Remove all block comments (/* ... */) from code, handling unbalanced ones."""
+    result = []
+    i = 0
+    in_line_comment = False
+    in_string_sq = False
+    in_string_dq = False
+
+    while i < len(code):
+        c = code[i]
+
+        # Handle string literals (don't strip comments inside strings)
+        if not in_line_comment and c == '"' and not in_string_sq:
+            in_string_dq = not in_string_dq
+            result.append(c)
+            i += 1
+            continue
+        if not in_line_comment and c == "'" and not in_string_dq:
+            in_string_sq = not in_string_sq
+            result.append(c)
+            i += 1
+            continue
+        if in_string_dq or in_string_sq:
+            if c == '\\':
+                result.append(c)
+                i += 1
+                if i < len(code):
+                    result.append(code[i])
+                    i += 1
+                continue
+            result.append(c)
+            i += 1
+            continue
+
+        # Block comment open
+        if code[i:i+2] == '/*':
+            # Skip until */ or end of string
+            i += 2
+            while i < len(code) - 1:
+                if code[i:i+2] == '*/':
+                    i += 2
+                    break
+                i += 1
+            else:
+                # Reached end without closing — just skip remaining
+                i = len(code)
+            continue
+
+        # Line comment — keep it (they're harmless)
+        result.append(c)
+        i += 1
+
+    return ''.join(result)
+
+
+def _extract_toplevel_functions(lines: List[str]) -> Tuple[List[str], List[str]]:
+    """
+    Extract top-level function declarations from code lines.
+
+    Returns (remaining_lines, extracted_function_texts).
+    Only extracts functions at indent level 0 (no leading whitespace or tab).
+    Handles opening brace on same line or next line.
+    """
+    remaining = []
+    functions = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        # Match: function name(...) at the start of the line (no indentation)
+        if re.match(r'^function\s+\w+\s*\(', stripped):
+            # Collect the function signature + body
+            func_lines = [lines[i]]
+            brace_count = lines[i].count('{') - lines[i].count('}')
+            i += 1
+
+            if brace_count == 0:
+                # Opening brace might be on next line
+                while i < len(lines):
+                    func_lines.append(lines[i])
+                    brace_count += lines[i].count('{') - lines[i].count('}')
+                    i += 1
+                    if brace_count > 0:
+                        break
+                if brace_count == 0:
+                    # Never found opening brace — not a real function decl,
+                    # put back into remaining
+                    remaining.extend(func_lines)
+                    continue
+
+            # Now collect until braces balance
+            while i < len(lines) and brace_count > 0:
+                func_lines.append(lines[i])
+                brace_count += lines[i].count('{') - lines[i].count('}')
+                i += 1
+
+            functions.append('\n'.join(func_lines))
+            continue
+
+        remaining.append(lines[i])
+        i += 1
+
+    return remaining, functions
+
+
+def _extract_toplevel_vars(lines: List[str]) -> Tuple[List[str], List[str]]:
+    """
+    Extract top-level var declarations from code lines.
+
+    Only extracts `var name...;` at indent level 0 (starts at column 0).
+    Returns (remaining_lines, extracted_var_declarations).
+    """
+    remaining = []
+    var_decls = []
+    seen_vars: Set[str] = set()
+
+    for line in lines:
+        stripped = line.strip()
+        # Must start at indent 0 (or just whitespace prefix ≤ 0)
+        # and be a var declaration ending with ;
+        if stripped.startswith('var ') and stripped.endswith(';'):
+            var_match = re.match(r'^var\s+(\w+)', stripped)
+            if var_match:
+                var_name = var_match.group(1)
+                if var_name not in seen_vars:
+                    seen_vars.add(var_name)
+                    var_decls.append(stripped)
+                remaining.append(line)  # keep in body too for initialization
+                continue
+        remaining.append(line)
+
+    return remaining, var_decls
+
+
+def _extract_imports(lines: List[str]) -> Tuple[List[str], Set[str]]:
+    """Extract import statements from code lines."""
+    remaining = []
+    imports: Set[str] = set()
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('import '):
+            imports.add(stripped)
+        else:
+            remaining.append(line)
+
+    return remaining, imports
+
+
+def generate_symbol_stubs(
+    libs: List[dict],
+    stub_dir: str,
+    project_name: str = "",
+) -> Dict[str, str]:
+    """
+    Generate AS3 class stub files for all exported symbols.
+
+    For containers with explicit linkageClassName (symbol set), use that name
+    in the default package.
+
+    For containers without linkage but WITH frame scripts, generate a
+    class in the projectname_fla package (e.g. gameandwatch_fla.Idle_3),
+    matching Flash IDE behavior.
+
+    Returns: dict mapping lib_id_str → AS3 fully-qualified class name
+             (e.g. "5" → "gameandwatch_fla.Idle_3" or "gnw_idle0")
+    """
+    log.debug("generate_symbol_stubs: %d libs, project=%s", len(libs), project_name)
+    sym_to_class: Dict[str, str] = {}  # symbol_name → class_name (default pkg)
+    fla_classes: Dict[int, str] = {}   # lib_id → fla class name (for containers w/ scripts)
+    used_classes: Set[str] = set()
+    # Track lowercase versions to avoid case-insensitive filesystem collisions
+    used_classes_lower: Set[str] = set()
+
+    # Determine _fla package name from project
+    fla_pkg = f"{project_name}_fla" if project_name else ""
+
+    for lib in libs:
+        sym = lib.get('symbol', '')
+        lib_type = lib['type']
+        lib_id = lib['id']
+
+        # Containers without explicit linkage but with frame scripts
+        # get auto-generated _fla package classes (like Flash IDE does)
+        if not sym and lib_type == 'container' and lib_id != 0 and fla_pkg:
+            actions = [a for a in lib.get('actions', []) if a.get('action', '').strip()]
+            if actions:
+                # Generate class name: ProjectName_fla.SymbolName_N
+                display = lib.get('name', '')
+                # Clean display name: Flash IDE converts hyphens, periods
+                # and ampersands to underscores, then removes spaces and
+                # any remaining non-alphanumeric/underscore characters.
+                clean = display.replace('-', '_').replace('.', '_').replace('&', '_').replace(' ', '')
+                clean = re.sub(r'[^a-zA-Z0-9_]', '', clean)
+                if clean and clean[0].isdigit():
+                    clean = '_' + clean
+                fla_class = f"{clean}_{lib_id}"
+                fla_fqn = f"{fla_pkg}.{fla_class}"
+                fla_classes[lib_id] = fla_fqn
+                # We'll generate these stubs below
+            continue
+
+        if not sym:
+            continue
+        if sym == 'Main':  # Document class — handled separately
+            continue
+
+        class_name = _sanitize_class_name(sym)
+        # De-duplicate class names (case-insensitive for Windows FS)
+        orig = class_name
+        counter = 2
+        while class_name in used_classes or class_name.lower() in used_classes_lower:
+            class_name = f"{orig}_{counter}"
+            counter += 1
+        used_classes.add(class_name)
+        used_classes_lower.add(class_name.lower())
+        sym_to_class[sym] = class_name
+
+        if lib_type == 'bitmap':
+            # Extend BitmapData
+            code = (
+                f'package {{\n'
+                f'    import flash.display.BitmapData;\n'
+                f'    public class {class_name} extends BitmapData {{\n'
+                f'        public function {class_name}(w:int=0, h:int=0) {{\n'
+                f'            super(w, h);\n'
+                f'        }}\n'
+                f'    }}\n'
+                f'}}\n'
+            )
+        elif lib_type == 'sound':
+            # Extend Sound
+            code = (
+                f'package {{\n'
+                f'    import flash.media.Sound;\n'
+                f'    public class {class_name} extends Sound {{\n'
+                f'        public function {class_name}() {{\n'
+                f'            super();\n'
+                f'        }}\n'
+                f'    }}\n'
+                f'}}\n'
+            )
+        elif lib_type == 'container':
+            # Extend MovieClip, with addFrameScript for frame actions
+            actions = [a for a in lib.get('actions', []) if a.get('action')]
+
+            if actions:
+                # Merge duplicate frame numbers (multiple layers can have
+                # scripts on the same frame)
+                frame_scripts_map: Dict[int, List[str]] = {}
+                for act in actions:
+                    f = act['frame']
+                    if f not in frame_scripts_map:
+                        frame_scripts_map[f] = []
+                    frame_scripts_map[f].append(act['action'])
+
+                # Pre-process all frame scripts:
+                # 1. Strip block comments (handles unbalanced /* without */)
+                # 2. Extract import statements → class-level
+                # 3. Extract top-level function declarations → class methods
+                # 4. Extract top-level var declarations → class members
+                # 5. Remaining code → frame function bodies
+                all_imports: Set[str] = set()
+                all_imports.add('import flash.display.MovieClip;')
+                all_imports.add('import flash.events.Event;')
+                all_imports.add('import flash.display.DisplayObject;')
+                all_var_decls: List[str] = []
+                all_func_texts: List[str] = []
+                frame_bodies: Dict[int, str] = {}
+                seen_var_names: Set[str] = set()
+                seen_func_names: Set[str] = set()
+
+                for frame_num in sorted(frame_scripts_map.keys()):
+                    merged = '\n'.join(frame_scripts_map[frame_num])
+
+                    # Step 1: strip block comments
+                    cleaned = _strip_block_comments(merged)
+
+                    lines = cleaned.split('\n')
+
+                    # Step 2: extract imports
+                    lines, frame_imports = _extract_imports(lines)
+                    all_imports.update(frame_imports)
+
+                    # Step 3: extract top-level functions
+                    lines, funcs = _extract_toplevel_functions(lines)
+                    for func_text in funcs:
+                        # Get function name to avoid duplicates
+                        m = re.match(r'function\s+(\w+)', func_text.strip())
+                        if m and m.group(1) not in seen_func_names:
+                            seen_func_names.add(m.group(1))
+                            all_func_texts.append(func_text)
+
+                    # Step 4: extract top-level var declarations
+                    lines, var_decls = _extract_toplevel_vars(lines)
+                    for vd in var_decls:
+                        vm = re.match(r'var\s+(\w+)', vd)
+                        if vm and vm.group(1) not in seen_var_names:
+                            seen_var_names.add(vm.group(1))
+                            all_var_decls.append(vd)
+
+                    # Step 5: remaining lines become frame body
+                    frame_bodies[frame_num] = '\n'.join(lines)
+
+                # Build addFrameScript calls and frame functions
+                afs_lines = []
+                frame_func_list = []
+                for frame_num in sorted(frame_bodies.keys()):
+                    frame_0based = frame_num - 1
+                    func_name = 'frame_' + str(frame_num)
+                    body = frame_bodies[frame_num].strip()
+                    if not body:
+                        body = '// (empty)'
+                    afs_lines.append(
+                        '            addFrameScript('
+                        + str(frame_0based) + ', ' + func_name + ');'
+                    )
+                    body_indented = '\n'.join(
+                        '            ' + bl for bl in body.split('\n')
+                    )
+                    frame_func_list.append(
+                        '        internal function ' + func_name + '():* {\n'
+                        + body_indented + '\n'
+                        + '        }'
+                    )
+
+                # Build the class file
+                imports_block = '\n'.join(
+                    '    ' + imp for imp in sorted(all_imports)
+                )
+                vars_block = ''
+                if all_var_decls:
+                    vars_block = '\n'.join(
+                        '        public ' + vd for vd in all_var_decls
+                    )
+                funcs_block = ''
+                if all_func_texts:
+                    formatted_funcs = []
+                    for ft in all_func_texts:
+                        # Indent function to class level
+                        indented = '\n'.join(
+                            '        ' + fline for fline in ft.split('\n')
+                        )
+                        formatted_funcs.append(indented)
+                    funcs_block = '\n'.join(formatted_funcs)
+                afs_block = '\n'.join(afs_lines)
+                frame_funcs_block = '\n'.join(frame_func_list)
+
+                parts = []
+                parts.append('package {')
+                parts.append(imports_block)
+                parts.append('    public dynamic class '
+                             + class_name + ' extends MovieClip {')
+                if vars_block:
+                    parts.append(vars_block)
+                parts.append(
+                    '        public function ' + class_name + '() {\n'
+                    '            super();\n'
+                    + afs_block + '\n'
+                    '        }'
+                )
+                if funcs_block:
+                    parts.append(funcs_block)
+                parts.append(frame_funcs_block)
+                parts.append('    }')
+                parts.append('}')
+                code = '\n'.join(parts) + '\n'
+            else:
+                code = (
+                    'package {\n'
+                    '    import flash.display.MovieClip;\n'
+                    '    public dynamic class ' + class_name
+                    + ' extends MovieClip {\n'
+                    '        public function ' + class_name + '() {\n'
+                    '            super();\n'
+                    '        }\n'
+                    '    }\n'
+                    '}\n'
+                )
+        else:
+            # Shape / text / other — generic Sprite
+            code = (
+                f'package {{\n'
+                f'    import flash.display.Sprite;\n'
+                f'    public class {class_name} extends Sprite {{\n'
+                f'        public function {class_name}() {{\n'
+                f'            super();\n'
+                f'        }}\n'
+                f'    }}\n'
+                f'}}\n'
+            )
+
+        filepath = os.path.join(stub_dir, class_name + '.as')
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(code)
+
+    # ── Generate _fla package stubs for containers with frame scripts ──
+    if fla_pkg and fla_classes:
+        fla_dir = os.path.join(stub_dir, fla_pkg)
+        os.makedirs(fla_dir, exist_ok=True)
+
+        id_to_lib = {lib['id']: lib for lib in libs}
+        for lib_id, fla_fqn in fla_classes.items():
+            lib = id_to_lib[lib_id]
+            # fla_fqn = "gameandwatch_fla.Idle_3"
+            fla_class = fla_fqn.split('.')[-1]  # "Idle_3"
+
+            actions = [a for a in lib.get('actions', []) if a.get('action', '').strip()]
+
+            if actions:
+                # Same frame-script processing as above for containers w/ actions
+                frame_scripts_map: Dict[int, List[str]] = {}
+                for act in actions:
+                    f = act['frame']
+                    if f not in frame_scripts_map:
+                        frame_scripts_map[f] = []
+                    frame_scripts_map[f].append(act['action'])
+
+                all_imports_fla: Set[str] = set()
+                all_imports_fla.add('import flash.display.MovieClip;')
+                all_imports_fla.add('import flash.events.Event;')
+                all_imports_fla.add('import flash.display.DisplayObject;')
+                all_var_decls_fla: List[str] = []
+                all_func_texts_fla: List[str] = []
+                frame_bodies_fla: Dict[int, str] = {}
+                seen_var_names_fla: Set[str] = set()
+                seen_func_names_fla: Set[str] = set()
+
+                for frame_num in sorted(frame_scripts_map.keys()):
+                    merged = '\n'.join(frame_scripts_map[frame_num])
+                    cleaned = _strip_block_comments(merged)
+                    lines = cleaned.split('\n')
+                    lines, frame_imports = _extract_imports(lines)
+                    all_imports_fla.update(frame_imports)
+                    lines, funcs = _extract_toplevel_functions(lines)
+                    for func_text in funcs:
+                        m = re.match(r'function\s+(\w+)', func_text.strip())
+                        if m and m.group(1) not in seen_func_names_fla:
+                            seen_func_names_fla.add(m.group(1))
+                            all_func_texts_fla.append(func_text)
+                    lines, var_decls = _extract_toplevel_vars(lines)
+                    for vd in var_decls:
+                        vm = re.match(r'var\s+(\w+)', vd)
+                        if vm and vm.group(1) not in seen_var_names_fla:
+                            seen_var_names_fla.add(vm.group(1))
+                            all_var_decls_fla.append(vd)
+                    frame_bodies_fla[frame_num] = '\n'.join(lines)
+
+                afs_lines_fla = []
+                frame_func_list_fla = []
+                for frame_num in sorted(frame_bodies_fla.keys()):
+                    frame_0based = frame_num - 1
+                    func_name = 'frame_' + str(frame_num)
+                    body = frame_bodies_fla[frame_num].strip()
+                    if not body:
+                        body = '// (empty)'
+                    afs_lines_fla.append(
+                        '            addFrameScript('
+                        + str(frame_0based) + ', ' + func_name + ');'
+                    )
+                    body_indented = '\n'.join(
+                        '            ' + bl for bl in body.split('\n')
+                    )
+                    frame_func_list_fla.append(
+                        '        internal function ' + func_name + '():* {\n'
+                        + body_indented + '\n'
+                        + '        }'
+                    )
+
+                imports_block_fla = '\n'.join(
+                    '    ' + imp for imp in sorted(all_imports_fla)
+                )
+                vars_block_fla = ''
+                if all_var_decls_fla:
+                    vars_block_fla = '\n'.join(
+                        '        public ' + vd for vd in all_var_decls_fla
+                    )
+                funcs_block_fla = ''
+                if all_func_texts_fla:
+                    formatted = []
+                    for ft in all_func_texts_fla:
+                        indented = '\n'.join(
+                            '        ' + fline for fline in ft.split('\n')
+                        )
+                        formatted.append(indented)
+                    funcs_block_fla = '\n'.join(formatted)
+                afs_block_fla = '\n'.join(afs_lines_fla)
+                frame_funcs_block_fla = '\n'.join(frame_func_list_fla)
+
+                parts = []
+                parts.append(f'package {fla_pkg} {{')
+                parts.append(imports_block_fla)
+                parts.append('    public dynamic class '
+                             + fla_class + ' extends MovieClip {')
+                if vars_block_fla:
+                    parts.append(vars_block_fla)
+                parts.append(
+                    '        public function ' + fla_class + '() {\n'
+                    '            super();\n'
+                    + afs_block_fla + '\n'
+                    '        }'
+                )
+                if funcs_block_fla:
+                    parts.append(funcs_block_fla)
+                parts.append(frame_funcs_block_fla)
+                parts.append('    }')
+                parts.append('}')
+                code = '\n'.join(parts) + '\n'
+            else:
+                code = (
+                    f'package {fla_pkg} {{\n'
+                    f'    import flash.display.MovieClip;\n'
+                    f'    public dynamic class {fla_class}'
+                    f' extends MovieClip {{\n'
+                    f'        public function {fla_class}() {{\n'
+                    f'            super();\n'
+                    f'        }}\n'
+                    f'    }}\n'
+                    f'}}\n'
+                )
+
+            filepath = os.path.join(fla_dir, fla_class + '.as')
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(code)
+
+    return sym_to_class, fla_classes
+
+
+def compile_as3(
+    shared_dir: str,
+    swc_path: str,
+    sdk_path: str,
+    libs: List[dict],
+    main_class: str = "Main",
+    project_name: str = "",
+    embedded_scripts: Optional[List[dict]] = None,
+) -> Tuple[bytes, Dict[str, str], Dict[int, str]]:
+    """
+    Generate AS3 class stubs for all exported symbols, then compile
+    everything together with mxmlc.
+
+    Returns: (doabc_tag_bytes, symbol_to_classname_map, fla_classes_map)
+    """
+    log.info("compile_as3: main_class=%s project=%s sdk=%s", main_class, project_name, sdk_path)
+    mxmlc = os.path.join(sdk_path, "bin", "mxmlc.bat")
+    if not os.path.isfile(mxmlc):
+        mxmlc = os.path.join(sdk_path, "bin", "mxmlc")
+    if not os.path.isfile(mxmlc):
+        raise RuntimeError(f"mxmlc not found in {sdk_path}/bin/")
+
+    with tempfile.TemporaryDirectory(prefix="n2d_as3_") as tmp_dir:
+        # Generate class stubs in a subdirectory
+        stub_dir = os.path.join(tmp_dir, "stubs")
+        os.makedirs(stub_dir, exist_ok=True)
+
+        print("  Generating AS3 class stubs...")
+        sym_to_class, fla_classes = generate_symbol_stubs(libs, stub_dir, project_name)
+        print(f"  Generated {len(sym_to_class)} class stubs + {len(fla_classes)} _fla classes")
+
+        # Detect classes provided by the SWC so we don't override them
+        # with decompiled source (which can produce incompatible bytecode).
+        swc_classes: Set[str] = set()
+        if os.path.isfile(swc_path):
+            try:
+                import zipfile as _zf
+                with _zf.ZipFile(swc_path) as zswc:
+                    if 'catalog.xml' in zswc.namelist():
+                        cat_xml = zswc.read('catalog.xml').decode('utf-8')
+                        swc_classes = set(re.findall(r'<def id="([^"]+)"', cat_xml))
+                if swc_classes:
+                    print(f"  SWC provides {len(swc_classes)} classes (will skip from embedded)")
+            except Exception as e:
+                print(f"  WARNING: Could not parse SWC catalog: {e}")
+
+        # Write embedded scripts from N2D project to temp dir
+        embedded_dir = os.path.join(tmp_dir, "embedded")
+        os.makedirs(embedded_dir, exist_ok=True)
+        skipped_swc = 0
+        if embedded_scripts:
+            for script in embedded_scripts:
+                spath = script.get('path', '')
+                source = script.get('source', '')
+                if not spath or not source:
+                    continue
+                # Skip top-level scripts that the SWC already provides.
+                # Sub-package scripts (e.g. gameandwatch_fla/Idle_3.as) are
+                # never in the SWC so they're always written.
+                if '/' not in spath and spath.endswith('.as'):
+                    class_name = spath[:-3]
+                    if class_name in swc_classes:
+                        skipped_swc += 1
+                        continue
+                fpath = os.path.join(embedded_dir, spath)
+                os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                with open(fpath, 'w', encoding='utf-8') as sf:
+                    sf.write(source)
+            written = len(embedded_scripts) - skipped_swc
+            msg = f"  Wrote {written} embedded scripts to temp dir"
+            if skipped_swc:
+                msg += f" (skipped {skipped_swc} SWC-provided)"
+            print(msg)
+
+        temp_swf = os.path.join(tmp_dir, "output.swf")
+
+        env = os.environ.copy()
+        env["FLEX_HOME"] = sdk_path
+        player_home = os.path.join(sdk_path, "frameworks", "libs", "player")
+        env["PLAYERGLOBAL_HOME"] = player_home
+
+        # Prefer embedded Main.as (user-edited) over shared/ original
+        main_as = os.path.join(embedded_dir, main_class + ".as")
+        if not os.path.isfile(main_as):
+            main_as = os.path.join(shared_dir, main_class + ".as")
+        if not os.path.isfile(main_as):
+            raise RuntimeError(f"Main class not found: {main_as}")
+
+        cmd = [
+            mxmlc,
+            f"-source-path+={embedded_dir}",
+            f"-source-path+={shared_dir}",
+            f"-source-path+={stub_dir}",
+            f"-target-player=25.0",
+            "-static-link-runtime-shared-libraries",
+            "-strict=false",
+            f"-output={temp_swf}",
+        ]
+
+        # Add SWC as library
+        if os.path.isfile(swc_path):
+            cmd.append(f"-library-path+={swc_path}")
+        else:
+            print(f"  WARNING: SWC not found: {swc_path}", file=sys.stderr)
+
+        # Use a config file for includes to avoid command-line-too-long
+        # Auto-discover framework-style AS3 packages in shared_dir
+        # (e.g. fl/motion/*.as -> fl.motion.AdjustColor)
+        # These are classes not provided by the Flex SDK but needed at runtime.
+        framework_classes = []
+        for dirpath, _dirnames, filenames in os.walk(shared_dir):
+            rel = os.path.relpath(dirpath, shared_dir)
+            if rel == '.':
+                continue  # skip top-level shared .as files (handled as stubs/main)
+            pkg = rel.replace(os.sep, '.')
+            for fn in filenames:
+                if fn.endswith('.as'):
+                    cls_name = fn[:-3]
+                    fqn = f"{pkg}.{cls_name}"
+                    framework_classes.append(fqn)
+        if framework_classes:
+            print(f"  Found {len(framework_classes)} framework classes: {', '.join(framework_classes)}")
+
+        # Discover sub-package classes in embedded scripts dir
+        # (e.g. gameandwatch_fla/*.as → gameandwatch_fla.Idle_3)
+        embedded_classes = []
+        if os.path.isdir(embedded_dir):
+            for dirpath, _dn, filenames in os.walk(embedded_dir):
+                rel = os.path.relpath(dirpath, embedded_dir)
+                if rel == '.':
+                    continue  # top-level .as handled as main / direct sources
+                pkg = rel.replace(os.sep, '.')
+                for fn in filenames:
+                    if fn.endswith('.as'):
+                        fqn = f"{pkg}.{fn[:-3]}"
+                        embedded_classes.append(fqn)
+        if embedded_classes:
+            print(f"  Found {len(embedded_classes)} embedded sub-package classes")
+
+        config_path = os.path.join(tmp_dir, "includes.cfg")
+        with open(config_path, 'w', encoding='utf-8') as cfg:
+            cfg.write('<flex-config>\n')
+            cfg.write('  <includes append="true">\n')
+            for class_name in sym_to_class.values():
+                cfg.write(f'    <symbol>{class_name}</symbol>\n')
+            # Include _fla package classes (from stub generation)
+            for fla_fqn in fla_classes.values():
+                cfg.write(f'    <symbol>{fla_fqn}</symbol>\n')
+            # Include framework classes found in shared dir sub-packages
+            for fw_fqn in framework_classes:
+                cfg.write(f'    <symbol>{fw_fqn}</symbol>\n')
+            # Include embedded sub-package classes (e.g. gameandwatch_fla)
+            for emb_fqn in embedded_classes:
+                cfg.write(f'    <symbol>{emb_fqn}</symbol>\n')
+            cfg.write('  </includes>\n')
+            cfg.write('</flex-config>\n')
+        cmd.append(f"-load-config+={config_path}")
+
+        cmd.append(main_as)
+
+        total_stubs = len(sym_to_class) + len(fla_classes)
+        total_includes = total_stubs + len(framework_classes) + len(embedded_classes)
+        print(f"  Compiling {main_class}.as + {total_stubs} stubs + {len(framework_classes)} framework + {len(embedded_classes)} embedded classes with mxmlc...")
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, env=env, shell=True,
+        )
+
+        if result.returncode != 0:
+            print(f"  mxmlc stdout: {result.stdout}", file=sys.stderr)
+            print(f"  mxmlc stderr: {result.stderr}", file=sys.stderr)
+            # Show which stubs had errors
+            for line in result.stderr.split('\n'):
+                if 'Error' in line:
+                    print(f"    {line}", file=sys.stderr)
+            raise RuntimeError(
+                f"mxmlc compilation failed (exit code {result.returncode})"
+            )
+
+        if not os.path.isfile(temp_swf):
+            raise RuntimeError("mxmlc did not produce output SWF")
+
+        print(f"  Compiled -> {os.path.getsize(temp_swf)} bytes")
+        return extract_doabc_tags(temp_swf), sym_to_class, fla_classes
+
+
+def extract_doabc_tags(swf_path: str) -> bytes:
+    """Extract all DoABC/DoABC2 tags from a compiled SWF."""
+    log.debug("extract_doabc_tags: %s", swf_path)
+    TAG_DO_ABC_ID = 82
+    TAG_DO_ABC_OLD = 72
+
+    with open(swf_path, "rb") as f:
+        sig = f.read(3)
+        f.read(1)  # version
+        f.read(4)  # file length
+        rest = f.read()
+
+    if sig == b"CWS":
+        rest = zlib.decompress(rest)
+    elif sig != b"FWS":
+        raise ValueError(f"Not a SWF: {swf_path}")
+
+    # Skip RECT header
+    pos = 0
+    nbits = (rest[0] >> 3) & 0x1F
+    total_bits = 5 + nbits * 4
+    rect_bytes = (total_bits + 7) // 8
+    pos += rect_bytes + 4  # + frame rate + frame count
+
+    doabc = bytearray()
+    while pos < len(rest):
+        tag_code_and_len = struct.unpack_from("<H", rest, pos)[0]
+        tag_type = tag_code_and_len >> 6
+        tag_len = tag_code_and_len & 0x3F
+        pos += 2
+        if tag_len == 0x3F:
+            tag_len = struct.unpack_from("<I", rest, pos)[0]
+            pos += 4
+
+        if tag_type in (TAG_DO_ABC_ID, TAG_DO_ABC_OLD):
+            tag_body = rest[pos:pos + tag_len]
+            doabc.extend(build_tag(tag_type, bytes(tag_body)))
+
+        if tag_type == 0:
+            break
+        pos += tag_len
+
+    if not doabc:
+        raise RuntimeError(f"No DoABC tags found in {swf_path}")
+
+    return bytes(doabc)
+
+
+# ── Main compiler class ──────────────────────────────────────────────────
+
+class N2DCompiler:
+    def __init__(self, n2d_path: str, shared_dir: str,
+                 output_path: str, sdk_path: Optional[str] = None):
+        log.debug('N2DCompiler.__init__: n2d=%s, shared=%s, output=%s', n2d_path, shared_dir, output_path)
+        self.n2d_path = n2d_path
+        self.shared_dir = os.path.abspath(shared_dir)
+        self.output_path = output_path
+        self.sdk_path = sdk_path or find_sdk()
+
+        self.data: dict = {}
+        self.stage: dict = {}
+        self.libs: List[dict] = []
+        self.id_to_lib: Dict[int, dict] = {}
+
+        # SWF character ID allocation
+        self._next_id = 1
+        self._lib_to_swf_id: Dict[int, int] = {}     # n2d lib id → SWF char ID
+
+        # Character array index mapping (for toPublish dictionary references)
+        self._lib_to_char_idx: Dict[int, int] = {}   # n2d lib id → char array index
+        self._char_idx_to_swf_id: Dict[int, int] = {}  # char array index → SWF char ID
+
+        self._definition_tags = bytearray()
+
+    def _alloc_id(self) -> int:
+        cid = self._next_id
+        self._next_id += 1
+        return cid
+
+    def compile(self):
+        log.info('compile: starting compilation of %s', self.n2d_path)
+        t0 = time.time()
+
+        # ── Load ──
+        print(f"Loading: {self.n2d_path}")
+        self.data = load_n2d(self.n2d_path)
+
+        self.stage = self.data.get("stage", {})
+        self.libs = self.data.get("libraries", [])
+        self.id_to_lib = {lib["id"]: lib for lib in self.libs}
+        print(f"  {len(self.libs)} libraries loaded")
+
+        # ── Assign IDs ──
+        self._assign_ids()
+
+        # ── Build set of bitmap SWF char IDs (for PO3 has_image flag) ──
+        self._bitmap_char_ids: Set[int] = set()
+        for lib in self.libs:
+            if lib["type"] == "bitmap" and lib["id"] in self._lib_to_swf_id:
+                self._bitmap_char_ids.add(self._lib_to_swf_id[lib["id"]])
+
+        # ── Parse raw global tags early (font aux needed during emission) ──
+        raw_global = self.data.get("rawGlobalTags", [])
+        raw_doabc_tags = bytearray()
+        raw_aux_tags = bytearray()       # header-level aux (Protect, SceneLabel, SndStreamHd)
+        raw_aux_map: Dict[int, bytes] = {}  # tag_type → raw body (for SymbolClass etc.)
+        # Font/text auxiliary tags keyed by the charId they reference.
+        # They must appear right after their referenced definition in the
+        # tag stream (matching the original SWF structure).
+        self._font_aux_tags: Dict[int, List[Tuple[int, bytes]]] = {}
+        for rgt in raw_global:
+            tag_type = rgt["tagType"]
+            body = _decode_raw_body(rgt["body"])
+            if tag_type in (72, 82):  # DoABC, DoABC2
+                raw_doabc_tags.extend(build_tag(tag_type, body))
+            elif tag_type == 76:  # SymbolClass — store raw body for passthrough
+                raw_aux_map[76] = body
+            elif tag_type in (73, 74, 88):  # FontAlignZones, CSMTextSettings, FontName
+                # These reference font/text char IDs by the first UI16 in the body.
+                # The ref_cid is the ORIGINAL SWF char ID, which equals the
+                # library ID.  Re-key to the NEW SWF ID so the aux tags
+                # appear after the correct definition in the output.
+                ref_cid = struct.unpack_from('<H', body, 0)[0] if len(body) >= 2 else 0
+                new_swf_id = self._lib_to_swf_id.get(ref_cid)
+                if new_swf_id is not None and len(body) >= 2:
+                    body = struct.pack('<H', new_swf_id) + body[2:]
+                    self._font_aux_tags.setdefault(new_swf_id, []).append((tag_type, body))
+                else:
+                    # Fallback: keep original charId (may be unused)
+                    self._font_aux_tags.setdefault(ref_cid, []).append((tag_type, body))
+            elif tag_type in (24, 45, 86):  # Protect, SoundStreamHead2, SceneAndFrameLabel
+                raw_aux_tags.extend(build_tag(tag_type, body, force_long=(tag_type == 86)))
+
+        # Also load font aux tags from library entries (fontAuxTags field),
+        # which persist without the sidecar / rawGlobalTags.
+        # These are keyed by the original SWF charId in their body;
+        # we'll re-key by the *new* SWF ID during emission.
+        for lib in self.libs:
+            if not lib.get("fontAuxTags"):
+                continue
+            # Map from original char ID (in aux body) to the new SWF ID
+            lib_id = lib["id"]
+            new_swf_id = self._lib_to_swf_id.get(lib_id)
+            if new_swf_id is None:
+                continue
+            for fat in lib["fontAuxTags"]:
+                tag_type = fat["tagType"]
+                body = _decode_raw_body(fat["body"])
+                # Rewrite the first UI16 (char ID reference) to the new SWF ID
+                if len(body) >= 2:
+                    body = struct.pack('<H', new_swf_id) + body[2:]
+                # Only add if not already loaded from rawGlobalTags
+                if new_swf_id not in self._font_aux_tags:
+                    self._font_aux_tags.setdefault(new_swf_id, []).append((tag_type, body))
+
+        # ── Define all assets in dependency order ──
+        print("Defining assets (dependency order)...")
+        self._define_all_assets()
+
+        # ── Build root timeline ──
+        print("Building root timeline...")
+        root_tags = self._build_root_timeline()
+
+        # ── Compile AS3 ──
+        doabc_tags = b""
+        sym_to_class: Dict[str, str] = {}
+        fla_classes: Dict[int, str] = {}
+
+        # raw_global tags were already parsed above (before _define_all_assets).
+
+        # If scripts were edited in the tool, skip raw DoABC passthrough
+        # and recompile from source via mxmlc.
+        scripts_modified = self.data.get('scriptsModified', False)
+        use_raw_doabc = bool(raw_doabc_tags) and not scripts_modified
+
+        if scripts_modified and raw_doabc_tags:
+            print("  Scripts were modified — will recompile from source "
+                  "(ignoring raw DoABC passthrough)")
+
+        if use_raw_doabc:
+            doabc_tags = bytes(raw_doabc_tags)
+            print(f"  Using raw DoABC from original: {len(doabc_tags)} bytes")
+            # Build sym_to_class from actual symbol names (passthrough)
+            for lib in self.libs:
+                sym = lib.get("symbol", "")
+                if sym:
+                    sym_to_class[sym] = sym
+        else:
+            # Derive project name from input filename
+            project_name = os.path.splitext(os.path.basename(self.n2d_path))[0]
+            swc_path = os.path.join(self.shared_dir, "SSF2 API.swc")
+            if self.sdk_path:
+                try:
+                    embedded_scripts = self.data.get('scripts', [])
+                    doabc_tags, sym_to_class, fla_classes = compile_as3(
+                        self.shared_dir, swc_path, self.sdk_path,
+                        self.libs, "Main", project_name,
+                        embedded_scripts=embedded_scripts,
+                    )
+                    print(f"  DoABC: {len(doabc_tags)} bytes")
+                except Exception as e:
+                    print(f"  AS3 compilation failed: {e}", file=sys.stderr)
+                    import traceback
+                    traceback.print_exc()
+                    if raw_doabc_tags:
+                        # Fall back to raw DoABC on compilation failure
+                        doabc_tags = bytes(raw_doabc_tags)
+                        print("  Falling back to raw DoABC from original")
+                        for lib in self.libs:
+                            sym = lib.get("symbol", "")
+                            if sym:
+                                sym_to_class[sym] = sym
+                    else:
+                        print("  Continuing without AS3 bytecode...", file=sys.stderr)
+            else:
+                if scripts_modified:
+                    print("  WARNING: Scripts were modified but no Flex SDK found — "
+                          "using original DoABC (edits will NOT be applied)")
+                    if raw_doabc_tags:
+                        doabc_tags = bytes(raw_doabc_tags)
+                        for lib in self.libs:
+                            sym = lib.get("symbol", "")
+                            if sym:
+                                sym_to_class[sym] = sym
+                else:
+                    print("  WARNING: No Flex SDK found — skipping AS3 compilation")
+
+        # ── Assemble SWF ──
+        print("Assembling SWF...")
+        swf = self._assemble_swf(root_tags, doabc_tags, sym_to_class, fla_classes,
+                                  raw_aux_tags=bytes(raw_aux_tags),
+                                  raw_aux_map=raw_aux_map)
+
+        with open(self.output_path, "wb") as f:
+            f.write(swf)
+
+        elapsed = time.time() - t0
+        print(f"Done! {len(swf):,} bytes -> {self.output_path} ({elapsed:.1f}s)")
+
+    # ── ID assignment ────────────────────────────────────────────────────
+
+    def _assign_ids(self):
+        """
+        Assign SWF character IDs and character array indices to all libraries.
+
+        Adobe Animate emits tags in dependency order:
+          1. All sounds first (chIDs 1..N_sounds)
+          2. Walk the container dependency tree (leaves first); for each
+             container, emit any not-yet-emitted bitmaps / shapes / text
+             it references, then the container itself.
+          3. Remaining unreferenced assets last.
+
+        Bitmaps get two IDs (DefineBitsLossless2 + DefineShape3).
+        Everything else gets one ID.  Main timeline (id=0) is the root
+        and gets no SWF character ID.
+        """
+        log.debug("_assign_ids: %d libs total", len(self.libs))
+        # ── 1. Assign character array indices (sequential, main=0) ──
+        char_idx = 0
+        self._lib_to_char_idx[0] = char_idx
+        char_idx += 1
+
+        for lib in self.libs:
+            if lib["id"] == 0:
+                continue
+            if lib["type"] == "folder":
+                continue
+            self._lib_to_char_idx[lib["id"]] = char_idx
+            char_idx += 1
+
+        # ── 2. Determine the dependency-ordered emission sequence ──
+        #    This list will hold lib ids in the order they should get
+        #    SWF character IDs and be emitted as tags.
+        self._emission_order: List[int] = []
+        emitted: Set[int] = set()
+
+        # Collect by type for quick lookup
+        containers: Set[int] = set()
+        all_non_folder: Dict[int, dict] = {}
+        for lib in self.libs:
+            if lib["type"] == "folder" or lib["id"] == 0:
+                continue
+            all_non_folder[lib["id"]] = lib
+            if lib["type"] == "container":
+                containers.add(lib["id"])
+
+        # 2a. Sounds first
+        for lib in self.libs:
+            if lib["type"] == "sound" and lib["id"] != 0:
+                self._emission_order.append(lib["id"])
+                emitted.add(lib["id"])
+
+        # 2b. Build full dependency graph for containers (what each
+        #     container references — both container and non-container deps)
+        container_all_deps: Dict[int, List[int]] = {}
+        for lib in self.libs:
+            if lib["type"] != "container" or lib["id"] == 0:
+                continue
+            deps: List[int] = []
+            for layer in lib.get("layers", []):
+                for char in layer.get("characters", []):
+                    ref = char["libraryId"]
+                    if ref in all_non_folder and ref != lib["id"]:
+                        deps.append(ref)
+            container_all_deps[lib["id"]] = deps
+
+        # Also gather main timeline (id=0) deps — it references containers
+        # that need to be emitted too
+        main_lib = self.id_to_lib.get(0)
+        main_deps: List[int] = []
+        if main_lib:
+            for layer in main_lib.get("layers", []):
+                for char in layer.get("characters", []):
+                    ref = char["libraryId"]
+                    if ref in all_non_folder:
+                        main_deps.append(ref)
+
+        # 2c. Walk containers in dependency order (topological, leaves first)
+        #     For each container, first emit its non-container deps that
+        #     haven't been emitted yet, then the container.
+        topo_order = self._container_order()  # leaves-first
+
+        def _emit_deps(lib_id: int):
+            """Recursively emit all dependencies of a container."""
+            if lib_id in emitted:
+                return
+            if lib_id in containers:
+                # It's a container — first emit ITS deps
+                for dep in container_all_deps.get(lib_id, []):
+                    _emit_deps(dep)
+                # Now emit this container
+                self._emission_order.append(lib_id)
+                emitted.add(lib_id)
+            else:
+                # Non-container asset (bitmap, shape, text)
+                if lib_id not in emitted:
+                    self._emission_order.append(lib_id)
+                    emitted.add(lib_id)
+
+        for cid in topo_order:
+            _emit_deps(cid)
+
+        # Also walk main timeline deps (for assets directly on root stage)
+        for dep in main_deps:
+            _emit_deps(dep)
+
+        # 2d. Any remaining unreferenced assets
+        for lib_id in all_non_folder:
+            if lib_id not in emitted:
+                self._emission_order.append(lib_id)
+                emitted.add(lib_id)
+
+        # 2e. Reverse the non-sound portion of the emission order.
+        #     The N2D libraries are alphabetical, but the original SWF
+        #     emits them in roughly reverse order within each dependency
+        #     group.  Reversing brings the chIDs much closer to the OG.
+        sound_part = [lid for lid in self._emission_order
+                      if all_non_folder[lid]["type"] == "sound"]
+        non_sound_part = [lid for lid in self._emission_order
+                          if all_non_folder[lid]["type"] != "sound"]
+        non_sound_part.reverse()
+        self._emission_order = sound_part + non_sound_part
+
+        # ── 3. Assign SWF character IDs in emission order ──
+        #    Always assign fresh sequential IDs.  Original swfCharId values
+        #    are not needed — SymbolClass and DoABC use class names, not IDs.
+        for lib_id in self._emission_order:
+            if lib_id not in self._lib_to_swf_id:
+                self._lib_to_swf_id[lib_id] = self._alloc_id()
+
+        # ── 3b. Re-sort emission order by SWF character ID ascending ──
+        #    The original SWF emits definition tags in strictly ascending
+        #    char_id order. This ensures no forward references (a sprite
+        #    never references a char_id that hasn't been defined yet).
+        self._emission_order.sort(
+            key=lambda lid: self._lib_to_swf_id.get(lid, 0)
+        )
+
+        # ── 3c. Defer root-timeline definitions (optional) ──
+        #    If rootTimelineDefIds is available, defer those definitions
+        #    to the root timeline section to match the original SWF layout.
+        #    Without this hint, all definitions go in the definition section
+        #    which is functionally equivalent.
+        root_def_ids = set(self.data.get('rootTimelineDefIds', []))
+        self._deferred_lib_ids: List[int] = []
+        self._deferred_swf_ids: Set[int] = set()
+        if root_def_ids:
+            # Map original swfCharIds to deferred lib IDs
+            deferred = []
+            remaining = []
+            for lid in self._emission_order:
+                lib = self.id_to_lib.get(lid, {})
+                orig_cid = lib.get("swfCharId")
+                if orig_cid is not None and orig_cid in root_def_ids:
+                    deferred.append(lid)
+                    self._deferred_swf_ids.add(self._lib_to_swf_id.get(lid, 0))
+                else:
+                    remaining.append(lid)
+            self._deferred_lib_ids = deferred
+            self._emission_order = remaining
+
+        # ── 4. Build char_idx → swf_id mapping ──
+        for lib_id, swf_id in self._lib_to_swf_id.items():
+            ci = self._lib_to_char_idx.get(lib_id)
+            if ci is not None:
+                self._char_idx_to_swf_id[ci] = swf_id
+
+    # ── Unified asset emission ──────────────────────────────────────────
+
+    def _emit_font_aux_for(self, swf_id: int):
+        """Emit any pending font/text auxiliary tags (73, 74, 88) that
+        reference *swf_id*. Must be called right after the definition tag
+        for that character, matching the original SWF ordering."""
+        pending = self._font_aux_tags.get(swf_id)
+        if pending:
+            for tag_type, body in pending:
+                self._definition_tags.extend(
+                    build_tag(tag_type, body, force_long=True)
+                )
+
+    def _define_all_assets(self):
+        """Emit all definition tags in dependency order (sounds first, then
+        bitmaps/shapes/text/containers interleaved by dependency)."""
+        log.debug('_define_all_assets: emitting %d assets', len(self._emission_order))
+        counts = {"sound": 0, "bitmap": 0, "shape": 0, "container": 0, "text": 0}
+
+        for lib_id in self._emission_order:
+            lib = self.id_to_lib[lib_id]
+            ltype = lib["type"]
+
+            if ltype == "sound":
+                self._emit_sound(lib)
+                counts["sound"] += 1
+
+            elif ltype == "bitmap":
+                self._emit_bitmap(lib)
+                counts["bitmap"] += 1
+
+            elif ltype == "shape":
+                self._emit_shape(lib)
+                counts["shape"] += 1
+
+            elif ltype == "text":
+                self._emit_text(lib)
+                counts["text"] += 1
+
+            elif ltype == "container":
+                self._emit_container(lib)
+                counts["container"] += 1
+
+            # After each definition, emit its auxiliary tags (FontAlignZones,
+            # CSMTextSettings, DefineFontName) if any exist for this charId.
+            swf_id = self._lib_to_swf_id.get(lib_id)
+            if swf_id is not None:
+                self._emit_font_aux_for(swf_id)
+
+        print(f"  {counts['sound']} sounds, {counts['bitmap']} bitmaps, "
+              f"{counts['shape']} shapes, {counts['text']} texts, "
+              f"{counts['container']} movieclips defined")
+
+    def _emit_bitmap(self, lib: dict):
+        swf_id = self._lib_to_swf_id[lib["id"]]
+        log.debug('_emit_bitmap: lib_id=%d, swf_id=%d', lib['id'], swf_id)
+        # Raw tag passthrough for 1:1 roundtrip
+        if lib.get("rawTagBody"):
+            raw_body = _decode_raw_body(lib["rawTagBody"])
+            tag_type = lib.get("rawTagType", 36)  # DefineBitsLossless2
+            tag_data = struct.pack('<H', swf_id) + raw_body
+            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+            return
+        w = lib.get("width", 1)
+        h = lib.get("height", 1)
+        buf_str = lib.get("buffer", "")
+        pixel_data = _decode_raw_body(buf_str)
+        bmp_tag = build_define_bits_lossless2(swf_id, w, h, pixel_data)
+        self._definition_tags.extend(bmp_tag)
+
+    def _emit_shape(self, lib: dict):
+        # If this is a morph shape, dispatch to morph emitter
+        if lib.get("isMorphShape") or lib.get("rawTagType") in (46, 84):
+            self._emit_morph_shape(lib)
+            return
+        swf_id = self._lib_to_swf_id[lib["id"]]
+        log.debug('_emit_shape: lib_id=%d, swf_id=%d, name=%s', lib['id'], swf_id, lib.get('name', '?'))
+        # Font data passthrough: use fontData when rawTagBody is absent
+        if lib.get("isFont") and lib.get("fontData"):
+            raw_body = _decode_raw_body(lib["fontData"])
+            tag_type = lib.get("fontTagType", 75)  # DefineFont3
+            tag_data = struct.pack('<H', swf_id) + raw_body
+            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+            return
+        # Raw tag passthrough for 1:1 roundtrip
+        if lib.get("rawTagBody"):
+            raw_body = _decode_raw_body(lib["rawTagBody"])
+            tag_type = lib.get("rawTagType", 32)  # DefineShape3
+            tag_data = struct.pack('<H', swf_id) + raw_body
+            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+            return
+        recodes = lib.get("recodes", [])
+        bounds = lib.get("bounds")
+        if not recodes:
+            tag = build_define_shape3(swf_id, [], [], [], bounds)
+        else:
+            try:
+                fill_styles, line_styles, sub_paths = parse_next2d_shape_buffer(recodes)
+            except (IndexError, Exception) as e:
+                print(f"  WARNING: Shape '{lib.get('name','?')}' (id={lib['id']}, swfId={swf_id}) "
+                      f"recode parse error: {e}  — emitting empty shape")
+                tag = build_define_shape3(swf_id, [], [], [], bounds)
+                self._definition_tags.extend(tag)
+                return
+            # Resolve bitmap fill character IDs: if a BitmapFill has embedded
+            # pixel data but no bitmap_char_id, emit a DefineBitsLossless2 tag
+            # and assign the new SWF ID.
+            self._resolve_bitmap_fills(fill_styles)
+            tag = build_define_shape3(swf_id, fill_styles, line_styles, sub_paths, bounds)
+        self._definition_tags.extend(tag)
+
+    def _resolve_bitmap_fills(self, fill_styles: list):
+        """For each BitmapFill with embedded pixel data but no character ID,
+        emit a DefineBitsLossless2 tag and assign the resulting SWF ID."""
+        from shape_converter import BitmapFill
+        for fs in fill_styles:
+            if not isinstance(fs, BitmapFill):
+                continue
+            if fs.bitmap_char_id:
+                continue  # already resolved
+            if not fs.pixel_data or len(fs.pixel_data) <= 4:
+                continue  # placeholder, nothing to emit
+            # Allocate a new SWF character ID for this embedded bitmap
+            new_id = self._alloc_id()
+            fs.bitmap_char_id = new_id
+            self._bitmap_char_ids.add(new_id)
+            # Emit the bitmap definition tag
+            bmp_tag = build_define_bits_lossless2(new_id, fs.width, fs.height, fs.pixel_data)
+            self._definition_tags.extend(bmp_tag)
+
+    def _emit_morph_shape(self, lib: dict):
+        swf_id = self._lib_to_swf_id[lib["id"]]
+        # Raw tag passthrough for 1:1 roundtrip
+        if lib.get("rawTagBody"):
+            raw_body = _decode_raw_body(lib["rawTagBody"])
+            tag_type = lib.get("rawTagType", 84)  # DefineMorphShape2
+            tag_data = struct.pack('<H', swf_id) + raw_body
+            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+            return
+        start_recodes = lib.get("recodes") or lib.get("startRecodes") or []
+        start_bounds = lib.get("bounds") or lib.get("startBounds")
+        end_recodes = lib.get("endRecodes", [])
+        end_bounds = lib.get("endBounds")
+        try:
+            if start_recodes:
+                s_fills, s_lines, s_paths = parse_next2d_shape_buffer(start_recodes)
+            else:
+                s_fills, s_lines, s_paths = [], [], []
+            if end_recodes:
+                e_fills, e_lines, e_paths = parse_next2d_shape_buffer(end_recodes)
+            else:
+                e_fills, e_lines, e_paths = [], [], []
+        except (IndexError, Exception) as e:
+            print(f"  WARNING: MorphShape '{lib.get('name','?')}' (id={lib['id']}, swfId={swf_id}) "
+                  f"recode parse error: {e}  — emitting empty morph")
+            s_fills, s_lines, s_paths = [], [], []
+            e_fills, e_lines, e_paths = [], [], []
+        tag = build_define_morph_shape(
+            swf_id,
+            s_fills, s_lines, s_paths, start_bounds,
+            e_fills, e_lines, e_paths, end_bounds,
+        )
+        self._definition_tags.extend(tag)
+
+    def _emit_text(self, lib: dict):
+        swf_id = self._lib_to_swf_id[lib["id"]]
+        log.debug('_emit_text: lib_id=%d, swf_id=%d', lib['id'], swf_id)
+        # Raw tag passthrough for 1:1 roundtrip
+        if lib.get("rawTagBody"):
+            raw_body = _decode_raw_body(lib["rawTagBody"])
+            tag_type = lib.get("rawTagType", 37)  # DefineEditText
+            tag_data = struct.pack('<H', swf_id) + raw_body
+            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+            return
+        tag = build_define_edit_text(swf_id, lib)
+        self._definition_tags.extend(tag)
+
+    def _emit_sound(self, lib: dict):
+        swf_id = self._lib_to_swf_id[lib["id"]]
+        log.debug('_emit_sound: lib_id=%d, swf_id=%d', lib['id'], swf_id)
+        # Raw tag passthrough for 1:1 roundtrip
+        if lib.get("rawTagBody"):
+            raw_body = _decode_raw_body(lib["rawTagBody"])
+            tag_type = lib.get("rawTagType", 14)  # DefineSound
+            tag_data = struct.pack('<H', swf_id) + raw_body
+            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+            return
+        buf_str = lib.get("buffer", "")
+        if not buf_str:
+            return
+        wav_bytes = _decode_raw_body(buf_str)
+        if wav_bytes[:4] != b"RIFF":
+            print(f"  WARNING: Skipping non-WAV sound: {lib['name']}")
+            return
+        tag = build_define_sound(swf_id, wav_bytes)
+        self._definition_tags.extend(tag)
+
+    def _emit_container(self, lib: dict):
+        swf_id = self._lib_to_swf_id[lib["id"]]
+        log.debug('_emit_container: lib_id=%d, swf_id=%d, name=%s', lib['id'], swf_id, lib.get('name', '?'))
+        # Raw tag passthrough for 1:1 roundtrip
+        if lib.get("rawTagBody"):
+            raw_body = _decode_raw_body(lib["rawTagBody"])
+            tag_type = lib.get("rawTagType", 39)  # DefineSprite
+            tag_data = struct.pack('<H', swf_id) + raw_body
+            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+            return
+        tp = to_publish(lib, self._lib_to_char_idx, self.id_to_lib)
+        total_frames = lib.get("totalFrame", 1)
+        labels = lib.get("labels", [])
+        actions = lib.get("actions", [])
+
+        # SoundStreamHead2 tag passthrough
+        ssh_raw = lib.get("rawSoundStreamHead")
+        ssh_prefix = b""
+        if ssh_raw:
+            ssh_bytes = _decode_raw_body(ssh_raw)
+            ssh_prefix = build_tag(45, ssh_bytes)
+
+        inner_tags = ssh_prefix + build_timeline_tags(
+            total_frames, tp, labels, actions, self._char_idx_to_swf_id,
+            bitmap_char_ids=self._bitmap_char_ids,
+        )
+        inner_tags += build_tag_end()
+        sprite_tag = build_define_sprite(swf_id, total_frames, inner_tags)
+        self._definition_tags.extend(sprite_tag)
+
+    def _container_order(self) -> List[int]:
+        """Topological sort of containers (leaves first)."""
+        containers: Set[int] = set()
+        for lib in self.libs:
+            if lib["type"] == "container" and lib["id"] != 0:
+                containers.add(lib["id"])
+
+        # Build dependency graph
+        deps: Dict[int, Set[int]] = {}
+        for lib in self.libs:
+            if lib["type"] != "container" or lib["id"] == 0:
+                continue
+            lib_deps: Set[int] = set()
+            for layer in lib.get("layers", []):
+                for char in layer.get("characters", []):
+                    ref = char["libraryId"]
+                    if ref in containers:
+                        lib_deps.add(ref)
+            deps[lib["id"]] = lib_deps
+
+        # Topological sort (DFS)
+        order: List[int] = []
+        visited: Set[int] = set()
+
+        def visit(node: int):
+            if node in visited:
+                return
+            visited.add(node)
+            for dep in deps.get(node, set()):
+                visit(dep)
+            order.append(node)
+
+        for c in containers:
+            visit(c)
+
+        return order
+
+    # ── Root timeline ────────────────────────────────────────────────────
+
+    def _build_deferred_def_bytes(self) -> Dict[int, bytes]:
+        """Build definition + font-aux tag bytes for each deferred character,
+        keyed by its SWF charId."""
+        result: Dict[int, bytes] = {}
+        if not self._deferred_lib_ids:
+            return result
+        for lib_id in self._deferred_lib_ids:
+            lib = self.id_to_lib[lib_id]
+            swf_id = self._lib_to_swf_id[lib_id]
+            buf = bytearray()
+            if lib.get("rawTagBody"):
+                raw_body = _decode_raw_body(lib["rawTagBody"])
+                tag_type = lib.get("rawTagType", 39)
+                tag_data = struct.pack('<H', swf_id) + raw_body
+                buf.extend(build_tag(tag_type, tag_data, force_long=True))
+            pending = self._font_aux_tags.get(swf_id)
+            if pending:
+                for tag_type, body in pending:
+                    buf.extend(build_tag(tag_type, body, force_long=True))
+            result[swf_id] = bytes(buf)
+        return result
+
+    def _build_root_timeline(self) -> bytes:
+        """Build root timeline from main container (id=0)."""
+        log.debug('_build_root_timeline: entry')
+        main = self.id_to_lib.get(0)
+        if not main:
+            return build_tag_show_frame() + build_tag_end()
+
+        tp = to_publish(main, self._lib_to_char_idx, self.id_to_lib)
+        total_frames = main.get("totalFrame", 1)
+        labels = main.get("labels", [])
+        actions = main.get("actions", [])
+
+        timeline_tags = build_timeline_tags(
+            total_frames, tp, labels, actions, self._char_idx_to_swf_id,
+            bitmap_char_ids=self._bitmap_char_ids,
+        )
+
+        # Inject deferred root-timeline definitions interleaved with
+        # PlaceObject tags: each definition appears right before the
+        # first PlaceObject that places a character with charId >= the
+        # definition's charId.  This matches the original SWF layout.
+        deferred_per_cid = self._build_deferred_def_bytes()
+        if deferred_per_cid:
+            timeline_tags = self._inject_deferred_into_timeline(
+                timeline_tags, deferred_per_cid
+            )
+
+        return timeline_tags
+
+    def _inject_deferred_into_timeline(self, timeline_bytes: bytes,
+                                        deferred: Dict[int, bytes]) -> bytes:
+        """Re-serialize *timeline_bytes* with deferred definitions injected
+        right before their corresponding PlaceObject tags."""
+        # Parse the flat byte stream into individual tags
+        raw_tags: List[Tuple[int, bytes, int]] = []  # (tag_type, body, hdr_len)
+        pos = 0
+        while pos < len(timeline_bytes):
+            tcl = struct.unpack_from('<H', timeline_bytes, pos)[0]
+            tt = tcl >> 6
+            ln = tcl & 0x3F
+            hdr = 2
+            pos += 2
+            if ln == 0x3F:
+                ln = struct.unpack_from('<I', timeline_bytes, pos)[0]
+                pos += 4
+                hdr = 6
+            body = timeline_bytes[pos:pos + ln]
+            raw_tags.append((tt, body, hdr))
+            pos += ln
+            if tt == 0:
+                break
+
+        emitted: Set[int] = set()
+        result = bytearray()
+
+        for tt, body, hdr in raw_tags:
+            # Before each PlaceObject2/3 with HasCharacter, inject any
+            # not-yet-emitted deferred defs whose charId <= placed charId.
+            if tt in (26, 70) and len(body) >= 5:
+                flags = body[0]
+                has_char = bool(flags & 0x02)
+                if has_char:
+                    if tt == 26:
+                        placed_cid = struct.unpack_from('<H', body, 3)[0]
+                    else:  # PlaceObject3 has an extra flags byte
+                        placed_cid = struct.unpack_from('<H', body, 4)[0]
+                    for cid in sorted(deferred.keys()):
+                        if cid not in emitted and cid <= placed_cid:
+                            result.extend(deferred[cid])
+                            emitted.add(cid)
+
+            # Re-emit the tag, using forced long format for PlaceObject2/3
+            # that carry a HasName flag (matching Adobe/JPEXS convention).
+            use_long = (hdr == 6)
+            if tt in (26, 70) and len(body) >= 1 and (body[0] & 0x20):
+                use_long = True  # HasName → force long header
+            if use_long or len(body) >= 0x3F:
+                code_and_len = (tt << 6) | 0x3F
+                result.extend(struct.pack("<HI", code_and_len, len(body)))
+            else:
+                code_and_len = (tt << 6) | len(body)
+                result.extend(struct.pack("<H", code_and_len))
+            result.extend(body)
+
+        return bytes(result)
+
+    def _assemble_swf(self, root_timeline_tags: bytes, doabc_tags: bytes,
+                       sym_to_class: Dict[str, str] = None,
+                       fla_classes: Dict[int, str] = None,
+                       raw_aux_tags: bytes = b"",
+                       raw_aux_map: Dict[int, bytes] = None) -> bytes:
+        log.info('_assemble_swf: root_timeline=%d bytes, doabc=%d bytes',
+                 len(root_timeline_tags), len(doabc_tags))
+        if sym_to_class is None:
+            sym_to_class = {}
+        if fla_classes is None:
+            fla_classes = {}
+        if raw_aux_map is None:
+            raw_aux_map = {}
+
+        width = self.stage.get("width", 550)
+        height = self.stage.get("height", 400)
+        fps = self.stage.get("fps", 24)
+        bg_color = self.stage.get("bgColor", "#ffffff")
+        main = self.id_to_lib.get(0, {})
+        total_frames = main.get("totalFrame", 1)
+        swf_version = self.data.get("swfVersion", 14)
+        swf_compressed = self.data.get("swfCompressed", True)
+
+        # Parse bg color
+        bg = bg_color.lstrip("#")
+        r = int(bg[0:2], 16) if len(bg) >= 2 else 255
+        g = int(bg[2:4], 16) if len(bg) >= 4 else 255
+        b = int(bg[4:6], 16) if len(bg) >= 6 else 255
+
+        all_tags = bytearray()
+
+        # 1. FileAttributes (AS3)
+        all_tags.extend(build_file_attributes(has_as3=True))
+
+        # 2. SetBackgroundColor (before non-definition metadata, matching OG)
+        all_tags.extend(build_set_background_color(r, g, b))
+
+        # 3. Auxiliary tags (Protect, SceneAndFrameLabel, SoundStreamHead2)
+        if raw_aux_tags:
+            all_tags.extend(raw_aux_tags)
+
+        # 4. All definition tags (bitmaps, shapes, sounds, fonts, morphShapes, texts, containers)
+        #    Font/text auxiliary tags (73, 74, 88) are emitted inline by
+        #    _define_all_assets right after their referenced definition.
+        all_tags.extend(self._definition_tags)
+
+        # 4. DoABC (compiled AS3 bytecode)
+        if doabc_tags:
+            all_tags.extend(doabc_tags)
+
+        # 5. SymbolClass — map exported symbols + document class
+        #    Use raw SymbolClass from OG SWF if available (preserves entry order).
+        raw_symbolclass = raw_aux_map.get(76)  # tag type 76 = SymbolClass
+        if raw_symbolclass is not None:
+            all_tags.extend(build_tag(76, raw_symbolclass))
+        else:
+            #    For AS3, each symbol needs to map to its ABC class name.
+            #    - Bitmaps: use DefineBitsLossless2 ID (bmp_id), class extends BitmapData
+            #    - Sounds: use DefineSound ID, class extends Sound
+            #    - Containers: use DefineSprite ID, class extends MovieClip
+            symbol_pairs: List[Tuple[int, str]] = []
+
+            # Document class: character ID 0 → "Main"
+            symbol_pairs.append((0, "Main"))
+
+            # All other exported symbols
+            for lib in self.libs:
+                if lib["id"] == 0:
+                    continue
+                sym = lib.get("symbol", "")
+                if not sym or sym == "Main":
+                    continue
+
+                # Get the class name from the stub map
+                class_name = sym_to_class.get(sym, sym)
+
+                swf_id = self._lib_to_swf_id.get(lib["id"])
+                if swf_id is not None:
+                    symbol_pairs.append((swf_id, class_name))
+
+            # Add _fla package classes for containers with frame scripts
+            for lib_id, fla_fqn in fla_classes.items():
+                swf_id = self._lib_to_swf_id.get(lib_id)
+                if swf_id is not None:
+                    symbol_pairs.append((swf_id, fla_fqn))
+
+            if symbol_pairs:
+                all_tags.extend(build_symbol_class(symbol_pairs))
+
+        # 6. Root timeline
+        all_tags.extend(root_timeline_tags)
+
+        # 7. End tag
+        all_tags.extend(build_tag_end())
+
+        return build_swf_file(
+            width=width,
+            height=height,
+            fps=fps,
+            frame_count=total_frames,
+            tags=bytes(all_tags),
+            compressed=swf_compressed,
+            version=swf_version,
+        )
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────
+
+def main():
+    log.debug('main: entry')
+    parser = argparse.ArgumentParser(
+        description="Compile a next2D .n2D file into an AS3 SWF"
+    )
+    parser.add_argument("input", help="Path to .n2D file")
+    parser.add_argument("-o", "--output", help="Output .swf path")
+    parser.add_argument("--shared", required=True,
+                        help="Path to shared AS3 source directory")
+    parser.add_argument("--sdk", help="Path to Flex/AIR SDK")
+
+    args = parser.parse_args()
+
+    if not os.path.isfile(args.input):
+        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
+        return 1
+
+    output = args.output
+    if not output:
+        output = os.path.splitext(args.input)[0] + ".swf"
+
+    compiler = N2DCompiler(
+        n2d_path=args.input,
+        shared_dir=args.shared,
+        output_path=output,
+        sdk_path=args.sdk,
+    )
+    compiler.compile()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,40 @@
+<?js
+    var data = obj;
+?>
+<section>
+    <header>
+        <div class="header content-size">
+            <h1><?js= data.filename ?></h1>
+        </div>
+    </header>
+    <article>
+        <pre id="source-code" class="prettyprint source <?js= env.conf.templates.linenums ? 'linenums' : '' ?>"><code><?js= data.code ?></code></pre>
+    </article>
+</section>
+
+<script type="text/javascript">
+    (() =>
+    {
+        let counter = 1;
+
+        const source = document.getElementById("source-code");
+        if (source) {
+            const code = source.getElementsByTagName("code")[0];
+
+            let numbered = code.innerHTML.split("\n");
+            numbered = numbered.map((item) =>
+            {
+                return `<li id="line${counter++}"><code>${item}</code></li>`;
+            });
+
+            code.remove();
+
+            const ol = document.createElement("ol");
+            ol.classList.add("linenums");
+
+            source.appendChild(ol);
+            ol.innerHTML = numbered.join("");
+        }
+
+    })();
+</script>
