@@ -430,5 +430,7 @@ exports.test = gulp.series(
     test
 );
 
-exports.jsdoc = gulp.series(createHTML);
-exports.lint  = gulp.series(lint);
+exports.jsdoc    = gulp.series(createHTML);
+exports.lint     = gulp.series(lint);
+// Dev-only JS rebuild: concatenate without uglify/mangling (safe for class names)
+exports.buildDevJS = gulp.series(buildWorker, buildUtil, buildJavaScript);

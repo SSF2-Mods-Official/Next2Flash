@@ -2956,13 +2956,13 @@ class N2DBuilder:
                 if cmd == BITMAP_FILL and i + 1 < len(recodes):
                     bmp_id = recodes[i + 1]
                     if isinstance(bmp_id, int) and bmp_id in bitmap_map:
-                        recodes[i + 1] = bitmap_map[bmp_id]
+                        recodes[i + 1] = dict(bitmap_map[bmp_id], bitmapId=bmp_id)
                         replaced += 1
                     i += 5  # BITMAP_FILL + bitmapData + matrix + repeat + smooth
                 elif cmd == BITMAP_STROKE and i + 5 < len(recodes):
                     bmp_id = recodes[i + 5]
                     if isinstance(bmp_id, int) and bmp_id in bitmap_map:
-                        recodes[i + 5] = bitmap_map[bmp_id]
+                        recodes[i + 5] = dict(bitmap_map[bmp_id], bitmapId=bmp_id)
                         replaced += 1
                     i += 9  # BITMAP_STROKE + w,c,j,m + bitmapData + matrix + repeat + smooth
                 else:

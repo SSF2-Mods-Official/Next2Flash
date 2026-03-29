@@ -568,6 +568,34 @@ def find_sdk() -> Optional[str]:
 
 # ── n2D file loading ─────────────────────────────────────────────────────
 
+def _overlay_external_scripts(data: dict, project_dir: str) -> None:
+    """Read .as files from the project folder and overlay them onto the
+    embedded scripts in *data*.  If any script source differs from what is
+    embedded, set ``data['scriptsModified'] = True`` so the compiler will
+    recompile from source instead of using the raw DoABC passthrough."""
+    scripts = data.get('scripts')
+    if not scripts:
+        return
+    modified = False
+    for script in scripts:
+        ext = script.get('externalFile', '')
+        if not ext:
+            continue
+        ext_path = os.path.join(project_dir, ext)
+        if not os.path.isfile(ext_path):
+            continue
+        with open(ext_path, 'r', encoding='utf-8') as f:
+            new_source = f.read()
+        old_source = script.get('source', '')
+        if new_source != old_source:
+            script['source'] = new_source
+            modified = True
+            log.info('_overlay_external_scripts: updated %s', ext)
+    if modified:
+        data['scriptsModified'] = True
+        log.info('_overlay_external_scripts: marked scriptsModified=True')
+
+
 def load_n2d(path: str) -> Tuple[dict, Optional[str]]:
     """Load an .n2D file → (parsed JSON dict, project_dir or None).
 
@@ -594,6 +622,7 @@ def load_n2d(path: str) -> Tuple[dict, Optional[str]]:
         import io as _io
         with _zipfile.ZipFile(_io.BytesIO(raw)) as zf:
             data = json.loads(zf.read('project.json'))
+        _overlay_external_scripts(data, project_dir)
         return data, project_dir
 
     with open(path, "rb") as f:
@@ -610,14 +639,19 @@ def load_n2d(path: str) -> Tuple[dict, Optional[str]]:
         import io as _io
         with _zipfile.ZipFile(_io.BytesIO(raw)) as zf:
             data = json.loads(zf.read('project.json'))
+            if project_dir:
+                _overlay_external_scripts(data, project_dir)
             return data, project_dir
 
     decompressed = zlib.decompress(raw)
     text = decompressed.decode("utf-8")
     try:
-        return json.loads(unquote(text)), project_dir
+        data = json.loads(unquote(text))
     except (json.JSONDecodeError, ValueError):
-        return json.loads(text), project_dir
+        data = json.loads(text)
+    if project_dir:
+        _overlay_external_scripts(data, project_dir)
+    return data, project_dir
 
 
 # ── WAV → DefineSound ────────────────────────────────────────────────────

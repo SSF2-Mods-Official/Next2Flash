@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import threading
@@ -61,6 +62,141 @@ def _get_compile_n2d():
     _compile_n2d = mod
     log.debug('_get_compile_n2d: (re)loaded compile_n2d module')
     return _compile_n2d
+
+
+def _overlay_external_bitmaps(n2d_json: dict, project_dir: str) -> None:
+    """Read external PNG/JPG bitmap files and update:
+    1. The bitmap library entry (buffer, width, height, rawTagBody).
+    2. Any embedded {buffer, width, height} dicts baked into shape recodes,
+       matched back to the correct bitmap via the original buffer contents.
+    """
+    from PIL import Image
+
+    BITMAP_FILL   = 13
+    BITMAP_STROKE = 14
+    FP_BYTES      = 32  # fingerprint length in bytes (8 RGBA pixels)
+
+    libraries = n2d_json.get("libraries", [])
+    log.info('_overlay_external_bitmaps: project_dir=%s, libraries=%d', project_dir, len(libraries))
+
+    def _fingerprint(buf_list):
+        """Take a reliable fingerprint: skip leading transparent pixels, grab FP_BYTES."""
+        for px in range(0, len(buf_list) - 3, 4):
+            if buf_list[px + 3] != 0:   # found non-transparent pixel
+                return tuple(buf_list[px: px + FP_BYTES])
+        return tuple(buf_list[:FP_BYTES])  # all-transparent fallback
+
+    # Phase 1 — Build fingerprint map from existing bitmap library buffers BEFORE
+    # we overwrite them. Maps old_fingerprint → (lib_id, new_rgba_list, new_w, new_h)
+    fingerprint_to_new = {}
+    lib_id_to_new      = {}   # for int-id recode entries
+    updated_libs = 0
+
+    for lib in libraries:
+        if not lib or lib.get("type") != "bitmap":
+            continue
+        ext_file = lib.get("externalFile", "")
+        if not ext_file:
+            continue
+        fpath = os.path.join(project_dir, ext_file)
+        if not os.path.isfile(fpath):
+            continue
+        try:
+            # Fingerprint OLD buffer before overwriting
+            orig_buf = lib.get("buffer", "")
+            if orig_buf:
+                old_list = list(orig_buf.encode('latin-1'))
+                fp = _fingerprint(old_list)
+            else:
+                fp = None
+
+            img  = Image.open(fpath).convert("RGBA")
+            rgba = img.tobytes()
+            new_list = list(rgba)
+
+            # Update library entry
+            lib["buffer"] = rgba.decode('latin-1')
+            lib["width"]  = img.width
+            lib["height"] = img.height
+
+            # Rebuild rawTagBody (ARGB premultiplied, zlib-compressed)
+            argb = bytearray()
+            for idx in range(0, len(rgba), 4):
+                r, g, b, a = rgba[idx], rgba[idx+1], rgba[idx+2], rgba[idx+3]
+                if a == 0:
+                    argb.extend([0, 0, 0, 0])
+                elif a == 255:
+                    argb.extend([a, r, g, b])
+                else:
+                    argb.extend([a, (r*a+127)//255, (g*a+127)//255, (b*a+127)//255])
+            compressed = zlib.compress(bytes(argb), 9)
+            raw_body = struct.pack('<BHH', 5, img.width, img.height) + compressed
+            lib["rawTagBody"] = base64.b64encode(raw_body).decode("ascii")
+            lib["rawTagType"] = 36  # DefineBitsLossless2
+
+            payload = (new_list, img.width, img.height)
+            if fp:
+                fingerprint_to_new[fp] = payload
+            lib_id_to_new[lib["id"]] = payload
+            updated_libs += 1
+        except Exception as e:
+            log.warning('_overlay_external_bitmaps: %s: %s', ext_file, e)
+
+    log.info('_overlay_external_bitmaps: updated %d bitmap library entries', updated_libs)
+
+    # Phase 2 — Walk shape recodes and replace embedded bitmap dicts.
+    if not lib_id_to_new and not fingerprint_to_new:
+        return
+
+    fills_updated = 0
+    for lib in libraries:
+        if lib.get("type") != "shape" or not lib.get("inBitmap"):
+            continue
+        recodes = lib.get("recodes", [])
+        i = 0
+        while i < len(recodes):
+            cmd = recodes[i]
+            if cmd == BITMAP_FILL and i + 1 < len(recodes):
+                fv      = recodes[i + 1]
+                fill_at = i + 1
+                step    = 5
+            elif cmd == BITMAP_STROKE and i + 5 < len(recodes):
+                fv      = recodes[i + 5]
+                fill_at = i + 5
+                step    = 9
+            else:
+                i += 1
+                continue
+
+            new_data = None
+            if isinstance(fv, int):
+                # Integer library ID reference
+                new_data = lib_id_to_new.get(fv)
+            elif isinstance(fv, dict):
+                bmp_id = fv.get("bitmapId")
+                if bmp_id is not None:
+                    # Newer format with explicit ID
+                    new_data = lib_id_to_new.get(bmp_id)
+                else:
+                    # Fingerprint match against old buffer
+                    buf = fv.get("buffer") or []
+                    fp  = _fingerprint(buf)
+                    new_data = fingerprint_to_new.get(fp)
+
+            if new_data is not None:
+                new_rgba, new_w, new_h = new_data
+                if isinstance(fv, dict):
+                    fv["buffer"] = new_rgba
+                    fv["width"]  = new_w
+                    fv["height"] = new_h
+                else:
+                    recodes[fill_at] = {"buffer": new_rgba, "width": new_w, "height": new_h}
+                fills_updated += 1
+
+            i += step
+
+    log.info('_overlay_external_bitmaps: updated %d embedded shape fill dicts', fills_updated)
+    print(f'[N2F] bitmap overlay: {updated_libs} bitmaps, {fills_updated} shape fills updated')
 
 
 # ---------------------------------------------------------------------------
@@ -406,18 +542,33 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 except (json.JSONDecodeError, ValueError):
                     n2d_json = json.loads(text)
 
-            # Check if this .n2d lives in a project folder
-            # We save it to converted/<name>/ and check for existing project structure
-            project_dir = os.path.join(SERVER_DIR, "converted", name)
+            # Check if this .n2d lives in a project folder.
+            # The N2D's internal "name" field is the actual project folder name
+            # (e.g. "gameandwatchOG"), while the uploaded filename is always
+            # "project.n2d", so prefer the JSON name for the lookup.
+            proj_name = n2d_json.get("name", name)
+            project_dir = os.path.join(SERVER_DIR, "converted", proj_name)
             has_project = (
                 os.path.isdir(project_dir) and
                 os.path.isdir(os.path.join(project_dir, "bitmaps"))
             )
+            print(f'[N2F DEBUG] _handle_open_project: filename={filename!r}, json_name={proj_name!r}')
+            print(f'[N2F DEBUG]   project_dir={project_dir!r}, has_project={has_project}')
+            # Fallback: try filename-derived name in case JSON name differs
+            if not has_project and proj_name != name:
+                alt_dir = os.path.join(SERVER_DIR, "converted", name)
+                alt_has = os.path.isdir(alt_dir) and os.path.isdir(os.path.join(alt_dir, "bitmaps"))
+                print(f'[N2F DEBUG]   fallback alt_dir={alt_dir!r}, alt_has={alt_has}')
+                if alt_has:
+                    project_dir = alt_dir
+                    has_project = True
 
             if has_project:
                 with self._project_lock:
                     Next2FlashHandler._current_project_dir = project_dir
                 log.info('_handle_open_project: found project folder at %s', project_dir)
+                # Overlay external bitmaps so the tool shows current images
+                _overlay_external_bitmaps(n2d_json, project_dir)
             else:
                 project_dir = None
 
@@ -476,40 +627,14 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                             script["source"] = f.read()
                         scripts_refreshed += 1
 
-            # Re-read external bitmap files (PNG/JPG) → update rawTagBody
-            bitmaps_refreshed = 0
-            for lib in n2d_json.get("libraries", []):
-                if not lib or lib.get("type") != "bitmap":
-                    continue
-                ext_file = lib.get("externalFile", "")
-                if not ext_file:
-                    continue
-                fpath = os.path.join(project_dir, ext_file)
-                if not os.path.isfile(fpath):
-                    continue
-                try:
-                    from PIL import Image
-                    img = Image.open(fpath).convert("RGBA")
-                    # Build raw DefineBitsLossless2 body (without charId, without tag header)
-                    # RGBA → premultiplied ARGB
-                    rgba = img.tobytes()
-                    argb = bytearray()
-                    for i in range(0, len(rgba), 4):
-                        r, g, b, a = rgba[i], rgba[i+1], rgba[i+2], rgba[i+3]
-                        if a == 0:
-                            argb.extend([0, 0, 0, 0])
-                        elif a == 255:
-                            argb.extend([a, r, g, b])
-                        else:
-                            argb.extend([a, (r*a+127)//255, (g*a+127)//255, (b*a+127)//255])
-                    compressed = zlib.compress(bytes(argb), 9)
-                    # rawTagBody = BitmapFormat(1) + Width(2) + Height(2) + zlib data
-                    raw_body = struct.pack('<BHH', 5, img.width, img.height) + compressed
-                    lib["rawTagBody"] = base64.b64encode(raw_body).decode("ascii")
-                    lib["rawTagType"] = 36  # DefineBitsLossless2
-                    bitmaps_refreshed += 1
-                except Exception as be:
-                    print(f"[Refresh] WARN: could not refresh bitmap {ext_file}: {be}")
+            # Re-read external bitmap files — use the same full pipeline as open-project:
+            # Phase 1 (library entries) + Phase 2 (embedded fill dicts in shape recodes)
+            _overlay_external_bitmaps(n2d_json, project_dir)
+            bitmaps_refreshed = sum(
+                1 for lib in n2d_json.get("libraries", [])
+                if lib and lib.get("type") == "bitmap" and lib.get("externalFile")
+                and os.path.isfile(os.path.join(project_dir, lib["externalFile"]))
+            )
 
             # Re-read external sound files (MP3/WAV) → update rawTagBody
             sounds_refreshed = 0
@@ -546,6 +671,13 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             name = n2d_json.get("name", os.path.basename(project_dir))
             print(f"[Refresh] {scripts_refreshed} scripts, {bitmaps_refreshed} bitmaps, {sounds_refreshed} sounds refreshed from {project_dir}")
 
+            # Save refreshed data back to project.n2d so Export SWF picks it up
+            try:
+                mod = _get_swf_to_n2d()
+                mod.save_n2d(n2d_json, os.path.join(project_dir, "project.n2d"))
+            except Exception as save_err:
+                print(f"[Refresh] WARN: could not save updated project.n2d: {save_err}")
+
             json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
             url_encoded = quote(json_str, safe="")
             compressed = zlib.compress(url_encoded.encode("ascii"), 1)
@@ -571,7 +703,9 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
     def _handle_n2d_to_swf(self):
         """POST /api/n2d-to-swf — Convert uploaded N2D back to SWF.
         
-        Accepts: N2D file bytes (zlib-compressed).
+        Accepts either:
+          - Multipart with fromProject=true → compile from existing project.n2d
+          - Multipart with file upload → legacy browser-blob pipeline
         Returns: SWF file as application/octet-stream.
         """
         try:
@@ -579,6 +713,58 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             if not body:
                 return self._error_response(400, "No data received")
 
+            mod = _get_compile_n2d()
+
+            with self._project_lock:
+                project_dir = Next2FlashHandler._current_project_dir
+
+            # Check if this is a "compile from project folder" request
+            from_project = self._extract_form_field(body, "fromProject")
+            if from_project and project_dir and os.path.isdir(project_dir):
+                n2d_path = os.path.join(project_dir, "project.n2d")
+                if not os.path.isfile(n2d_path):
+                    return self._error_response(400, "No project.n2d in project folder")
+
+                name = os.path.basename(project_dir)
+                log.info('_handle_n2d_to_swf: compiling from project folder %s', project_dir)
+
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    swf_path = os.path.join(tmpdir, f"{name}.swf")
+                    shared_dir = os.path.join(SERVER_DIR, "..", "shared")
+                    if not os.path.isdir(shared_dir):
+                        shared_dir = tmpdir
+
+                    compiler = mod.N2DCompiler(
+                        n2d_path=n2d_path,
+                        shared_dir=shared_dir,
+                        output_path=swf_path,
+                    )
+                    print(f"[DEBUG] Compiling from project folder: {project_dir}")
+                    print(f"[DEBUG] Compiler SDK path: {compiler.sdk_path}")
+                    compiler.compile()
+
+                    with open(swf_path, "rb") as f:
+                        swf_bytes = f.read()
+
+                    # Debug copies
+                    debug_swf = os.path.join(SERVER_DIR, "converted", "_last_export.swf")
+                    try:
+                        with open(debug_swf, "wb") as df:
+                            df.write(swf_bytes)
+                        print(f"[DEBUG] Saved export SWF to {debug_swf} ({len(swf_bytes)} bytes)")
+                    except Exception as de:
+                        print(f"[DEBUG] Could not save debug SWF: {de}")
+
+                    self.send_response(200)
+                    self._cors_headers()
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Disposition", f'attachment; filename="{name}.swf"')
+                    self.send_header("Content-Length", str(len(swf_bytes)))
+                    self.end_headers()
+                    self.wfile.write(swf_bytes)
+                return
+
+            # Legacy path: browser uploaded an N2D blob
             n2d_data, filename = self._extract_upload(body, "file")
             if not n2d_data:
                 n2d_data = body
@@ -587,28 +773,12 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             name = os.path.splitext(filename)[0] if filename else "output"
             log.info('_handle_n2d_to_swf: compiling %s (%d bytes)', filename, len(n2d_data))
 
-            mod = _get_compile_n2d()
-
-            # If we have a project folder, point the compiler at it
-            # so it can resolve external bitmap/sound files.
-            with self._project_lock:
-                project_dir = Next2FlashHandler._current_project_dir
-
             # Write N2D to a temp file and use N2DCompiler
             with tempfile.TemporaryDirectory() as tmpdir:
-                # If project dir exists, write the N2D there so external
-                # assets are resolvable via relative paths in project.json
-                if project_dir and os.path.isdir(project_dir):
-                    n2d_path = os.path.join(project_dir, f"project.n2d")
-                    # Overwrite the project.n2d with latest tool state
-                    with open(n2d_path, "wb") as f:
-                        f.write(n2d_data)
-                    swf_path = os.path.join(tmpdir, f"{name}.swf")
-                else:
-                    n2d_path = os.path.join(tmpdir, f"{name}.n2d")
-                    swf_path = os.path.join(tmpdir, f"{name}.swf")
-                    with open(n2d_path, "wb") as f:
-                        f.write(n2d_data)
+                n2d_path = os.path.join(tmpdir, f"{name}.n2d")
+                swf_path = os.path.join(tmpdir, f"{name}.swf")
+                with open(n2d_path, "wb") as f:
+                    f.write(n2d_data)
                 shared_dir = os.path.join(SERVER_DIR, "..", "shared")
                 if not os.path.isdir(shared_dir):
                     shared_dir = tmpdir  # fallback
@@ -698,6 +868,40 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
         if length <= 0:
             return b""
         return self.rfile.read(length)
+
+    def _extract_form_field(self, body: bytes, field_name: str):
+        """Extract a simple (non-file) form field value from multipart/form-data."""
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            return None
+        for part in content_type.split(";"):
+            part = part.strip()
+            if part.startswith("boundary="):
+                boundary = part[9:].strip('"')
+                break
+        else:
+            return None
+        boundary_bytes = f"--{boundary}".encode()
+        parts = body.split(boundary_bytes)
+        needle = f'name="{field_name}"'.encode()
+        for part in parts:
+            if needle not in part:
+                continue
+            # Skip parts that also have a filename (those are file uploads)
+            if b"filename=" in part:
+                continue
+            header_end = part.find(b"\r\n\r\n")
+            if header_end < 0:
+                continue
+            value = part[header_end + 4:]
+            if value.endswith(b"\r\n"):
+                value = value[:-2]
+            if value.endswith(b"--"):
+                value = value[:-2]
+            if value.endswith(b"\r\n"):
+                value = value[:-2]
+            return value.decode("utf-8", errors="replace").strip()
+        return None
 
     def _extract_upload(self, body: bytes, field_name: str):
         """Try to extract a file from multipart/form-data. Returns (data, filename) or (None, None)."""
@@ -836,6 +1040,8 @@ def main():
                      'shape_converter', 'bitmap_converter', 'text_converter',
                      'swf_shape_to_recodes', 'as3_decompiler'):
         logging.getLogger(mod_name).setLevel(log_level)
+    # Suppress verbose third-party debug output
+    logging.getLogger('PIL').setLevel(logging.WARNING)
     log.info('Logging initialized at %s level', logging.getLevelName(log_level))
 
     # Verify app directory exists

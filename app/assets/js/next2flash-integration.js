@@ -216,37 +216,57 @@
     if (!file) return;
     _log.info('N2D file selected:', file.name, formatBytes(file.size));
     e.target.value = '';
-
     showProgress('Loading N2D file...\n' + file.name + ' (' + formatBytes(file.size) + ')');
+    _doOpenProjectBlob(file, file.name, null);
+  }
 
-    // Upload the .n2d to the server so it can set up project context
+  /**
+   * POST a blob to /api/open-project, apply the result to the tool.
+   * @param {Blob} blob       - The .n2d blob to upload.
+   * @param {string} fileName - Used as fallback name if server doesn't return one.
+   * @param {Function|null} onSuccess - Called with the result object after loading;
+   *                                    receives {blob, name, libs, projDir}.
+   */
+  function _doOpenProjectBlob(blob, fileName, onSuccess) {
     var form = new FormData();
-    form.append('file', file);
+    form.append('file', blob instanceof File ? blob : new File([blob], fileName, { type: 'application/octet-stream' }));
 
     fetch(API_BASE + '/api/open-project', { method: 'POST', body: form })
       .then(function (r) {
         if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
-        var name = r.headers.get('X-N2D-Name') || file.name.replace('.n2d', '');
+        var name = r.headers.get('X-N2D-Name') || fileName.replace(/\.n2d$/i, '');
         var libs = r.headers.get('X-N2D-Libraries') || '?';
         var projDir = r.headers.get('X-Project-Dir') || '';
-        return r.blob().then(function (blob) {
-          return { blob: blob, name: name, libs: libs, projDir: projDir };
+        console.log('[N2F] open-project response headers:', {
+          'X-N2D-Name': name,
+          'X-N2D-Libraries': libs,
+          'X-Project-Dir': projDir,
+          'X-N2D-Scripts': r.headers.get('X-N2D-Scripts')
+        });
+        return r.blob().then(function (b) {
+          console.log('[N2F] received blob size:', b.size);
+          return { blob: b, name: name, libs: libs, projDir: projDir };
         });
       })
       .then(function (result) {
         hideProgress();
         if (result.projDir) {
           _currentProjectDir = result.projDir;
+          console.log('[N2F] project dir set to:', _currentProjectDir);
           _log.info('Opened project at:', _currentProjectDir);
           var refreshBtn = document.getElementById('n2f-refresh-assets');
           if (refreshBtn) refreshBtn.disabled = false;
+        } else {
+          console.warn('[N2F] No X-Project-Dir returned — bitmaps were NOT overlaid by server');
         }
 
         _importedN2DBlob = result.blob.slice(0);
         _saveImportedBlobToIDB(_importedN2DBlob);
 
         _feedN2DToTool(result.blob, result.name);
-        toast('Opened: ' + result.name + ' (' + result.libs + ' libraries)');
+
+        if (onSuccess) onSuccess(result);
+        else toast('Opened: ' + result.name + ' (' + result.libs + ' libraries)');
       })
       .catch(function (err) {
         hideProgress();
@@ -265,49 +285,74 @@
       return;
     }
 
-    showProgress('Refreshing assets from project folder...');
+    // Get the stored blob (memory first, then IDB)
+    var blobPromise = _importedN2DBlob
+      ? Promise.resolve(_importedN2DBlob)
+      : _loadImportedBlobFromIDB();
 
-    fetch(API_BASE + '/api/refresh-assets', { method: 'POST' })
-      .then(function (r) {
-        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
-        var name = r.headers.get('X-N2D-Name') || 'project';
-        var libs = r.headers.get('X-N2D-Libraries') || '?';
-        var refreshed = r.headers.get('X-Refreshed-Scripts') || '0';
-        var bitmapsRefreshed = r.headers.get('X-Refreshed-Bitmaps') || '0';
-        var soundsRefreshed = r.headers.get('X-Refreshed-Sounds') || '0';
-        return r.blob().then(function (blob) {
-          return { blob: blob, name: name, libs: libs, refreshed: refreshed, bitmapsRefreshed: bitmapsRefreshed, soundsRefreshed: soundsRefreshed };
-        });
-      })
-      .then(function (result) {
-        hideProgress();
+    blobPromise.then(function (storedBlob) {
+      if (!storedBlob) {
+        toast('No stored project file — please use Import Project first.', true);
+        return;
+      }
 
-        _importedN2DBlob = result.blob.slice(0);
-        _saveImportedBlobToIDB(_importedN2DBlob);
+      // Remember which in-app tab is currently active
+      var oldTabEl = document.querySelector('#view-tab-area .active[data-tab-id]');
+      var oldTabId = oldTabEl ? oldTabEl.dataset.tabId : null;
 
-        _feedN2DToTool(result.blob, result.name);
-        toast('Assets refreshed: ' + result.refreshed + ' scripts, ' + result.bitmapsRefreshed + ' bitmaps, ' + result.soundsRefreshed + ' sounds');
-      })
-      .catch(function (err) {
-        hideProgress();
-        _log.error('Refresh assets failed:', err.message);
-        toast('Refresh failed: ' + err.message, true);
+      // Open a new blank in-app tab so the load goes into it
+      var addTabBtn = document.getElementById('view-tab-add');
+      if (addTabBtn) addTabBtn.click();
+
+      showProgress('Refreshing project from server...');
+
+      // Re-run the exact same open-project pipeline with the stored file
+      _doOpenProjectBlob(storedBlob, _currentProjectDir.split(/[\\/]/).pop() + '.n2d', function (result) {
+        // Close the old tab, bypassing the unsaved-data confirm dialog
+        if (oldTabId !== null) {
+          var closeBtn = document.getElementById('tab-delete-id-' + oldTabId);
+          if (closeBtn) {
+            var origConfirm = window.confirm;
+            window.confirm = function () { return true; };
+            try { closeBtn.click(); } finally { window.confirm = origConfirm; }
+          }
+        }
+        toast('Refreshed: ' + result.name + ' (' + result.libs + ' libraries)');
       });
+    });
   }
 
   /* ================================================================== */
   /*  Helper: Feed N2D blob to tool                                      */
   /* ================================================================== */
   function _feedN2DToTool(blob, name) {
+    console.log('[N2F] _feedN2DToTool called, blob size:', blob.size, 'name:', name);
     var n2dFile = new File([blob], name + '.n2d', { type: 'application/octet-stream' });
     var fileInput = document.getElementById('tools-load-file-input');
+    console.log('[N2F] tools-load-file-input element:', fileInput);
     if (fileInput) {
+      // Clear the texture cache so updated bitmaps are rendered fresh.
+      var cacheStore = window.next2d && window.next2d.player && window.next2d.player.cacheStore;
+      console.log('[N2F] cacheStore:', cacheStore);
+      try {
+        if (cacheStore) {
+          cacheStore.reset();
+          console.log('[N2F] cacheStore.reset() called successfully');
+        } else {
+          console.warn('[N2F] cacheStore not available — textures will NOT be cleared');
+        }
+      } catch (e) {
+        console.error('[N2F] cacheStore.reset() threw:', e);
+      }
       var dt = new DataTransfer();
       dt.items.add(n2dFile);
       fileInput.files = dt.files;
+      console.log('[N2F] dispatching change event on file input...');
       fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+      console.log('[N2F] change event dispatched');
       _serverLog('INFO', 'Fed N2D to native file input, size: ' + n2dFile.size);
     } else {
+      console.error('[N2F] tools-load-file-input element not found!');
       _serverLog('ERROR', 'tools-load-file-input element not found');
       toast('Load failed: tool file input not found', true);
     }
@@ -320,20 +365,50 @@
     _log.info('Export SWF requested');
     showProgress('Preparing project for SWF export...');
 
-    // First, trigger the tool to save to get the current state
-    // We'll capture the N2D data and send it to the server
+    var name = getProjectName() || 'output';
 
-    // Get the save-anchor's current blob (if available) or trigger a save first
-    var anchor = document.getElementById('save-anchor');
+    // When a project folder is active, compile directly from the project
+    // folder's project.n2d which has externalFile references for scripts,
+    // bitmaps and sounds.  This ensures external edits are picked up.
+    if (_currentProjectDir) {
+      _log.info('Project folder active — compiling from project folder');
+      updateProgress('Compiling SWF from project folder...');
 
-    // We need to get the current project data as N2D bytes.
-    // Strategy: trigger the internal save, intercept the blob, send to server.
+      var form = new FormData();
+      form.append('fromProject', 'true');
+
+      fetch(API_BASE + '/api/n2d-to-swf', { method: 'POST', body: form })
+        .then(function (r) {
+          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Compilation failed'); });
+          return r.blob();
+        })
+        .then(function (blob) {
+          hideProgress();
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = name + '.swf';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+          _log.info('SWF export succeeded:', name + '.swf', formatBytes(blob.size));
+          toast('Exported: ' + name + '.swf (' + formatBytes(blob.size) + ')');
+        })
+        .catch(function (err) {
+          hideProgress();
+          _log.error('SWF export failed:', err.message);
+          toast('Export failed: ' + err.message, true);
+        });
+      return;
+    }
+
+    // No project folder — use the legacy browser-blob export pipeline
     saveProjectAsN2D()
       .then(function (n2dBlob) {
         updateProgress('Compiling N2D to SWF...');
 
         var form = new FormData();
-        var name = getProjectName() || 'output';
         form.append('file', n2dBlob, name + '.n2d');
 
         return fetch(API_BASE + '/api/n2d-to-swf', { method: 'POST', body: form })

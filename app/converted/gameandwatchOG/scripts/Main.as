@@ -19,10 +19,10 @@ package
 
         public function getgameandwatch():Object
         {
-            var _loc1_:Object = new Object();
-            _loc1_ = {
+            var _local_1:Object = new Object();
+            _local_1 = {
                 "statsName":"gameandwatch",
-                "displayName":"Mr. Gay & Watch",
+                "displayName":"Mr. Game & Watch",
                 "classAPI":gameandwatchExt,
                 "linkage_id":"gameandwatch",
                 "linkage_id2":null,
@@ -85,8 +85,8 @@ package
                 "hurtFrames":3,
                 "grabDamage":3
             };
-            var _loc2_:Object = new Object();
-            _loc2_ = {
+            var _local_2:Object = new Object();
+            _local_2 = {
                 "a":{
                     "canFallOff":false,
                     "attackBoxes":{"attackBox":{
@@ -873,7 +873,7 @@ package
                         }}
                 }
             };
-            var _loc3_:Object = {
+            var _local_3:Object = {
                 "bacon":{
                     "classAPI":SSF2Projectile,
                     "linkage_id":"bacon",
@@ -913,7 +913,7 @@ package
                     "attack_idle":{"attackBoxes":{}}
                 }
             };
-            var _loc4_:Object = {"gnw_apple":{
+            var _local_4:Object = {"gnw_apple":{
                     "type":"consumable",
                     "classAPI":GameAndWatchApple,
                     "linkage_id":"gnw_apple",
@@ -929,10 +929,10 @@ package
                     "pushCharacters":false
                 }};
             return {
-                "cData":_loc1_,
-                "aData":_loc2_,
-                "pData":_loc3_,
-                "iData":_loc4_
+                "cData":_local_1,
+                "aData":_local_2,
+                "pData":_local_3,
+                "iData":_local_4
             };
         }
 

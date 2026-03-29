@@ -354,6 +354,10 @@ class ScreenTab
 
         // 対象のWorkSpaceに切り替える
         if (Util.$activeWorkSpaceId !== tabId) {
+            // Reset the player's texture cache before switching so bitmaps
+            // (and other assets) are re-rendered from the new workspace's
+            // fresh Bitmap instances rather than from stale cached textures.
+            Util.$root._$stage._$player.cacheStore.reset();
             Util.$changeWorkSpace(tabId);
         }
     }
