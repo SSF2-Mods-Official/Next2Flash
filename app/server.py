@@ -64,6 +64,28 @@ def _get_compile_n2d():
     return _compile_n2d
 
 
+def _read_scripts_from_disk(n2d_json: dict, project_dir: str) -> int:
+    """For every script with an externalFile, read its .as file from disk.
+
+    Returns the number of scripts refreshed.
+    """
+    count = 0
+    scripts_dir = os.path.join(project_dir, 'scripts')
+    for script in n2d_json.get('scripts', []):
+        ext_file = script.get('externalFile', '')
+        if ext_file:
+            fpath = os.path.join(project_dir, ext_file)
+        else:
+            # Fallback: derive path from script.path
+            rel = script.get('path', script.get('name', ''))
+            fpath = os.path.join(scripts_dir, rel) if rel else ''
+        if fpath and os.path.isfile(fpath):
+            with open(fpath, 'r', encoding='utf-8') as f:
+                script['source'] = f.read()
+            count += 1
+    return count
+
+
 def _overlay_external_bitmaps(n2d_json: dict, project_dir: str) -> None:
     """Read external PNG/JPG bitmap files and update:
     1. The bitmap library entry (buffer, width, height, rawTagBody).
@@ -253,6 +275,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self._handle_profile_log()
         elif self.path == "/api/test-report":
             self._handle_test_report()
+        elif self.path == "/api/save-script":
+            self._handle_save_script()
         else:
             self.send_error(404, "Not found")
 
@@ -591,14 +615,16 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 with self._project_lock:
                     Next2FlashHandler._current_project_dir = project_dir
                 log.info('_handle_open_project: found project folder at %s', project_dir)
-                # Overlay external bitmaps so the tool shows current images
+                # Overlay external bitmaps and re-read latest scripts from disk
                 _overlay_external_bitmaps(n2d_json, project_dir)
+                scripts_refreshed = _read_scripts_from_disk(n2d_json, project_dir)
+                log.info('_handle_open_project: refreshed %d scripts from disk', scripts_refreshed)
             else:
                 project_dir = None
 
             # Return zlib-compressed N2D for loading into the tool
             json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
-            url_encoded = quote(json_str, safe="")
+            url_encoded = json_str.replace('%', '%25')
             compressed = zlib.compress(url_encoded.encode("ascii"), 1)
 
             n2d_name = n2d_json.get("name", name)
@@ -620,6 +646,48 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             log.error('_handle_open_project: failed: %s', e)
             self._error_response(500, f"Open project failed: {e}")
 
+    def _handle_save_script(self):
+        """POST /api/save-script — Write a single script file to the project scripts folder.
+
+        Accepts JSON: {"path": "com/example/Foo.as", "source": "..."}.
+        Writes to {current_project_dir}/scripts/{path}.
+        """
+        try:
+            body = self._read_body()
+            payload = json.loads(body)
+            rel_path = payload.get('path', '')
+            source = payload.get('source', '')
+
+            if not rel_path:
+                return self._error_response(400, 'Missing path')
+
+            with self._project_lock:
+                project_dir = Next2FlashHandler._current_project_dir
+
+            if not project_dir:
+                return self._error_response(409, 'No project loaded — import a SWF first')
+
+            # Sanitize: prevent path traversal
+            scripts_dir = os.path.join(project_dir, 'scripts')
+            target = os.path.realpath(os.path.join(scripts_dir, rel_path))
+            if not target.startswith(os.path.realpath(scripts_dir) + os.sep):
+                return self._error_response(400, 'Invalid path')
+
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, 'w', encoding='utf-8') as f:
+                f.write(source)
+            log.info('save-script: wrote %s (%d chars)', target, len(source))
+
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', '2')
+            self.end_headers()
+            self.wfile.write(b'{}')
+        except Exception as e:
+            log.error('_handle_save_script: %s', e)
+            self._error_response(500, str(e))
+
     def _handle_refresh_assets(self):
         """POST /api/refresh-assets — Re-read external assets from project folder.
 
@@ -640,16 +708,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             )
             n2d_json = n2d_data
 
-            # Re-read external script source files
-            scripts_refreshed = 0
-            for script in n2d_json.get("scripts", []):
-                ext_file = script.get("externalFile", "")
-                if ext_file:
-                    fpath = os.path.join(project_dir, ext_file)
-                    if os.path.isfile(fpath):
-                        with open(fpath, "r", encoding="utf-8") as f:
-                            script["source"] = f.read()
-                        scripts_refreshed += 1
+            # Re-read external script source files from disk
+            scripts_refreshed = _read_scripts_from_disk(n2d_json, project_dir)
 
             # Re-read external bitmap files — use the same full pipeline as open-project:
             # Phase 1 (library entries) + Phase 2 (embedded fill dicts in shape recodes)
@@ -703,7 +763,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 print(f"[Refresh] WARN: could not save updated project.n2d: {save_err}")
 
             json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
-            url_encoded = quote(json_str, safe="")
+            url_encoded = json_str.replace('%', '%25')
             compressed = zlib.compress(url_encoded.encode("ascii"), 1)
 
             self.send_response(200)

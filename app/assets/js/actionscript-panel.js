@@ -1973,6 +1973,20 @@
       '})();</' + 'script></body></html>';
   }
 
+  function _saveScriptToDisk(path, source) {
+    fetch('/api/save-script', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: path, source: source })
+    }).then(function (r) {
+      if (!r.ok) r.json().then(function (j) {
+        _log.warn('save-script failed:', j.error || r.status);
+      });
+    }).catch(function (e) {
+      _log.warn('save-script network error:', e);
+    });
+  }
+
   function onFloatingWindowMessage(e) {
     if (!e.data || e.data.type !== 'n2d-as-script-save') return;
     for (var i = 0; i < scripts.length; i++) {
@@ -1980,6 +1994,7 @@
         scripts[i].source = e.data.source;
         saveScriptsToStorage();
         if (activeScript === i) setEditorValue(e.data.source);
+        _saveScriptToDisk(e.data.path, e.data.source);
         toast('Saved: ' + scripts[i].name);
         break;
       }

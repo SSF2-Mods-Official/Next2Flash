@@ -22,7 +22,7 @@ package
             var _local_1:Object = new Object();
             _local_1 = {
                 "statsName":"gameandwatch",
-                "displayName":"Mr. Game & Watch",
+                "displayName":"Mr. Game & Watch boi ya lol",
                 "classAPI":gameandwatchExt,
                 "linkage_id":"gameandwatch",
                 "linkage_id2":null,
