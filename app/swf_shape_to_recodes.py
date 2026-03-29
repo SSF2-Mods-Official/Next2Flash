@@ -145,7 +145,8 @@ def _read_matrix(br: _BitReader) -> List[float]:
 
 
 def _read_gradient(br: _BitReader, tag_type: int) -> dict:
-    """Read GRADIENT structure."""
+    """Read GRADIENT structure.  Must be called byte-aligned (matches JS byteAlign before gradient)."""
+    br.align()
     spread = br.read_ub(2)
     interp = br.read_ub(2)
     count = br.read_ub(4)

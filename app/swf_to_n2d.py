@@ -2018,6 +2018,20 @@ class N2DBuilder:
                     if dw and dh:
                         width, height = dw, dh
                 if rgba:
+                    # Scale down if either dimension exceeds the WebGL max texture size.
+                    # Most GPUs guarantee at least 4096; exceeding it causes
+                    # GL_INVALID_VALUE in glTexStorage2D.
+                    _MAX_TEX = 4096
+                    if width > _MAX_TEX or height > _MAX_TEX:
+                        from PIL import Image as _PilImage
+                        scale = min(_MAX_TEX / width, _MAX_TEX / height)
+                        new_w = max(1, int(width * scale))
+                        new_h = max(1, int(height * scale))
+                        img = _PilImage.frombytes('RGBA', (width, height), rgba)
+                        img = img.resize((new_w, new_h), _PilImage.LANCZOS)
+                        rgba = img.tobytes()
+                        width, height = new_w, new_h
+                        print(f"  [BITMAP] scaled cid={cid} → {new_w}x{new_h} (was {dw}x{dh})", flush=True)
                     # Store as "b64:<base64>" — JS setter handles the prefix
                     buffer_str = 'b64:' + base64.b64encode(rgba).decode('ascii')
                     decode_ok += 1
@@ -3011,13 +3025,23 @@ class N2DBuilder:
         # characterId must exceed all existing library and placement IDs
         # so the tool can allocate new IDs without collision.
         max_id = max(self.next_lib_id, self.next_char_id)
+        # Clamp stage dimensions to WebGL MAX_RENDERBUFFER_SIZE safe limit.
+        # Exceeding this causes GL_INVALID_VALUE in glRenderbufferStorageMultisample.
+        _MAX_RB = 4096
+        stage_w = self.header['width']
+        stage_h = self.header['height']
+        if stage_w > _MAX_RB or stage_h > _MAX_RB:
+            scale = min(_MAX_RB / stage_w, _MAX_RB / stage_h)
+            stage_w = max(1, int(stage_w * scale))
+            stage_h = max(1, int(stage_h * scale))
+            print(f"  [STAGE] clamped to {stage_w}x{stage_h} (was {self.header['width']}x{self.header['height']})", flush=True)
         result = {
             'version': 1,
             'name': self.name,
             'characterId': max_id + 1,
             'stage': {
-                'width': self.header['width'],
-                'height': self.header['height'],
+                'width': stage_w,
+                'height': stage_h,
                 'fps': self.header['fps'],
                 'bgColor': '#333333',
                 'lock': False,
@@ -3188,7 +3212,12 @@ def save_project_folder(data: dict, folder_path: str):
         if w and h and rgba:
             try:
                 from PIL import Image
-                Image.frombytes('RGBA', (w, h), rgba).save(fpath)
+                img = Image.frombytes('RGBA', (w, h), rgba)
+                _MAX_TEX = 4096
+                if w > _MAX_TEX or h > _MAX_TEX:
+                    scale = min(_MAX_TEX / w, _MAX_TEX / h)
+                    img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+                img.save(fpath)
                 lib['externalFile'] = f'bitmaps/{fname}'
                 return 1
             except ImportError:

@@ -7,7 +7,7 @@ package
 
         public function Main()
         {
-            super();
+            super(); 
             register("id", "gameandwatch");
             register("guid", "65319743-bb44-4f70-87ce-cee7a2551a18");
             register("characters", [this.getgameandwatch()]);

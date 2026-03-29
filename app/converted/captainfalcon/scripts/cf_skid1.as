@@ -1,0 +1,15 @@
+package
+{
+    import flash.display.BitmapData;
+
+    public dynamic class cf_skid1 extends BitmapData
+    {
+
+        public function cf_skid1(_arg_1:int=116, _arg_2:int=72)
+        {
+            super(_arg_1, _arg_2);
+        }
+
+    }
+}
+
