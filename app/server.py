@@ -103,6 +103,12 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self._handle_swf_to_n2d()
         elif self.path == "/api/n2d-to-swf":
             self._handle_n2d_to_swf()
+        elif self.path == "/api/swf-to-project":
+            self._handle_swf_to_project()
+        elif self.path == "/api/open-project":
+            self._handle_open_project()
+        elif self.path == "/api/refresh-assets":
+            self._handle_refresh_assets()
         elif self.path == "/api/decompile-abc":
             self._handle_decompile_abc()
         elif self.path == "/api/log":
@@ -295,6 +301,273 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             log.error('_handle_swf_to_n2d: conversion failed: %s', e)
             self._error_response(500, f"SWF->N2D conversion failed: {e}")
 
+    # ── Project folder persistent path ──
+    _current_project_dir = None
+    _project_lock = threading.Lock()
+
+    def _handle_swf_to_project(self):
+        """POST /api/swf-to-project — Import SWF into an editable project folder.
+
+        Extracts bitmaps as PNG/JPG, sounds as MP3/WAV, scripts as .as files.
+        Returns the N2D zlib blob for loading into the tool, plus sets the
+        project directory for subsequent refresh/export operations.
+        """
+        try:
+            body = self._read_body()
+            if not body:
+                return self._error_response(400, "No data received")
+
+            swf_data, filename = self._extract_upload(body, "file")
+            if not swf_data:
+                swf_data = body
+                filename = "upload.swf"
+
+            name = os.path.splitext(filename)[0] if filename else "converted"
+            log.info('_handle_swf_to_project: converting %s (%d bytes)', filename, len(swf_data))
+
+            mod = _get_swf_to_n2d()
+
+            header, tags = mod.parse_swf(swf_data)
+            builder = mod.N2DBuilder(header, name=name)
+            builder.catalog_swf_tags(tags)
+
+            scripts, frame_scripts = mod.decompile_all_scripts(builder.global_raw_tags)
+            builder.frame_scripts = frame_scripts
+            if scripts:
+                builder.scripts.extend(scripts)
+
+            builder.build_all()
+            builder.build_main_timeline(tags)
+            builder._embed_bitmap_data_in_recodes()
+
+            n2d_json = builder.to_n2d_json()
+
+            # Save as project folder
+            project_dir = os.path.join(SERVER_DIR, "converted", name)
+            mod.save_project_folder(n2d_json, project_dir)
+
+            with self._project_lock:
+                Next2FlashHandler._current_project_dir = project_dir
+
+            # Return zlib-compressed N2D for loading into the tool
+            json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
+            url_encoded = quote(json_str, safe="")
+            compressed = zlib.compress(url_encoded.encode("ascii"), 1)
+
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}.n2d"')
+            self.send_header("X-N2D-Name", name)
+            self.send_header("X-N2D-Libraries", str(len(n2d_json.get("libraries", []))))
+            self.send_header("X-N2D-Scripts", str(len(n2d_json.get("scripts", []))))
+            self.send_header("X-Project-Dir", project_dir)
+            self.send_header("Content-Length", str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_swf_to_project: failed: %s', e)
+            self._error_response(500, f"SWF->Project conversion failed: {e}")
+
+    def _handle_open_project(self):
+        """POST /api/open-project — Open an .n2d file.
+
+        Accepts: multipart/form-data with 'file' field containing .n2d data.
+        If the .n2d lives inside a project folder (with bitmaps/sounds/scripts),
+        that folder becomes the active project for refresh/export.
+        Returns the N2D zlib blob for loading into the tool.
+        """
+        try:
+            body = self._read_body()
+            if not body:
+                return self._error_response(400, "No data received")
+
+            n2d_data, filename = self._extract_upload(body, "file")
+            if not n2d_data:
+                n2d_data = body
+                filename = "upload.n2d"
+
+            name = os.path.splitext(filename)[0] if filename else "project"
+            log.info('_handle_open_project: opening %s (%d bytes)', filename, len(n2d_data))
+
+            # Parse the .n2d to get JSON (ZIP or zlib format)
+            import zipfile as _zipfile
+            import io as _io
+            if n2d_data[:2] == b'PK':
+                with _zipfile.ZipFile(_io.BytesIO(n2d_data)) as zf:
+                    n2d_json = json.loads(zf.read('project.json'))
+            else:
+                decompressed = zlib.decompress(n2d_data)
+                text = decompressed.decode('utf-8')
+                try:
+                    n2d_json = json.loads(unquote(text))
+                except (json.JSONDecodeError, ValueError):
+                    n2d_json = json.loads(text)
+
+            # Check if this .n2d lives in a project folder
+            # We save it to converted/<name>/ and check for existing project structure
+            project_dir = os.path.join(SERVER_DIR, "converted", name)
+            has_project = (
+                os.path.isdir(project_dir) and
+                os.path.isdir(os.path.join(project_dir, "bitmaps"))
+            )
+
+            if has_project:
+                with self._project_lock:
+                    Next2FlashHandler._current_project_dir = project_dir
+                log.info('_handle_open_project: found project folder at %s', project_dir)
+            else:
+                project_dir = None
+
+            # Return zlib-compressed N2D for loading into the tool
+            json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
+            url_encoded = quote(json_str, safe="")
+            compressed = zlib.compress(url_encoded.encode("ascii"), 1)
+
+            n2d_name = n2d_json.get("name", name)
+
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{n2d_name}.n2d"')
+            self.send_header("X-N2D-Name", n2d_name)
+            self.send_header("X-N2D-Libraries", str(len(n2d_json.get("libraries", []))))
+            self.send_header("X-N2D-Scripts", str(len(n2d_json.get("scripts", []))))
+            self.send_header("X-Project-Dir", project_dir or "")
+            self.send_header("Content-Length", str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_open_project: failed: %s', e)
+            self._error_response(500, f"Open project failed: {e}")
+
+    def _handle_refresh_assets(self):
+        """POST /api/refresh-assets — Re-read external assets from project folder.
+
+        Re-reads PNG/WAV/MP3/AS files from the project folder and returns
+        an updated N2D blob. This lets users edit bitmap/sound/script files
+        externally and reload them without re-importing the SWF.
+        """
+        try:
+            with self._project_lock:
+                project_dir = Next2FlashHandler._current_project_dir
+
+            if not project_dir or not os.path.isdir(project_dir):
+                return self._error_response(400, "No project folder loaded. Import a SWF first.")
+
+            mod = _get_swf_to_n2d()
+            n2d_data, _ = __import__('compile_n2d').load_n2d(
+                os.path.join(project_dir, 'project.n2d')
+            )
+            n2d_json = n2d_data
+
+            # Re-read external script source files
+            scripts_refreshed = 0
+            for script in n2d_json.get("scripts", []):
+                ext_file = script.get("externalFile", "")
+                if ext_file:
+                    fpath = os.path.join(project_dir, ext_file)
+                    if os.path.isfile(fpath):
+                        with open(fpath, "r", encoding="utf-8") as f:
+                            script["source"] = f.read()
+                        scripts_refreshed += 1
+
+            # Re-read external bitmap files (PNG/JPG) → update rawTagBody
+            bitmaps_refreshed = 0
+            for lib in n2d_json.get("libraries", []):
+                if not lib or lib.get("type") != "bitmap":
+                    continue
+                ext_file = lib.get("externalFile", "")
+                if not ext_file:
+                    continue
+                fpath = os.path.join(project_dir, ext_file)
+                if not os.path.isfile(fpath):
+                    continue
+                try:
+                    from PIL import Image
+                    img = Image.open(fpath).convert("RGBA")
+                    # Build raw DefineBitsLossless2 body (without charId, without tag header)
+                    # RGBA → premultiplied ARGB
+                    rgba = img.tobytes()
+                    argb = bytearray()
+                    for i in range(0, len(rgba), 4):
+                        r, g, b, a = rgba[i], rgba[i+1], rgba[i+2], rgba[i+3]
+                        if a == 0:
+                            argb.extend([0, 0, 0, 0])
+                        elif a == 255:
+                            argb.extend([a, r, g, b])
+                        else:
+                            argb.extend([a, (r*a+127)//255, (g*a+127)//255, (b*a+127)//255])
+                    compressed = zlib.compress(bytes(argb), 9)
+                    # rawTagBody = BitmapFormat(1) + Width(2) + Height(2) + zlib data
+                    raw_body = struct.pack('<BHH', 5, img.width, img.height) + compressed
+                    lib["rawTagBody"] = base64.b64encode(raw_body).decode("ascii")
+                    lib["rawTagType"] = 36  # DefineBitsLossless2
+                    bitmaps_refreshed += 1
+                except Exception as be:
+                    print(f"[Refresh] WARN: could not refresh bitmap {ext_file}: {be}")
+
+            # Re-read external sound files (MP3/WAV) → update rawTagBody
+            sounds_refreshed = 0
+            for lib in n2d_json.get("libraries", []):
+                if not lib or lib.get("type") != "sound":
+                    continue
+                ext_file = lib.get("externalFile", "")
+                if not ext_file:
+                    continue
+                fpath = os.path.join(project_dir, ext_file)
+                if not os.path.isfile(fpath):
+                    continue
+                try:
+                    with open(fpath, "rb") as af:
+                        audio_bytes = af.read()
+                    ext_lower = ext_file.lower()
+                    if ext_lower.endswith(".mp3"):
+                        compile_mod = _get_compile_n2d()
+                        raw_body = compile_mod._build_mp3_sound_body(audio_bytes)
+                        if raw_body:
+                            lib["rawTagBody"] = base64.b64encode(raw_body).decode("ascii")
+                            lib["rawTagType"] = 14  # DefineSound
+                            sounds_refreshed += 1
+                    elif ext_lower.endswith(".wav"):
+                        compile_mod = _get_compile_n2d()
+                        raw_body = compile_mod._build_wav_sound_body(audio_bytes)
+                        if raw_body:
+                            lib["rawTagBody"] = base64.b64encode(raw_body).decode("ascii")
+                            lib["rawTagType"] = 14  # DefineSound
+                            sounds_refreshed += 1
+                except Exception as se:
+                    print(f"[Refresh] WARN: could not refresh sound {ext_file}: {se}")
+
+            name = n2d_json.get("name", os.path.basename(project_dir))
+            print(f"[Refresh] {scripts_refreshed} scripts, {bitmaps_refreshed} bitmaps, {sounds_refreshed} sounds refreshed from {project_dir}")
+
+            json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
+            url_encoded = quote(json_str, safe="")
+            compressed = zlib.compress(url_encoded.encode("ascii"), 1)
+
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}.n2d"')
+            self.send_header("X-N2D-Name", name)
+            self.send_header("X-N2D-Libraries", str(len(n2d_json.get("libraries", []))))
+            self.send_header("X-Refreshed-Scripts", str(scripts_refreshed))
+            self.send_header("X-Refreshed-Bitmaps", str(bitmaps_refreshed))
+            self.send_header("X-Refreshed-Sounds", str(sounds_refreshed))
+            self.send_header("Content-Length", str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_refresh_assets: failed: %s', e)
+            self._error_response(500, f"Refresh assets failed: {e}")
+
     def _handle_n2d_to_swf(self):
         """POST /api/n2d-to-swf — Convert uploaded N2D back to SWF.
         
@@ -316,16 +589,29 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
 
             mod = _get_compile_n2d()
 
+            # If we have a project folder, point the compiler at it
+            # so it can resolve external bitmap/sound files.
+            with self._project_lock:
+                project_dir = Next2FlashHandler._current_project_dir
+
             # Write N2D to a temp file and use N2DCompiler
             with tempfile.TemporaryDirectory() as tmpdir:
-                n2d_path = os.path.join(tmpdir, f"{name}.n2d")
-                swf_path = os.path.join(tmpdir, f"{name}.swf")
+                # If project dir exists, write the N2D there so external
+                # assets are resolvable via relative paths in project.json
+                if project_dir and os.path.isdir(project_dir):
+                    n2d_path = os.path.join(project_dir, f"project.n2d")
+                    # Overwrite the project.n2d with latest tool state
+                    with open(n2d_path, "wb") as f:
+                        f.write(n2d_data)
+                    swf_path = os.path.join(tmpdir, f"{name}.swf")
+                else:
+                    n2d_path = os.path.join(tmpdir, f"{name}.n2d")
+                    swf_path = os.path.join(tmpdir, f"{name}.swf")
+                    with open(n2d_path, "wb") as f:
+                        f.write(n2d_data)
                 shared_dir = os.path.join(SERVER_DIR, "..", "shared")
                 if not os.path.isdir(shared_dir):
                     shared_dir = tmpdir  # fallback
-
-                with open(n2d_path, "wb") as f:
-                    f.write(n2d_data)
 
                 # Debug: save a copy of the N2D for inspection
                 debug_n2d = os.path.join(SERVER_DIR, "converted", "_last_export.n2d")
@@ -466,7 +752,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Requested-With")
         self.send_header("Access-Control-Expose-Headers",
-                         "X-N2D-Name, X-N2D-Libraries, X-N2D-Scripts")
+                         "X-N2D-Name, X-N2D-Libraries, X-N2D-Scripts, X-Project-Dir, X-Refreshed-Scripts, X-Refreshed-Bitmaps, X-Refreshed-Sounds")
 
     def _json_response(self, data, status=200):
         body = json.dumps(data).encode("utf-8")

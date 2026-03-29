@@ -5,7 +5,8 @@ n2f — Next2Flash unified command-line tool.
 Every operation available in the GUI can be done from this CLI:
 
   n2f convert   input.swf  [-o output.n2d]     SWF/SSF -> N2D
-  n2f compile   input.n2d  [-o output.swf]     N2D -> SWF
+  n2f project   input.swf  [-o output_dir]     SWF -> editable project folder
+  n2f compile   input.n2d  [-o output.swf]     N2D/folder -> SWF
   n2f decompile input.swf  [--class X | --all]  AS3 bytecode -> source
   n2f info      input.n2d                       Show project metadata
   n2f server    [--port 5000]                   Start the HTTP server
@@ -83,21 +84,76 @@ def cmd_convert(args):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  project  —  SWF -> Project Folder (editable PNG/WAV/AS)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def cmd_project(args):
+    """Convert a SWF into an editable project folder with PNG/WAV/AS files."""
+    log.info("cmd_project: input=%s output=%s", args.input, args.output)
+    sys.path.insert(0, SCRIPT_DIR)
+    import swf_to_n2d as mod
+
+    swf_path = args.input
+    if not os.path.isfile(swf_path):
+        print(f"Error: file not found: {swf_path}", file=sys.stderr)
+        return 1
+
+    name = os.path.splitext(os.path.basename(swf_path))[0]
+    output_dir = args.output or name
+
+    t0 = time.time()
+    step = lambda msg: print(f"[{time.time()-t0:6.1f}s] {msg}", flush=True)
+
+    step("Parsing SWF binary...")
+    with open(swf_path, "rb") as f:
+        swf_data = f.read()
+    header, tags = mod.parse_swf(swf_data)
+    step(f"SWF: {header['width']}x{header['height']} @ {header['fps']}fps, "
+         f"{header['frameCount']} frames, {len(tags)} tags")
+
+    step("Building n2d project...")
+    builder = mod.N2DBuilder(header, name=name)
+    builder.catalog_swf_tags(tags)
+
+    step("Decompiling AS3 scripts...")
+    scripts, frame_scripts = mod.decompile_all_scripts(builder.global_raw_tags)
+    builder.frame_scripts = frame_scripts
+    if scripts:
+        builder.scripts.extend(scripts)
+    step(f"  {len(scripts)} scripts, {len(frame_scripts)} frame-script classes")
+
+    step("Building library entries...")
+    builder.build_all()
+
+    step("Building main timeline...")
+    builder.build_main_timeline(tags)
+
+    step("Generating project folder...")
+    n2d = builder.to_n2d_json()
+    mod.save_project_folder(n2d, output_dir)
+    step(f"DONE: project folder at {output_dir}")
+    return 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  compile  —  N2D -> SWF
 # ═══════════════════════════════════════════════════════════════════════════
 
 def cmd_compile(args):
-    """Compile a .n2d project file back into a .swf."""
+    """Compile a .n2d project file or project folder back into a .swf."""
     log.info("cmd_compile: input=%s output=%s", args.input, args.output)
     sys.path.insert(0, SCRIPT_DIR)
     import compile_n2d as mod
 
     n2d_path = args.input
-    if not os.path.isfile(n2d_path):
-        print(f"Error: file not found: {n2d_path}", file=sys.stderr)
+    if not os.path.isfile(n2d_path) and not os.path.isdir(n2d_path):
+        print(f"Error: file or folder not found: {n2d_path}", file=sys.stderr)
         return 1
 
-    name = os.path.splitext(os.path.basename(n2d_path))[0]
+    if os.path.isdir(n2d_path):
+        name = os.path.basename(n2d_path.rstrip('/\\'))
+    else:
+        name = os.path.splitext(os.path.basename(n2d_path))[0]
     output = args.output or name + ".swf"
     shared = args.shared or os.path.join(SCRIPT_DIR, "shared")
 
@@ -365,8 +421,11 @@ def main():
 examples:
   n2f convert game.swf                     # SWF -> N2D
   n2f convert game.swf -o game.n2d         # SWF -> N2D (named output)
+  n2f project game.swf                     # SWF -> project folder (PNG/WAV/AS)
+  n2f project game.swf -o my_project/      # SWF -> named project folder
   n2f compile game.n2d                     # N2D -> SWF
   n2f compile game.n2d -o game.swf         # N2D -> SWF (named output)
+  n2f compile my_project/                  # Project folder -> SWF
   n2f decompile game.swf --list            # List AS3 classes
   n2f decompile game.swf --all -d out/     # Decompile all classes
   n2f info game.n2d                        # Show project metadata
@@ -385,10 +444,17 @@ examples:
     p.add_argument("-o", "--output", help="Output .n2d path")
     p.set_defaults(func=cmd_convert)
 
+    # ── project ────────────────────────────────────────────────────
+    p = sub.add_parser("project", help="Import SWF into editable project folder",
+                       aliases=["extract"])
+    p.add_argument("input", help="Input .swf file")
+    p.add_argument("-o", "--output", help="Output folder path (default: SWF name)")
+    p.set_defaults(func=cmd_project)
+
     # ── compile ────────────────────────────────────────────────────
-    p = sub.add_parser("compile", help="Compile N2D to SWF",
+    p = sub.add_parser("compile", help="Compile N2D/project folder to SWF",
                        aliases=["n2d2swf", "export"])
-    p.add_argument("input", help="Input .n2d file")
+    p.add_argument("input", help="Input .n2d file or project folder")
     p.add_argument("-o", "--output", help="Output .swf path")
     p.add_argument("--shared", help="Path to shared AS3 source directory")
     p.add_argument("--sdk", help="Path to Flex/AIR SDK")

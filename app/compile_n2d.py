@@ -568,16 +568,41 @@ def find_sdk() -> Optional[str]:
 
 # ── n2D file loading ─────────────────────────────────────────────────────
 
-def load_n2d(path: str) -> dict:
-    """Load an .n2D file → parsed JSON dict.
+def load_n2d(path: str) -> Tuple[dict, Optional[str]]:
+    """Load an .n2D file → (parsed JSON dict, project_dir or None).
 
     Supports:
+      - Project folder: path is a directory containing project.n2d
       - ZIP format (PK magic): project.json + bitmaps/*.bin entries
       - Legacy zlib format (full URI-encoded or minimal % escaping)
+
+    Returns the parsed JSON dict and the project directory path (if the
+    source is a folder with external assets) or None.
     """
     log.info('load_n2d: loading %s', path)
+
+    # Project folder mode: path is a directory containing project.n2d
+    if os.path.isdir(path):
+        project_dir = path
+        n2d_path = os.path.join(path, 'project.n2d')
+        if not os.path.isfile(n2d_path):
+            raise FileNotFoundError(f"No project.n2d in {path}")
+        # Read the ZIP-format .n2d
+        with open(n2d_path, 'rb') as f:
+            raw = f.read()
+        import zipfile as _zipfile
+        import io as _io
+        with _zipfile.ZipFile(_io.BytesIO(raw)) as zf:
+            data = json.loads(zf.read('project.json'))
+        return data, project_dir
+
     with open(path, "rb") as f:
         raw = f.read()
+
+    # Check if this file sits inside a project folder (has bitmaps/ sibling)
+    parent_dir = os.path.dirname(os.path.abspath(path))
+    is_project = os.path.isdir(os.path.join(parent_dir, 'bitmaps'))
+    project_dir = parent_dir if is_project else None
 
     # Detect ZIP format by magic bytes
     if raw[:2] == b'PK':
@@ -585,18 +610,14 @@ def load_n2d(path: str) -> dict:
         import io as _io
         with _zipfile.ZipFile(_io.BytesIO(raw)) as zf:
             data = json.loads(zf.read('project.json'))
-            # Bitmap pixel buffers are NOT needed for SWF compilation
-            # (rawTagBody contains the original compressed bitmap data).
-            return data
+            return data, project_dir
 
     decompressed = zlib.decompress(raw)
     text = decompressed.decode("utf-8")
-    # Try unquote first (handles both full URI-encoding and minimal % escaping)
     try:
-        return json.loads(unquote(text))
+        return json.loads(unquote(text)), project_dir
     except (json.JSONDecodeError, ValueError):
-        # If unquote produced invalid JSON, try direct parse
-        return json.loads(text)
+        return json.loads(text), project_dir
 
 
 # ── WAV → DefineSound ────────────────────────────────────────────────────
@@ -649,6 +670,235 @@ def build_define_sound(char_id: int, wav_bytes: bytes) -> bytes:
     body.write(struct.pack("<I", sample_count))
     body.write(pcm_data)
     return build_tag(TAG_DEFINE_SOUND, body.getvalue())
+
+
+# ── External asset loading (project folder mode) ─────────────────────────
+
+def _load_external_bitmap(project_dir: str, lib: dict, swf_id: int) -> Optional[bytes]:
+    """Load an external PNG/JPG and return the raw SWF DefineBitsLossless2 tag bytes.
+
+    Returns None if no external file found or PIL unavailable.
+    """
+    ext_file = lib.get('externalFile', '')
+    if not ext_file:
+        return None
+    fpath = os.path.join(project_dir, ext_file)
+    if not os.path.isfile(fpath):
+        return None
+
+    try:
+        from PIL import Image
+    except ImportError:
+        log.warning('PIL unavailable — cannot load external bitmap %s', fpath)
+        return None
+
+    img = Image.open(fpath).convert('RGBA')
+    w, h = img.size
+    rgba = img.tobytes()
+    return build_define_bits_lossless2(swf_id, w, h, rgba)
+
+
+def _build_define_sound_from_mp3(char_id: int, mp3_bytes: bytes) -> bytes:
+    """Build a DefineSound tag from raw MP3 frame data.
+
+    MP3 in SWF uses sound format 2 with a 2-byte SeekSamples prefix.
+    We parse the first MP3 frame header to detect sample rate and channels.
+    """
+    if len(mp3_bytes) < 4:
+        return b''
+
+    # Parse first MP3 frame header for rate/stereo info
+    sample_rate = 44100
+    num_channels = 2
+    hdr = struct.unpack_from('>I', mp3_bytes, 0)[0]
+    if (hdr >> 21) & 0x7FF == 0x7FF:  # sync word
+        version = (hdr >> 19) & 0x3
+        layer = (hdr >> 17) & 0x3
+        rate_idx = (hdr >> 10) & 0x3
+        mode = (hdr >> 6) & 0x3
+        # MPEG1 rates
+        rate_table = {0: 44100, 1: 48000, 2: 32000}
+        if version == 3:  # MPEG1
+            sample_rate = rate_table.get(rate_idx, 44100)
+        elif version == 2:  # MPEG2
+            rate_table2 = {0: 22050, 1: 24000, 2: 16000}
+            sample_rate = rate_table2.get(rate_idx, 22050)
+        num_channels = 1 if mode == 3 else 2
+
+    # SWF rate code
+    rate_map = {5512: 0, 11025: 1, 22050: 2, 44100: 3}
+    swf_rate = 3
+    for sr, code in sorted(rate_map.items()):
+        if sample_rate <= sr:
+            swf_rate = code
+            break
+
+    is_stereo = 1 if num_channels >= 2 else 0
+    # SWF format 2 = MP3, always 16-bit
+    flags = (2 << 4) | (swf_rate << 2) | (1 << 1) | is_stereo
+
+    # Estimate sample count (rough: MP3 frame = 1152 samples for MPEG1 Layer3)
+    samples_per_frame = 1152
+    # Count sync words roughly
+    frame_count = 0
+    pos = 0
+    while pos < len(mp3_bytes) - 1:
+        if mp3_bytes[pos] == 0xFF and (mp3_bytes[pos + 1] & 0xE0) == 0xE0:
+            frame_count += 1
+            pos += 4  # skip at least header
+        else:
+            pos += 1
+    sample_count = frame_count * samples_per_frame
+
+    body = io.BytesIO()
+    body.write(struct.pack("<H", char_id))
+    body.write(struct.pack("<B", flags))
+    body.write(struct.pack("<I", sample_count))
+    # MP3 sound data: 2-byte SeekSamples (0) + MP3 frames
+    body.write(struct.pack("<H", 0))  # SeekSamples
+    body.write(mp3_bytes)
+    return build_tag(TAG_DEFINE_SOUND, body.getvalue())
+
+
+def _build_mp3_sound_body(mp3_bytes: bytes) -> Optional[bytes]:
+    """Build a DefineSound body (without charId) from raw MP3 data.
+
+    Returns the flags + sampleCount + seekSamples + mp3Data bytes,
+    suitable for storing as rawTagBody.
+    """
+    if len(mp3_bytes) < 4:
+        return None
+
+    sample_rate = 44100
+    num_channels = 2
+    hdr = struct.unpack_from('>I', mp3_bytes, 0)[0]
+    if (hdr >> 21) & 0x7FF == 0x7FF:
+        version = (hdr >> 19) & 0x3
+        rate_idx = (hdr >> 10) & 0x3
+        mode = (hdr >> 6) & 0x3
+        if version == 3:
+            rate_table = {0: 44100, 1: 48000, 2: 32000}
+            sample_rate = rate_table.get(rate_idx, 44100)
+        elif version == 2:
+            rate_table2 = {0: 22050, 1: 24000, 2: 16000}
+            sample_rate = rate_table2.get(rate_idx, 22050)
+        num_channels = 1 if mode == 3 else 2
+
+    rate_map = {5512: 0, 11025: 1, 22050: 2, 44100: 3}
+    swf_rate = 3
+    for sr, code in sorted(rate_map.items()):
+        if sample_rate <= sr:
+            swf_rate = code
+            break
+
+    is_stereo = 1 if num_channels >= 2 else 0
+    flags = (2 << 4) | (swf_rate << 2) | (1 << 1) | is_stereo
+
+    samples_per_frame = 1152
+    frame_count = 0
+    pos = 0
+    while pos < len(mp3_bytes) - 1:
+        if mp3_bytes[pos] == 0xFF and (mp3_bytes[pos + 1] & 0xE0) == 0xE0:
+            frame_count += 1
+            pos += 4
+        else:
+            pos += 1
+    sample_count = frame_count * samples_per_frame
+
+    body = io.BytesIO()
+    body.write(struct.pack("<B", flags))
+    body.write(struct.pack("<I", sample_count))
+    body.write(struct.pack("<H", 0))  # SeekSamples
+    body.write(mp3_bytes)
+    return body.getvalue()
+
+
+def _build_wav_sound_body(wav_bytes: bytes) -> Optional[bytes]:
+    """Build a DefineSound body (without charId) from WAV data.
+
+    Returns the flags + sampleCount + pcmData bytes,
+    suitable for storing as rawTagBody.
+    """
+    if len(wav_bytes) < 44:
+        return None
+
+    # Parse WAV header
+    if wav_bytes[:4] != b'RIFF' or wav_bytes[8:12] != b'WAVE':
+        return None
+
+    # Find fmt chunk
+    pos = 12
+    fmt_data = None
+    data_bytes = None
+    while pos < len(wav_bytes) - 8:
+        chunk_id = wav_bytes[pos:pos+4]
+        chunk_size = struct.unpack_from('<I', wav_bytes, pos+4)[0]
+        if chunk_id == b'fmt ':
+            fmt_data = wav_bytes[pos+8:pos+8+chunk_size]
+        elif chunk_id == b'data':
+            data_bytes = wav_bytes[pos+8:pos+8+chunk_size]
+        pos += 8 + chunk_size
+        if fmt_data and data_bytes:
+            break
+
+    if not fmt_data or not data_bytes:
+        return None
+
+    audio_format = struct.unpack_from('<H', fmt_data, 0)[0]
+    num_channels = struct.unpack_from('<H', fmt_data, 2)[0]
+    sample_rate = struct.unpack_from('<I', fmt_data, 4)[0]
+    bits_per_sample = struct.unpack_from('<H', fmt_data, 14)[0]
+
+    if audio_format != 1:  # PCM only
+        return None
+
+    rate_map = {5512: 0, 11025: 1, 22050: 2, 44100: 3}
+    swf_rate = 3
+    for sr, code in sorted(rate_map.items()):
+        if sample_rate <= sr:
+            swf_rate = code
+            break
+
+    is_16bit = 1 if bits_per_sample == 16 else 0
+    is_stereo = 1 if num_channels >= 2 else 0
+    # format 3 = uncompressed little-endian
+    flags = (3 << 4) | (swf_rate << 2) | (is_16bit << 1) | is_stereo
+
+    bytes_per_sample = (bits_per_sample // 8) * num_channels
+    sample_count = len(data_bytes) // bytes_per_sample if bytes_per_sample else 0
+
+    body = io.BytesIO()
+    body.write(struct.pack("<B", flags))
+    body.write(struct.pack("<I", sample_count))
+    body.write(data_bytes)
+    return body.getvalue()
+
+
+def _load_external_sound(project_dir: str, lib: dict, swf_id: int) -> Optional[bytes]:
+    """Load an external MP3/WAV and return the raw SWF DefineSound tag bytes.
+
+    Returns None if no external file found.
+    """
+    ext_file = lib.get('externalFile', '')
+    if not ext_file:
+        return None
+    fpath = os.path.join(project_dir, ext_file)
+    if not os.path.isfile(fpath):
+        return None
+
+    with open(fpath, 'rb') as f:
+        audio_bytes = f.read()
+
+    if not audio_bytes:
+        return None
+
+    ext_lower = ext_file.lower()
+    if ext_lower.endswith('.mp3'):
+        return _build_define_sound_from_mp3(swf_id, audio_bytes)
+    elif ext_lower.endswith('.wav'):
+        return build_define_sound(swf_id, audio_bytes)
+
+    return None
 
 
 # ── toPublish equivalent ─────────────────────────────────────────────────
@@ -1911,6 +2161,7 @@ class N2DCompiler:
         self._char_idx_to_swf_id: Dict[int, int] = {}  # char array index → SWF char ID
 
         self._definition_tags = bytearray()
+        self._project_dir: Optional[str] = None  # set if loading from project folder
 
     def _alloc_id(self) -> int:
         cid = self._next_id
@@ -1923,7 +2174,9 @@ class N2DCompiler:
 
         # ── Load ──
         print(f"Loading: {self.n2d_path}")
-        self.data = load_n2d(self.n2d_path)
+        self.data, self._project_dir = load_n2d(self.n2d_path)
+        if self._project_dir:
+            print(f"  Project folder mode: {self._project_dir}")
 
         self.stage = self.data.get("stage", {})
         self.libs = self.data.get("libraries", [])
@@ -2164,14 +2417,19 @@ class N2DCompiler:
         #     haven't been emitted yet, then the container.
         topo_order = self._container_order()  # leaves-first
 
-        def _emit_deps(lib_id: int):
+        def _emit_deps(lib_id: int, _visiting: set = None):
             """Recursively emit all dependencies of a container."""
             if lib_id in emitted:
                 return
+            if _visiting is None:
+                _visiting = set()
+            if lib_id in _visiting:
+                return  # cycle detected — break recursion
+            _visiting.add(lib_id)
             if lib_id in containers:
                 # It's a container — first emit ITS deps
                 for dep in container_all_deps.get(lib_id, []):
-                    _emit_deps(dep)
+                    _emit_deps(dep, _visiting)
                 # Now emit this container
                 self._emission_order.append(lib_id)
                 emitted.add(lib_id)
@@ -2180,6 +2438,7 @@ class N2DCompiler:
                 if lib_id not in emitted:
                     self._emission_order.append(lib_id)
                     emitted.add(lib_id)
+            _visiting.discard(lib_id)
 
         for cid in topo_order:
             _emit_deps(cid)
@@ -2315,6 +2574,12 @@ class N2DCompiler:
     def _emit_bitmap(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_bitmap: lib_id=%d, swf_id=%d', lib['id'], swf_id)
+        # Try external file first (project folder mode)
+        if self._project_dir and lib.get("externalFile"):
+            tag_bytes = _load_external_bitmap(self._project_dir, lib, swf_id)
+            if tag_bytes:
+                self._definition_tags.extend(tag_bytes)
+                return
         # Raw tag passthrough for 1:1 roundtrip
         if lib.get("rawTagBody"):
             raw_body = _decode_raw_body(lib["rawTagBody"])
@@ -2446,6 +2711,12 @@ class N2DCompiler:
     def _emit_sound(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_sound: lib_id=%d, swf_id=%d', lib['id'], swf_id)
+        # Try external file first (project folder mode)
+        if self._project_dir and lib.get("externalFile"):
+            tag_bytes = _load_external_sound(self._project_dir, lib, swf_id)
+            if tag_bytes:
+                self._definition_tags.extend(tag_bytes)
+                return
         # Raw tag passthrough for 1:1 roundtrip
         if lib.get("rawTagBody"):
             raw_body = _decode_raw_body(lib["rawTagBody"])

@@ -3053,6 +3053,186 @@ def save_n2d(data: dict, output_path: str, bitmap_buffers: dict = None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  SAVE PROJECT FOLDER (external assets: PNG / WAV / MP3 / AS)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _safe_filename(name: str) -> str:
+    """Sanitise a library/script name for use as a filesystem filename."""
+    # Replace path separators and other problematic characters
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
+    return name.strip('. ') or 'unnamed'
+
+
+def save_project_folder(data: dict, folder_path: str):
+    """Save an N2D project as an editable folder with external asset files.
+
+    Creates:
+      {folder_path}/
+        project.n2d           — N2D ZIP archive
+        bitmaps/              — PNG / JPG images
+        sounds/               — MP3 / WAV audio
+        scripts/              — .as ActionScript source files
+
+    Libraries gain an ``externalFile`` field pointing to their asset.
+    The rawTagBody is still preserved in project.n2d for lossless
+    roundtrip, but the human-readable files can be edited and will be
+    preferred during compilation when they are newer.
+    """
+    log.info('save_project_folder: writing to %s', folder_path)
+    t0 = time.time()
+    step = lambda msg: print(f"  [{time.time()-t0:6.1f}s] {msg}", flush=True)
+
+    os.makedirs(folder_path, exist_ok=True)
+    bitmaps_dir = os.path.join(folder_path, 'bitmaps')
+    sounds_dir = os.path.join(folder_path, 'sounds')
+    scripts_dir = os.path.join(folder_path, 'scripts')
+    os.makedirs(bitmaps_dir, exist_ok=True)
+    os.makedirs(sounds_dir, exist_ok=True)
+    os.makedirs(scripts_dir, exist_ok=True)
+
+    bitmap_count = 0
+    sound_count = 0
+
+    # ── Extract bitmaps ──────────────────────────────────────────────
+    step("Extracting bitmaps...")
+    for lib in data.get('libraries', []):
+        if not lib or lib.get('type') != 'bitmap':
+            continue
+        cid = lib.get('swfCharId', lib.get('id', 0))
+        name = _safe_filename(lib.get('name', f'bitmap_{cid}'))
+        raw_b64 = lib.get('rawTagBody', '')
+        tag_type = lib.get('rawTagType', 36)
+
+        if not raw_b64:
+            continue
+
+        raw_body = base64.b64decode(raw_b64)
+
+        # JPEG types → extract as .jpg directly
+        if tag_type in (TAG_DEFINE_BITS, TAG_DEFINE_BITS_JPEG2,
+                        TAG_DEFINE_BITS_JPEG3, TAG_DEFINE_BITS_JPEG4):
+            # For JPEG3/4 with alpha, we need PNG; plain JPEG2 → jpg
+            if tag_type == TAG_DEFINE_BITS_JPEG2:
+                # raw_body is tag body *after* charId — SWF JPEG2 body = image data
+                img_data = raw_body
+                # strip erroneous prefix
+                if len(img_data) >= 4 and img_data[:4] == b'\xff\xd9\xff\xd8':
+                    img_data = img_data[4:]
+                fname = f"{cid}_{name}.jpg"
+                fpath = os.path.join(bitmaps_dir, fname)
+                with open(fpath, 'wb') as f:
+                    f.write(img_data)
+                lib['externalFile'] = f'bitmaps/{fname}'
+                bitmap_count += 1
+                continue
+
+            # JPEG3/4 have alpha — decode to RGBA and save as PNG
+            full_tag_data = struct.pack('<H', cid) + raw_body
+            w, h, rgba = decode_jpeg_to_rgba(tag_type, full_tag_data)
+            if w > 0 and h > 0 and rgba:
+                fname = f"{cid}_{name}.png"
+                fpath = os.path.join(bitmaps_dir, fname)
+                try:
+                    from PIL import Image
+                    img = Image.frombytes('RGBA', (w, h), rgba)
+                    img.save(fpath, 'PNG')
+                    lib['externalFile'] = f'bitmaps/{fname}'
+                    bitmap_count += 1
+                except ImportError:
+                    step(f"  [WARN] PIL unavailable, cannot save PNG for bitmap {cid}")
+                continue
+
+        # Lossless types → decode to RGBA and save as PNG
+        if tag_type in (TAG_DEFINE_BITS_LOSSLESS, TAG_DEFINE_BITS_LOSSLESS2):
+            w, h, rgba = decode_lossless_to_rgba(tag_type, raw_body)
+            if w > 0 and h > 0 and rgba:
+                fname = f"{cid}_{name}.png"
+                fpath = os.path.join(bitmaps_dir, fname)
+                try:
+                    from PIL import Image
+                    img = Image.frombytes('RGBA', (w, h), rgba)
+                    img.save(fpath, 'PNG')
+                    lib['externalFile'] = f'bitmaps/{fname}'
+                    bitmap_count += 1
+                except ImportError:
+                    step(f"  [WARN] PIL unavailable, cannot save PNG for bitmap {cid}")
+            continue
+
+    step(f"Extracted {bitmap_count} bitmaps")
+
+    # ── Extract sounds ───────────────────────────────────────────────
+    step("Extracting sounds...")
+    for lib in data.get('libraries', []):
+        if not lib or lib.get('type') != 'sound':
+            continue
+        cid = lib.get('swfCharId', lib.get('id', 0))
+        name = _safe_filename(lib.get('name', f'sound_{cid}'))
+        raw_b64 = lib.get('rawTagBody', '')
+
+        if not raw_b64:
+            continue
+
+        raw_body = base64.b64decode(raw_b64)
+        fmt_name, audio_bytes, _rate = extract_sound_buffer(raw_body)
+
+        if not audio_bytes:
+            continue
+
+        if fmt_name == 'mp3':
+            fname = f"{cid}_{name}.mp3"
+        elif fmt_name == 'wav':
+            fname = f"{cid}_{name}.wav"
+        elif fmt_name == 'nellymoser':
+            # Try converting Nellymoser → MP3 via ffmpeg
+            mp3_bytes = convert_nellymoser_to_mp3(audio_bytes, _rate)
+            if mp3_bytes:
+                fname = f"{cid}_{name}.mp3"
+                audio_bytes = mp3_bytes
+            else:
+                step(f"  [WARN] ffmpeg unavailable, storing raw Nellymoser for sound {cid}")
+                fname = f"{cid}_{name}.nellymoser.bin"
+        else:
+            # Store raw data with format hint
+            fname = f"{cid}_{name}.{fmt_name}.bin"
+
+        fpath = os.path.join(sounds_dir, fname)
+        with open(fpath, 'wb') as f:
+            f.write(audio_bytes)
+        lib['externalFile'] = f'sounds/{fname}'
+        sound_count += 1
+
+    step(f"Extracted {sound_count} sounds")
+
+    # ── Extract scripts ──────────────────────────────────────────────
+    script_count = 0
+    step("Extracting scripts...")
+    for script in data.get('scripts', []):
+        source = script.get('source', '')
+        if not source:
+            continue
+        spath = script.get('path', script.get('name', 'unknown.as'))
+        # Create subdirectories matching package paths
+        full_path = os.path.join(scripts_dir, spath)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(source)
+        script['externalFile'] = f'scripts/{spath}'
+        script_count += 1
+
+    step(f"Extracted {script_count} scripts")
+
+    # ── Write project.n2d ────────────────────────────────────────────
+    step("Writing project.n2d...")
+    n2d_path = os.path.join(folder_path, 'project.n2d')
+    save_n2d(data, n2d_path)
+
+    total = bitmap_count + sound_count + script_count
+    step(f"DONE: {total} assets extracted to {folder_path}")
+    step(f"  {bitmap_count} bitmaps, {sound_count} sounds, {script_count} scripts")
+    return folder_path
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 

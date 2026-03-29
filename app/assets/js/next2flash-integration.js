@@ -112,11 +112,16 @@
     toolbar.innerHTML =
       '<span class="n2f-dot"></span>' +
       '<span class="n2f-label">Next2Flash</span>' +
-      '<button class="n2f-btn" id="n2f-import-swf" title="Convert SWF/SSF to N2D and load into tool">' +
+      '<button class="n2f-btn" id="n2f-import-swf" title="Import SWF into editable project folder (PNG/WAV/AS)">' +
         '\u{1F4E5} Import SWF</button>' +
+      '<button class="n2f-btn" id="n2f-open-project" title="Open an N2D file (can be in a project folder with assets)">' +
+        '\u{1F4C2} Import Project</button>' +
+      '<button class="n2f-btn" id="n2f-refresh-assets" title="Refresh external assets from project folder" disabled>' +
+        '\u{1F504} Refresh Assets</button>' +
       '<button class="n2f-btn primary" id="n2f-export-swf" title="Export current project as SWF">' +
         '\u{1F4E4} Export SWF</button>' +
-      '<input type="file" id="n2f-swf-input" accept=".swf,.ssf" style="display:none">';
+      '<input type="file" id="n2f-swf-input" accept=".swf,.ssf" style="display:none">' +
+      '<input type="file" id="n2f-n2d-input" accept=".n2d" style="display:none">';
 
     // Insert as fixed-position toolbar at top of page
     document.body.appendChild(toolbar);
@@ -133,8 +138,11 @@
 
     // Wire events
     document.getElementById('n2f-import-swf').addEventListener('click', onImportSWF);
+    document.getElementById('n2f-open-project').addEventListener('click', onOpenProject);
+    document.getElementById('n2f-refresh-assets').addEventListener('click', onRefreshAssets);
     document.getElementById('n2f-export-swf').addEventListener('click', onExportSWF);
     document.getElementById('n2f-swf-input').addEventListener('change', onSWFFileSelected);
+    document.getElementById('n2f-n2d-input').addEventListener('change', onN2DFileSelected);
   }
 
   /* ================================================================== */
@@ -151,53 +159,158 @@
     _log.info('SWF file selected:', file.name, formatBytes(file.size));
     e.target.value = '';  // reset for re-selecting same file
 
-    showProgress('Converting SWF to N2D...\n' + file.name + ' (' + formatBytes(file.size) + ')');
+    showProgress('Importing SWF into project folder...\n' + file.name + ' (' + formatBytes(file.size) + ')');
 
     var form = new FormData();
     form.append('file', file);
 
-    fetch(API_BASE + '/api/swf-to-n2d', { method: 'POST', body: form })
+    fetch(API_BASE + '/api/swf-to-project', { method: 'POST', body: form })
       .then(function (r) {
         if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
         var name = r.headers.get('X-N2D-Name') || file.name.replace('.swf', '');
         var libs = r.headers.get('X-N2D-Libraries') || '?';
         var scripts = r.headers.get('X-N2D-Scripts') || '0';
+        var projDir = r.headers.get('X-Project-Dir') || '';
         return r.blob().then(function (blob) {
-          return { blob: blob, name: name, libs: libs, scripts: scripts };
+          return { blob: blob, name: name, libs: libs, scripts: scripts, projDir: projDir };
         });
       })
       .then(function (result) {
         hideProgress();
-        _log.info('SWF import succeeded:', result.name, '—', result.libs, 'libraries,', result.scripts, 'scripts');
+        _currentProjectDir = result.projDir;
+        _log.info('Project created at:', _currentProjectDir);
 
-        // Store the N2D blob for export fallback (memory + IDB)
-        _importedN2DBlob = result.blob.slice(0);  // clone
+        // Enable refresh button
+        var refreshBtn = document.getElementById('n2f-refresh-assets');
+        if (refreshBtn) refreshBtn.disabled = false;
+
+        // Store and load into tool
+        _importedN2DBlob = result.blob.slice(0);
         _saveImportedBlobToIDB(_importedN2DBlob);
 
-        // Feed the N2D blob to the tool's native file input.
-        // The server returns zlib-compressed JSON which is exactly what
-        // the tool's native load() pipeline expects.
-        var n2dFile = new File([result.blob], result.name + '.n2d', { type: 'application/octet-stream' });
-
-        // Inject the file into the hidden file-input the tool listens on
-        var fileInput = document.getElementById('tools-load-file-input');
-        if (fileInput) {
-          var dt = new DataTransfer();
-          dt.items.add(n2dFile);
-          fileInput.files = dt.files;
-          fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-          _serverLog('INFO', 'Fed N2D to native file input, size: ' + n2dFile.size);
-          toast('Imported: ' + result.name + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)');
-        } else {
-          _serverLog('ERROR', 'tools-load-file-input element not found');
-          toast('Import failed: tool file input not found', true);
-        }
+        _feedN2DToTool(result.blob, result.name);
+        toast('Project created: ' + result.name + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)\nFolder: ' + _currentProjectDir);
       })
       .catch(function (err) {
         hideProgress();
         _log.error('SWF import failed:', err.message);
         toast('Import failed: ' + err.message, true);
       });
+  }
+
+  /* ================================================================== */
+  /*  Project folder tracking                                            */
+  /* ================================================================== */
+  var _currentProjectDir = null;
+
+  /* ================================================================== */
+  /*  Open Existing Project                                              */
+  /* ================================================================== */
+  function onOpenProject() {
+    _log.debug('Open N2D button clicked');
+    document.getElementById('n2f-n2d-input').click();
+  }
+
+  function onN2DFileSelected(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    _log.info('N2D file selected:', file.name, formatBytes(file.size));
+    e.target.value = '';
+
+    showProgress('Loading N2D file...\n' + file.name + ' (' + formatBytes(file.size) + ')');
+
+    // Upload the .n2d to the server so it can set up project context
+    var form = new FormData();
+    form.append('file', file);
+
+    fetch(API_BASE + '/api/open-project', { method: 'POST', body: form })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
+        var name = r.headers.get('X-N2D-Name') || file.name.replace('.n2d', '');
+        var libs = r.headers.get('X-N2D-Libraries') || '?';
+        var projDir = r.headers.get('X-Project-Dir') || '';
+        return r.blob().then(function (blob) {
+          return { blob: blob, name: name, libs: libs, projDir: projDir };
+        });
+      })
+      .then(function (result) {
+        hideProgress();
+        if (result.projDir) {
+          _currentProjectDir = result.projDir;
+          _log.info('Opened project at:', _currentProjectDir);
+          var refreshBtn = document.getElementById('n2f-refresh-assets');
+          if (refreshBtn) refreshBtn.disabled = false;
+        }
+
+        _importedN2DBlob = result.blob.slice(0);
+        _saveImportedBlobToIDB(_importedN2DBlob);
+
+        _feedN2DToTool(result.blob, result.name);
+        toast('Opened: ' + result.name + ' (' + result.libs + ' libraries)');
+      })
+      .catch(function (err) {
+        hideProgress();
+        _log.error('Open N2D failed:', err.message);
+        toast('Open failed: ' + err.message, true);
+      });
+  }
+
+  /* ================================================================== */
+  /*  Refresh Assets                                                     */
+  /* ================================================================== */
+  function onRefreshAssets() {
+    _log.debug('Refresh Assets button clicked');
+    if (!_currentProjectDir) {
+      toast('No project folder loaded. Import a SWF as a project first.', true);
+      return;
+    }
+
+    showProgress('Refreshing assets from project folder...');
+
+    fetch(API_BASE + '/api/refresh-assets', { method: 'POST' })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
+        var name = r.headers.get('X-N2D-Name') || 'project';
+        var libs = r.headers.get('X-N2D-Libraries') || '?';
+        var refreshed = r.headers.get('X-Refreshed-Scripts') || '0';
+        var bitmapsRefreshed = r.headers.get('X-Refreshed-Bitmaps') || '0';
+        var soundsRefreshed = r.headers.get('X-Refreshed-Sounds') || '0';
+        return r.blob().then(function (blob) {
+          return { blob: blob, name: name, libs: libs, refreshed: refreshed, bitmapsRefreshed: bitmapsRefreshed, soundsRefreshed: soundsRefreshed };
+        });
+      })
+      .then(function (result) {
+        hideProgress();
+
+        _importedN2DBlob = result.blob.slice(0);
+        _saveImportedBlobToIDB(_importedN2DBlob);
+
+        _feedN2DToTool(result.blob, result.name);
+        toast('Assets refreshed: ' + result.refreshed + ' scripts, ' + result.bitmapsRefreshed + ' bitmaps, ' + result.soundsRefreshed + ' sounds');
+      })
+      .catch(function (err) {
+        hideProgress();
+        _log.error('Refresh assets failed:', err.message);
+        toast('Refresh failed: ' + err.message, true);
+      });
+  }
+
+  /* ================================================================== */
+  /*  Helper: Feed N2D blob to tool                                      */
+  /* ================================================================== */
+  function _feedN2DToTool(blob, name) {
+    var n2dFile = new File([blob], name + '.n2d', { type: 'application/octet-stream' });
+    var fileInput = document.getElementById('tools-load-file-input');
+    if (fileInput) {
+      var dt = new DataTransfer();
+      dt.items.add(n2dFile);
+      fileInput.files = dt.files;
+      fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+      _serverLog('INFO', 'Fed N2D to native file input, size: ' + n2dFile.size);
+    } else {
+      _serverLog('ERROR', 'tools-load-file-input element not found');
+      toast('Load failed: tool file input not found', true);
+    }
   }
 
   /* ================================================================== */
