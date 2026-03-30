@@ -1765,20 +1765,20 @@ class Shape extends Instance
                         instance.width, instance.height, true, 0
                     );
                     
-                    // Use the PUBLIC API (canvas/buffer without _$) like recodes setter does
+                    // Set private properties directly to avoid public setters
+                    // which clear each other (set buffer clears _$canvas, set canvas clears _$buffer)
                     if (hasValidCanvas && canvasContext) {
-                        // Use the canvas directly via public API - set BOTH canvas and buffer
-                        bitmapData.canvas = instance._$canvas;
+                        bitmapData._$canvas = instance._$canvas;
                         if (hasValidBuffer) {
-                            bitmapData.buffer = instance._$buffer;
+                            bitmapData._$buffer = instance._$buffer;
                         }
                         if (Instance._$lazyDebug) {
-                            console.log('[LAZY] bitmap fill: using canvas via public API w=' + instance.width 
+                            console.log('[LAZY] bitmap fill: using canvas w=' + instance.width 
                                 + ' h=' + instance.height + ' for bitmapId=' + this._$bitmapId
                                 + ', hasBuffer=' + hasValidBuffer);
                         }
                     } else if (hasValidBuffer) {
-                        // Create canvas from buffer like recodes setter does
+                        // Create canvas from buffer
                         const canvas = document.createElement('canvas');
                         canvas.width = instance.width;
                         canvas.height = instance.height;
@@ -1787,17 +1787,16 @@ class Shape extends Instance
                             const imageData = ctx.createImageData(instance.width, instance.height);
                             imageData.data.set(instance._$buffer);
                             ctx.putImageData(imageData, 0, 0);
-                            bitmapData.canvas = canvas;
-                            bitmapData.buffer = instance._$buffer;
+                            bitmapData._$canvas = canvas;
+                            bitmapData._$buffer = instance._$buffer;
                             if (Instance._$lazyDebug) {
                                 console.log('[LAZY] bitmap fill: created canvas from buffer w=' + instance.width 
                                     + ' h=' + instance.height + ' for bitmapId=' + this._$bitmapId);
                             }
                         } else {
-                            // Fallback to buffer via public API
-                            bitmapData.buffer = instance._$buffer;
+                            bitmapData._$buffer = instance._$buffer;
                             if (Instance._$lazyDebug) {
-                                console.log('[LAZY] bitmap fill: FAILED canvas creation, using buffer via public API');
+                                console.log('[LAZY] bitmap fill: FAILED canvas creation, using buffer only');
                             }
                         }
                     } else {

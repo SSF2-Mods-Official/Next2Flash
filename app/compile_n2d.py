@@ -161,6 +161,159 @@ def _remap_sprite_raw_body(raw_body: bytes, id_map: Dict[int, int]) -> bytes:
     return bytes(out)
 
 
+# ── Bit-level helpers for skipping byte-aligned SWF structures ──────────
+
+def _skip_swf_matrix(buf: bytes, off: int) -> int:
+    """Skip a byte-aligned MATRIX record starting at buf[off].
+    Returns the byte offset after the complete (byte-aligned) matrix."""
+    bit_pos = off * 8
+
+    def read_ub(n_bits):
+        nonlocal bit_pos
+        val = 0
+        for _ in range(n_bits):
+            byte_idx = bit_pos >> 3
+            bit_idx = 7 - (bit_pos & 7)
+            val = (val << 1) | ((buf[byte_idx] >> bit_idx) & 1)
+            bit_pos += 1
+        return val
+
+    has_scale = read_ub(1)
+    if has_scale:
+        n = read_ub(5)
+        read_ub(n)  # ScaleX
+        read_ub(n)  # ScaleY
+    has_rotate = read_ub(1)
+    if has_rotate:
+        n = read_ub(5)
+        read_ub(n)  # RotateSkew0
+        read_ub(n)  # RotateSkew1
+    n = read_ub(5)
+    read_ub(n)  # TranslateX
+    read_ub(n)  # TranslateY
+    return (bit_pos + 7) >> 3  # byte-align
+
+
+def _skip_swf_cxform_alpha(buf: bytes, off: int) -> int:
+    """Skip a byte-aligned CXFORMWITHALPHA record starting at buf[off].
+    Returns the byte offset after the complete (byte-aligned) record."""
+    bit_pos = off * 8
+
+    def read_ub(n_bits):
+        nonlocal bit_pos
+        val = 0
+        for _ in range(n_bits):
+            byte_idx = bit_pos >> 3
+            bit_idx = 7 - (bit_pos & 7)
+            val = (val << 1) | ((buf[byte_idx] >> bit_idx) & 1)
+            bit_pos += 1
+        return val
+
+    has_add = read_ub(1)
+    has_mult = read_ub(1)
+    nbits = read_ub(4)
+    if has_mult:
+        for _ in range(4):
+            read_ub(nbits)  # R, G, B, A mult
+    if has_add:
+        for _ in range(4):
+            read_ub(nbits)  # R, G, B, A add
+    return (bit_pos + 7) >> 3  # byte-align
+
+
+def _skip_swf_filter_list(buf: bytes, off: int) -> int:
+    """Skip a FILTERLIST starting at buf[off].
+    Returns the byte offset after the complete filter list."""
+    count = buf[off]; off += 1
+    for _ in range(count):
+        fid = buf[off]; off += 1
+        if fid == 0:    # DropShadowFilter
+            off += 23
+        elif fid == 1:  # BlurFilter
+            off += 9
+        elif fid == 2:  # GlowFilter
+            off += 15
+        elif fid == 3:  # BevelFilter
+            off += 27
+        elif fid == 4:  # GradientGlowFilter
+            n = buf[off]; off += 1
+            off += 5 * n + 19
+        elif fid == 5:  # ConvolutionFilter
+            mx = buf[off]; my = buf[off + 1]; off += 2
+            off += 4 + 4 + 4 * mx * my + 4 + 1
+        elif fid == 6:  # ColorMatrixFilter
+            off += 80
+        elif fid == 7:  # GradientBevelFilter
+            n = buf[off]; off += 1
+            off += 5 * n + 19
+        else:
+            raise ValueError(f"Unknown filter ID: {fid}")
+    return off
+
+
+def _remap_button_raw_body(raw_body: bytes, id_map: Dict[int, int]) -> bytes:
+    """Remap charID references inside a DefineButton2 raw body.
+
+    raw_body = tag data AFTER the 2-byte charID.  Layout:
+      UI8  Flags
+      UI16 ActionOffset
+      BUTTONRECORD[] terminated by 0x00:
+        UI8  ButtonStates (bit5=HasBlendMode, bit4=HasFilterList)
+        UI16 CharacterId   << remapped
+        UI16 PlaceDepth
+        MATRIX PlaceMatrix
+        CXFORMWITHALPHA ColorTransform
+        [FILTERLIST if HasFilterList]
+        [UI8 BlendMode if HasBlendMode]
+      [BUTTONCONDACTION[] if ActionOffset > 0]
+    """
+    if not id_map or len(raw_body) < 4:
+        return raw_body
+
+    try:
+        buf = bytearray(raw_body)
+        off = 3  # skip Flags(1) + ActionOffset(2)
+
+        while off < len(buf):
+            state_flags = buf[off]
+            if state_flags == 0:
+                break  # end of ButtonRecords
+            has_blend = bool(state_flags & 0x20)
+            has_filter = bool(state_flags & 0x10)
+
+            off += 1  # past state flags
+            if off + 4 > len(buf):
+                break
+
+            # CharacterId (UI16 LE) — remap
+            old_cid = buf[off] | (buf[off + 1] << 8)
+            new_cid = id_map.get(old_cid, old_cid)
+            buf[off] = new_cid & 0xFF
+            buf[off + 1] = (new_cid >> 8) & 0xFF
+            off += 2
+
+            # PlaceDepth (UI16)
+            off += 2
+
+            # MATRIX (bit-packed, byte-aligned)
+            off = _skip_swf_matrix(buf, off)
+
+            # CXFORMWITHALPHA (bit-packed, byte-aligned)
+            off = _skip_swf_cxform_alpha(buf, off)
+
+            # Optional FilterList
+            if has_filter:
+                off = _skip_swf_filter_list(buf, off)
+
+            # Optional BlendMode
+            if has_blend:
+                off += 1
+
+        return bytes(buf)
+    except (IndexError, ValueError):
+        return raw_body  # safe fallback — un-remapped is better than dropped
+
+
 def _remap_shape_raw_body(raw_body: bytes, tag_type: int,
                           id_map: Dict[int, int]) -> bytes:
     """Remap bitmap charID references inside a DefineShape raw body.
@@ -2633,6 +2786,10 @@ class N2DCompiler:
         if lib.get("isMorphShape") or lib.get("rawTagType") in (46, 84):
             self._emit_morph_shape(lib)
             return
+        # If this is a button (DefineButton2), dispatch to button emitter
+        if lib.get("isButton") or lib.get("rawTagType") == 34:
+            self._emit_button(lib)
+            return
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_shape: lib_id=%d, swf_id=%d, name=%s', lib['id'], swf_id, lib.get('name', '?'))
         # Font data passthrough: use fontData when rawTagBody is absent
@@ -2767,6 +2924,19 @@ class N2DCompiler:
             return
         tag = build_define_sound(swf_id, wav_bytes)
         self._definition_tags.extend(tag)
+
+    def _emit_button(self, lib: dict):
+        swf_id = self._lib_to_swf_id[lib["id"]]
+        log.debug('_emit_button: lib_id=%d, swf_id=%d', lib['id'], swf_id)
+        # Raw tag passthrough for 1:1 roundtrip (only path — no rebuild)
+        if lib.get("rawTagBody"):
+            raw_body = _decode_raw_body(lib["rawTagBody"])
+            tag_type = lib.get("rawTagType", 34)  # DefineButton2
+            # Remap charID references inside ButtonRecords
+            if tag_type == 34:
+                raw_body = _remap_button_raw_body(raw_body, self._orig_to_new_id)
+            tag_data = struct.pack('<H', swf_id) + raw_body
+            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
 
     def _emit_container(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]

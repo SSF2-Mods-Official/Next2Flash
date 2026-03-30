@@ -1,1 +1,10 @@
-app\converted
+# Generated output
+app/converted/
+
+# Dependencies
+app/node_modules/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo

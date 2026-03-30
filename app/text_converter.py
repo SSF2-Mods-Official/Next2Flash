@@ -66,7 +66,7 @@ def build_define_edit_text(
     has_layout = True
     no_select = (input_type == "static")
     read_only = (input_type != "input")
-    html = False
+    html = tf.get('html', False)
     use_outlines = True
     was_static = (input_type == "static")
     password = False

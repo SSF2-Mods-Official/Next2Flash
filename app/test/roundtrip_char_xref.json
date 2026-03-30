@@ -1,0 +1,912 @@
+{
+  "source_dir": "C:\\Users\\glwex\\Documents\\GitHub\\ssf2-idk-140x-original\\src\\Super Smash Flash 2 Beta v1.4.0.1\\data\\character",
+  "total_files": 5,
+  "timestamp": "2026-03-29 18:52:21",
+  "results": [
+    {
+      "file": "bandanadee.ssf",
+      "size_kb": 3776,
+      "status": "PASS",
+      "time_s": 15.98,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 1256,
+        "rt_tag_count": 1256,
+        "orig_define_count": 1222,
+        "rt_define_count": 1222,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineShape": {
+            "orig": 136,
+            "rt": 136
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineSound": {
+            "orig": 53,
+            "rt": 53
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 18,
+            "rt": 18
+          },
+          "DefineShape3": {
+            "orig": 43,
+            "rt": 43
+          },
+          "DefineBitsJPEG3": {
+            "orig": 37,
+            "rt": 37
+          },
+          "DefineBitsLossless2": {
+            "orig": 780,
+            "rt": 780
+          },
+          "DefineSprite": {
+            "orig": 144,
+            "rt": 144
+          },
+          "SoundStreamHead2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineMorphShape": {
+            "orig": 11,
+            "rt": 11
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 1,
+            "rt": 1
+          },
+          "CSMTextSettings": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineFont3": {
+            "orig": 1,
+            "rt": 1
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 13,
+            "rt": 13
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 1,
+            "rt": 1
+          }
+        },
+        "leaf_tag_results": {
+          "DefineSound": {
+            "total_orig": 53,
+            "total_rt": 53,
+            "matched": 53,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "total_orig": 37,
+            "total_rt": 37,
+            "matched": 37,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 780,
+            "total_rt": 780,
+            "matched": 780,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 136,
+          "rt": 136
+        },
+        "reref_DefineText": {
+          "orig": 4,
+          "rt": 4
+        },
+        "reref_DefineShape3": {
+          "orig": 43,
+          "rt": 43
+        },
+        "reref_DefineSprite": {
+          "orig": 144,
+          "rt": 144
+        },
+        "reref_DefineMorphShape": {
+          "orig": 11,
+          "rt": 11
+        },
+        "reref_DefineFont3": {
+          "orig": 1,
+          "rt": 1
+        },
+        "reref_DefineShape4": {
+          "orig": 13,
+          "rt": 13
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": []
+    },
+    {
+      "file": "blackmage.ssf",
+      "size_kb": 2038,
+      "status": "PASS",
+      "time_s": 11.85,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 1614,
+        "rt_tag_count": 1614,
+        "orig_define_count": 1564,
+        "rt_define_count": 1564,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineShape": {
+            "orig": 288,
+            "rt": 288
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineSound": {
+            "orig": 53,
+            "rt": 53
+          },
+          "DefineShape2": {
+            "orig": 4,
+            "rt": 4
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 33,
+            "rt": 34
+          },
+          "DefineShape3": {
+            "orig": 141,
+            "rt": 141
+          },
+          "DefineBitsJPEG3": {
+            "orig": 50,
+            "rt": 50
+          },
+          "DefineBitsLossless2": {
+            "orig": 735,
+            "rt": 735
+          },
+          "DefineSprite": {
+            "orig": 205,
+            "rt": 205
+          },
+          "SoundStreamHead2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineMorphShape": {
+            "orig": 17,
+            "rt": 17
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject3": {
+            "orig": 1,
+            "rt": 0
+          },
+          "FontAlignZones": {
+            "orig": 1,
+            "rt": 1
+          },
+          "CSMTextSettings": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineFont3": {
+            "orig": 1,
+            "rt": 1
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 64,
+            "rt": 64
+          },
+          "DefineMorphShape2": {
+            "orig": 2,
+            "rt": 2
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 1,
+            "rt": 1
+          }
+        },
+        "leaf_tag_results": {
+          "DefineSound": {
+            "total_orig": 53,
+            "total_rt": 53,
+            "matched": 53,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "total_orig": 50,
+            "total_rt": 50,
+            "matched": 50,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 735,
+            "total_rt": 735,
+            "matched": 735,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [
+          "PlaceObject3"
+        ],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 288,
+          "rt": 288
+        },
+        "reref_DefineText": {
+          "orig": 4,
+          "rt": 4
+        },
+        "reref_DefineShape2": {
+          "orig": 4,
+          "rt": 4
+        },
+        "reref_DefineShape3": {
+          "orig": 141,
+          "rt": 141
+        },
+        "reref_DefineSprite": {
+          "orig": 205,
+          "rt": 205
+        },
+        "reref_DefineMorphShape": {
+          "orig": 17,
+          "rt": 17
+        },
+        "reref_DefineFont3": {
+          "orig": 1,
+          "rt": 1
+        },
+        "reref_DefineShape4": {
+          "orig": 64,
+          "rt": 64
+        },
+        "reref_DefineMorphShape2": {
+          "orig": 2,
+          "rt": 2
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": []
+    },
+    {
+      "file": "bomberman.ssf",
+      "size_kb": 2609,
+      "status": "PASS",
+      "time_s": 28.8,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 994,
+        "rt_tag_count": 994,
+        "orig_define_count": 948,
+        "rt_define_count": 948,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineShape": {
+            "orig": 72,
+            "rt": 72
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 8,
+            "rt": 8
+          },
+          "DefineSound": {
+            "orig": 24,
+            "rt": 24
+          },
+          "DefineShape2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 23,
+            "rt": 24
+          },
+          "DefineShape3": {
+            "orig": 29,
+            "rt": 29
+          },
+          "DefineBitsJPEG3": {
+            "orig": 10,
+            "rt": 10
+          },
+          "DefineBitsLossless2": {
+            "orig": 622,
+            "rt": 622
+          },
+          "DefineSprite": {
+            "orig": 168,
+            "rt": 168
+          },
+          "SoundStreamHead2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineMorphShape": {
+            "orig": 8,
+            "rt": 8
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject3": {
+            "orig": 1,
+            "rt": 0
+          },
+          "FontAlignZones": {
+            "orig": 2,
+            "rt": 2
+          },
+          "CSMTextSettings": {
+            "orig": 8,
+            "rt": 8
+          },
+          "DefineFont3": {
+            "orig": 2,
+            "rt": 2
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 4,
+            "rt": 4
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 2,
+            "rt": 2
+          }
+        },
+        "leaf_tag_results": {
+          "DefineSound": {
+            "total_orig": 24,
+            "total_rt": 24,
+            "matched": 24,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "total_orig": 10,
+            "total_rt": 10,
+            "matched": 10,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 622,
+            "total_rt": 622,
+            "matched": 622,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [
+          "PlaceObject3"
+        ],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 72,
+          "rt": 72
+        },
+        "reref_DefineText": {
+          "orig": 8,
+          "rt": 8
+        },
+        "reref_DefineShape2": {
+          "orig": 1,
+          "rt": 1
+        },
+        "reref_DefineShape3": {
+          "orig": 29,
+          "rt": 29
+        },
+        "reref_DefineSprite": {
+          "orig": 168,
+          "rt": 168
+        },
+        "reref_DefineMorphShape": {
+          "orig": 8,
+          "rt": 8
+        },
+        "reref_DefineFont3": {
+          "orig": 2,
+          "rt": 2
+        },
+        "reref_DefineShape4": {
+          "orig": 4,
+          "rt": 4
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": []
+    },
+    {
+      "file": "bowser.ssf",
+      "size_kb": 5814,
+      "status": "PASS",
+      "time_s": 17.35,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 1669,
+        "rt_tag_count": 1669,
+        "orig_define_count": 1629,
+        "rt_define_count": 1629,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineShape": {
+            "orig": 181,
+            "rt": 181
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineSound": {
+            "orig": 75,
+            "rt": 75
+          },
+          "DefineShape2": {
+            "orig": 3,
+            "rt": 3
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 24,
+            "rt": 24
+          },
+          "DefineShape3": {
+            "orig": 94,
+            "rt": 94
+          },
+          "DefineBitsJPEG3": {
+            "orig": 81,
+            "rt": 81
+          },
+          "DefineBitsLossless2": {
+            "orig": 968,
+            "rt": 968
+          },
+          "DefineSprite": {
+            "orig": 189,
+            "rt": 189
+          },
+          "SoundStreamHead2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineMorphShape": {
+            "orig": 27,
+            "rt": 27
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 1,
+            "rt": 1
+          },
+          "CSMTextSettings": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineFont3": {
+            "orig": 1,
+            "rt": 1
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 6,
+            "rt": 6
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 1,
+            "rt": 1
+          }
+        },
+        "leaf_tag_results": {
+          "DefineSound": {
+            "total_orig": 75,
+            "total_rt": 75,
+            "matched": 75,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "total_orig": 81,
+            "total_rt": 81,
+            "matched": 81,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 968,
+            "total_rt": 968,
+            "matched": 968,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 181,
+          "rt": 181
+        },
+        "reref_DefineText": {
+          "orig": 4,
+          "rt": 4
+        },
+        "reref_DefineShape2": {
+          "orig": 3,
+          "rt": 3
+        },
+        "reref_DefineShape3": {
+          "orig": 94,
+          "rt": 94
+        },
+        "reref_DefineSprite": {
+          "orig": 189,
+          "rt": 189
+        },
+        "reref_DefineMorphShape": {
+          "orig": 27,
+          "rt": 27
+        },
+        "reref_DefineFont3": {
+          "orig": 1,
+          "rt": 1
+        },
+        "reref_DefineShape4": {
+          "orig": 6,
+          "rt": 6
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": []
+    },
+    {
+      "file": "captainfalcon.swf",
+      "size_kb": 3797,
+      "status": "PASS",
+      "time_s": 15.65,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 1486,
+        "rt_tag_count": 1486,
+        "orig_define_count": 1447,
+        "rt_define_count": 1447,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineShape": {
+            "orig": 148,
+            "rt": 148
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineSound": {
+            "orig": 68,
+            "rt": 68
+          },
+          "DefineBitsLossless": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape2": {
+            "orig": 46,
+            "rt": 46
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 22,
+            "rt": 23
+          },
+          "DefineShape3": {
+            "orig": 74,
+            "rt": 74
+          },
+          "DefineBitsJPEG3": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineBitsLossless2": {
+            "orig": 821,
+            "rt": 821
+          },
+          "DefineSprite": {
+            "orig": 253,
+            "rt": 253
+          },
+          "SoundStreamHead2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineMorphShape": {
+            "orig": 20,
+            "rt": 20
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject3": {
+            "orig": 1,
+            "rt": 0
+          },
+          "FontAlignZones": {
+            "orig": 1,
+            "rt": 1
+          },
+          "CSMTextSettings": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineFont3": {
+            "orig": 1,
+            "rt": 1
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 9,
+            "rt": 9
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 1,
+            "rt": 1
+          }
+        },
+        "leaf_tag_results": {
+          "DefineSound": {
+            "total_orig": 68,
+            "total_rt": 68,
+            "matched": 68,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless": {
+            "total_orig": 1,
+            "total_rt": 1,
+            "matched": 1,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "total_orig": 2,
+            "total_rt": 2,
+            "matched": 2,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 821,
+            "total_rt": 821,
+            "matched": 821,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [
+          "PlaceObject3"
+        ],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 148,
+          "rt": 148
+        },
+        "reref_DefineText": {
+          "orig": 4,
+          "rt": 4
+        },
+        "reref_DefineShape2": {
+          "orig": 46,
+          "rt": 46
+        },
+        "reref_DefineShape3": {
+          "orig": 74,
+          "rt": 74
+        },
+        "reref_DefineSprite": {
+          "orig": 253,
+          "rt": 253
+        },
+        "reref_DefineMorphShape": {
+          "orig": 20,
+          "rt": 20
+        },
+        "reref_DefineFont3": {
+          "orig": 1,
+          "rt": 1
+        },
+        "reref_DefineShape4": {
+          "orig": 9,
+          "rt": 9
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": []
+    }
+  ],
+  "summary": {
+    "pass": 5,
+    "fail": 0,
+    "error": 0,
+    "total_issues": []
+  }
+}

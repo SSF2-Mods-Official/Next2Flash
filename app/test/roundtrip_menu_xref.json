@@ -1,0 +1,1599 @@
+{
+  "source_dir": "C:\\Users\\glwex\\Documents\\GitHub\\ssf2-idk-140x-original\\src\\Super Smash Flash 2 Beta v1.4.0.1\\data\\menu",
+  "total_files": 9,
+  "timestamp": "2026-03-29 18:50:08",
+  "results": [
+    {
+      "file": "menu_backgrounds.ssf",
+      "size_kb": 4871,
+      "status": "PASS",
+      "time_s": 9.81,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 26,
+        "rt_tag_count": 25,
+        "orig_define_count": 15,
+        "rt_define_count": 15,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineShape": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineBits": {
+            "orig": 1,
+            "rt": 1
+          },
+          "tag8": {
+            "orig": 1,
+            "rt": 0
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineBitsLossless": {
+            "orig": 1,
+            "rt": 1
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape3": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineBitsLossless2": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineSprite": {
+            "orig": 6,
+            "rt": 6
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          }
+        },
+        "leaf_tag_results": {
+          "DefineBits": {
+            "total_orig": 1,
+            "total_rt": 1,
+            "matched": 1,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless": {
+            "total_orig": 1,
+            "total_rt": 1,
+            "matched": 1,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 2,
+            "total_rt": 2,
+            "matched": 2,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [
+          "tag8"
+        ],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 4,
+          "rt": 4
+        },
+        "reref_DefineShape3": {
+          "orig": 1,
+          "rt": 1
+        },
+        "reref_DefineSprite": {
+          "orig": 6,
+          "rt": 6
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": []
+    },
+    {
+      "file": "menu_characters.ssf",
+      "size_kb": 466,
+      "status": "PASS",
+      "time_s": 2.75,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 679,
+        "rt_tag_count": 676,
+        "orig_define_count": 510,
+        "rt_define_count": 510,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 13,
+            "rt": 13
+          },
+          "DefineShape": {
+            "orig": 23,
+            "rt": 23
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 58,
+            "rt": 58
+          },
+          "DefineBitsLossless": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineShape2": {
+            "orig": 39,
+            "rt": 39
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 12,
+            "rt": 12
+          },
+          "RemoveObject2": {
+            "orig": 11,
+            "rt": 11
+          },
+          "DefineShape3": {
+            "orig": 37,
+            "rt": 37
+          },
+          "DefineButton2": {
+            "orig": 3,
+            "rt": 0
+          },
+          "DefineBitsLossless2": {
+            "orig": 59,
+            "rt": 59
+          },
+          "DefineEditText": {
+            "orig": 88,
+            "rt": 88
+          },
+          "DefineSprite": {
+            "orig": 146,
+            "rt": 146
+          },
+          "FrameLabel": {
+            "orig": 3,
+            "rt": 3
+          },
+          "DefineMorphShape": {
+            "orig": 9,
+            "rt": 9
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 6,
+            "rt": 6
+          },
+          "CSMTextSettings": {
+            "orig": 109,
+            "rt": 109
+          },
+          "DefineFont3": {
+            "orig": 6,
+            "rt": 6
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 40,
+            "rt": 40
+          },
+          "DefineMorphShape2": {
+            "orig": 3,
+            "rt": 3
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 5,
+            "rt": 5
+          }
+        },
+        "leaf_tag_results": {
+          "DefineBitsLossless": {
+            "total_orig": 2,
+            "total_rt": 2,
+            "matched": 2,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 59,
+            "total_rt": 59,
+            "matched": 59,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [
+          "DefineButton2"
+        ],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 23,
+          "rt": 23
+        },
+        "reref_DefineText": {
+          "orig": 58,
+          "rt": 58
+        },
+        "reref_DefineShape2": {
+          "orig": 39,
+          "rt": 39
+        },
+        "reref_DefineShape3": {
+          "orig": 37,
+          "rt": 37
+        },
+        "reref_DefineEditText": {
+          "orig": 88,
+          "rt": 88
+        },
+        "reref_DefineSprite": {
+          "orig": 146,
+          "rt": 146
+        },
+        "reref_DefineMorphShape": {
+          "orig": 9,
+          "rt": 9
+        },
+        "reref_DefineFont3": {
+          "orig": 6,
+          "rt": 6
+        },
+        "reref_DefineShape4": {
+          "orig": 40,
+          "rt": 40
+        },
+        "reref_DefineMorphShape2": {
+          "orig": 3,
+          "rt": 3
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": [
+        "[ERROR] DefineSprite charID=112: sub-tag PlaceObject2 #5 references charID 49 which is not defined",
+        "[ERROR] DefineSprite charID=490: sub-tag PlaceObject2 #3 references charID 471 which is not defined",
+        "[ERROR] DefineSprite charID=490: sub-tag PlaceObject2 #5 references charID 471 which is not defined",
+        "[ERROR] DefineSprite charID=490: sub-tag PlaceObject2 #8 references charID 489 which is not defined",
+        "[ERROR] DefineSprite charID=504: sub-tag PlaceObject2 #2 references charID 471 which is not defined",
+        "[ERROR] DefineSprite charID=504: sub-tag PlaceObject2 #4 references charID 471 which is not defined",
+        "[ERROR] DefineSprite charID=513: sub-tag PlaceObject2 #3 references charID 471 which is not defined",
+        "[ERROR] DefineSprite charID=513: sub-tag PlaceObject2 #4 references charID 471 which is not defined",
+        "[ERROR] DefineSprite charID=513: sub-tag PlaceObject2 #7 references charID 489 which is not defined"
+      ]
+    },
+    {
+      "file": "menu_disclaimer.ssf",
+      "size_kb": 1244,
+      "status": "PASS",
+      "time_s": 4.12,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 138,
+        "rt_tag_count": 138,
+        "orig_define_count": 114,
+        "rt_define_count": 114,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineShape": {
+            "orig": 55,
+            "rt": 55
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 6,
+            "rt": 6
+          },
+          "DefineShape2": {
+            "orig": 2,
+            "rt": 2
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape3": {
+            "orig": 7,
+            "rt": 7
+          },
+          "DefineBitsLossless2": {
+            "orig": 28,
+            "rt": 28
+          },
+          "DefineEditText": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineSprite": {
+            "orig": 10,
+            "rt": 10
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 3,
+            "rt": 3
+          },
+          "CSMTextSettings": {
+            "orig": 8,
+            "rt": 8
+          },
+          "DefineFont3": {
+            "orig": 3,
+            "rt": 3
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 1,
+            "rt": 1
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 3,
+            "rt": 3
+          }
+        },
+        "leaf_tag_results": {
+          "DefineBitsLossless2": {
+            "total_orig": 28,
+            "total_rt": 28,
+            "matched": 28,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 55,
+          "rt": 55
+        },
+        "reref_DefineText": {
+          "orig": 6,
+          "rt": 6
+        },
+        "reref_DefineShape2": {
+          "orig": 2,
+          "rt": 2
+        },
+        "reref_DefineShape3": {
+          "orig": 7,
+          "rt": 7
+        },
+        "reref_DefineEditText": {
+          "orig": 2,
+          "rt": 2
+        },
+        "reref_DefineSprite": {
+          "orig": 10,
+          "rt": 10
+        },
+        "reref_DefineFont3": {
+          "orig": 3,
+          "rt": 3
+        },
+        "reref_DefineShape4": {
+          "orig": 1,
+          "rt": 1
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": []
+    },
+    {
+      "file": "menu_group.ssf",
+      "size_kb": 704,
+      "status": "PASS",
+      "time_s": 11.14,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 1549,
+        "rt_tag_count": 1549,
+        "orig_define_count": 1033,
+        "rt_define_count": 1033,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 6,
+            "rt": 6
+          },
+          "DefineShape": {
+            "orig": 94,
+            "rt": 94
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 49,
+            "rt": 49
+          },
+          "DefineBitsLossless": {
+            "orig": 5,
+            "rt": 5
+          },
+          "DefineShape2": {
+            "orig": 21,
+            "rt": 21
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 5,
+            "rt": 5
+          },
+          "RemoveObject2": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineShape3": {
+            "orig": 141,
+            "rt": 141
+          },
+          "DefineBitsLossless2": {
+            "orig": 76,
+            "rt": 76
+          },
+          "DefineEditText": {
+            "orig": 458,
+            "rt": 458
+          },
+          "DefineSprite": {
+            "orig": 144,
+            "rt": 144
+          },
+          "DefineMorphShape": {
+            "orig": 18,
+            "rt": 18
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 4,
+            "rt": 4
+          },
+          "CSMTextSettings": {
+            "orig": 486,
+            "rt": 486
+          },
+          "DefineFont3": {
+            "orig": 4,
+            "rt": 4
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 23,
+            "rt": 23
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 4,
+            "rt": 4
+          }
+        },
+        "leaf_tag_results": {
+          "DefineBitsLossless": {
+            "total_orig": 5,
+            "total_rt": 5,
+            "matched": 5,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 76,
+            "total_rt": 76,
+            "matched": 76,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 94,
+          "rt": 94
+        },
+        "reref_DefineText": {
+          "orig": 49,
+          "rt": 49
+        },
+        "reref_DefineShape2": {
+          "orig": 21,
+          "rt": 21
+        },
+        "reref_DefineShape3": {
+          "orig": 141,
+          "rt": 141
+        },
+        "reref_DefineEditText": {
+          "orig": 458,
+          "rt": 458
+        },
+        "reref_DefineSprite": {
+          "orig": 144,
+          "rt": 144
+        },
+        "reref_DefineMorphShape": {
+          "orig": 18,
+          "rt": 18
+        },
+        "reref_DefineFont3": {
+          "orig": 4,
+          "rt": 4
+        },
+        "reref_DefineShape4": {
+          "orig": 23,
+          "rt": 23
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": []
+    },
+    {
+      "file": "menu_main.ssf",
+      "size_kb": 6852,
+      "status": "PASS",
+      "time_s": 20.47,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 1689,
+        "rt_tag_count": 1661,
+        "orig_define_count": 1491,
+        "rt_define_count": 1491,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 15,
+            "rt": 15
+          },
+          "DefineShape": {
+            "orig": 379,
+            "rt": 379
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 45,
+            "rt": 45
+          },
+          "DefineBitsLossless": {
+            "orig": 14,
+            "rt": 14
+          },
+          "DefineShape2": {
+            "orig": 24,
+            "rt": 24
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 17,
+            "rt": 17
+          },
+          "RemoveObject2": {
+            "orig": 15,
+            "rt": 15
+          },
+          "DefineShape3": {
+            "orig": 167,
+            "rt": 167
+          },
+          "DefineButton2": {
+            "orig": 9,
+            "rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "orig": 24,
+            "rt": 24
+          },
+          "DefineBitsLossless2": {
+            "orig": 241,
+            "rt": 241
+          },
+          "DefineEditText": {
+            "orig": 192,
+            "rt": 192
+          },
+          "DefineSprite": {
+            "orig": 280,
+            "rt": 280
+          },
+          "DefineMorphShape": {
+            "orig": 47,
+            "rt": 47
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 14,
+            "rt": 14
+          },
+          "CSMTextSettings": {
+            "orig": 91,
+            "rt": 91
+          },
+          "DefineFont3": {
+            "orig": 14,
+            "rt": 14
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineScalingGrid": {
+            "orig": 19,
+            "rt": 0
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 63,
+            "rt": 63
+          },
+          "DefineMorphShape2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 11,
+            "rt": 11
+          }
+        },
+        "leaf_tag_results": {
+          "DefineBitsLossless": {
+            "total_orig": 14,
+            "total_rt": 14,
+            "matched": 14,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "total_orig": 24,
+            "total_rt": 24,
+            "matched": 24,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 241,
+            "total_rt": 241,
+            "matched": 241,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [
+          "DefineButton2",
+          "DefineScalingGrid"
+        ],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 379,
+          "rt": 379
+        },
+        "reref_DefineText": {
+          "orig": 45,
+          "rt": 45
+        },
+        "reref_DefineShape2": {
+          "orig": 24,
+          "rt": 24
+        },
+        "reref_DefineShape3": {
+          "orig": 167,
+          "rt": 167
+        },
+        "reref_DefineEditText": {
+          "orig": 192,
+          "rt": 192
+        },
+        "reref_DefineSprite": {
+          "orig": 280,
+          "rt": 280
+        },
+        "reref_DefineMorphShape": {
+          "orig": 47,
+          "rt": 47
+        },
+        "reref_DefineFont3": {
+          "orig": 14,
+          "rt": 14
+        },
+        "reref_DefineShape4": {
+          "orig": 63,
+          "rt": 63
+        },
+        "reref_DefineMorphShape2": {
+          "orig": 1,
+          "rt": 1
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": [
+        "[ERROR] DefineSprite charID=235: sub-tag PlaceObject2 #4 references charID 206 which is not defined",
+        "[ERROR] DefineSprite charID=235: sub-tag PlaceObject2 #9 references charID 217 which is not defined",
+        "[ERROR] DefineSprite charID=235: sub-tag PlaceObject2 #19 references charID 206 which is not defined",
+        "[ERROR] DefineSprite charID=235: sub-tag PlaceObject2 #24 references charID 206 which is not defined",
+        "[ERROR] DefineSprite charID=237: sub-tag PlaceObject2 #0 references charID 192 which is not defined",
+        "[ERROR] DefineSprite charID=254: sub-tag PlaceObject2 #2 references charID 252 which is not defined",
+        "[ERROR] DefineSprite charID=719: sub-tag PlaceObject2 #11 references charID 716 which is not defined",
+        "[ERROR] DefineSprite charID=1496: sub-tag PlaceObject2 #4 references charID 922 which is not defined",
+        "[ERROR] DefineSprite charID=1496: sub-tag PlaceObject2 #6 references charID 934 which is not defined",
+        "[ERROR] DefineSprite charID=1496: sub-tag PlaceObject2 #7 references charID 939 which is not defined",
+        "[ERROR] DefineSprite charID=1496: sub-tag PlaceObject2 #9 references charID 946 which is not defined"
+      ]
+    },
+    {
+      "file": "menu_online.ssf",
+      "size_kb": 293,
+      "status": "PASS",
+      "time_s": 1.81,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 384,
+        "rt_tag_count": 352,
+        "orig_define_count": 296,
+        "rt_define_count": 296,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 3,
+            "rt": 3
+          },
+          "DefineShape": {
+            "orig": 25,
+            "rt": 25
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 32,
+            "rt": 32
+          },
+          "DefineShape2": {
+            "orig": 7,
+            "rt": 7
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 3,
+            "rt": 3
+          },
+          "RemoveObject2": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineShape3": {
+            "orig": 68,
+            "rt": 68
+          },
+          "DefineButton2": {
+            "orig": 3,
+            "rt": 0
+          },
+          "DefineEditText": {
+            "orig": 24,
+            "rt": 24
+          },
+          "DefineSprite": {
+            "orig": 111,
+            "rt": 111
+          },
+          "DefineMorphShape": {
+            "orig": 12,
+            "rt": 12
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 2,
+            "rt": 2
+          },
+          "CSMTextSettings": {
+            "orig": 37,
+            "rt": 37
+          },
+          "DefineFont3": {
+            "orig": 2,
+            "rt": 2
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineScalingGrid": {
+            "orig": 29,
+            "rt": 0
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 15,
+            "rt": 15
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 2,
+            "rt": 2
+          }
+        },
+        "leaf_tag_results": {},
+        "missing_tag_types": [
+          "DefineButton2",
+          "DefineScalingGrid"
+        ],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 25,
+          "rt": 25
+        },
+        "reref_DefineText": {
+          "orig": 32,
+          "rt": 32
+        },
+        "reref_DefineShape2": {
+          "orig": 7,
+          "rt": 7
+        },
+        "reref_DefineShape3": {
+          "orig": 68,
+          "rt": 68
+        },
+        "reref_DefineEditText": {
+          "orig": 24,
+          "rt": 24
+        },
+        "reref_DefineSprite": {
+          "orig": 111,
+          "rt": 111
+        },
+        "reref_DefineMorphShape": {
+          "orig": 12,
+          "rt": 12
+        },
+        "reref_DefineFont3": {
+          "orig": 2,
+          "rt": 2
+        },
+        "reref_DefineShape4": {
+          "orig": 15,
+          "rt": 15
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": [
+        "[ERROR] DefineSprite charID=250: sub-tag PlaceObject2 #0 references charID 249 which is not defined",
+        "[ERROR] DefineSprite charID=255: sub-tag PlaceObject2 #0 references charID 254 which is not defined",
+        "[ERROR] DefineSprite charID=286: sub-tag PlaceObject2 #5 references charID 278 which is not defined",
+        "[ERROR] DefineSprite charID=290: sub-tag PlaceObject2 #1 references charID 278 which is not defined",
+        "[ERROR] DefineSprite charID=297: sub-tag PlaceObject2 #1 references charID 278 which is not defined"
+      ]
+    },
+    {
+      "file": "menu_settings.ssf",
+      "size_kb": 362,
+      "status": "PASS",
+      "time_s": 2.04,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 764,
+        "rt_tag_count": 739,
+        "orig_define_count": 655,
+        "rt_define_count": 655,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 7,
+            "rt": 7
+          },
+          "DefineShape": {
+            "orig": 57,
+            "rt": 57
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 51,
+            "rt": 51
+          },
+          "DefineShape2": {
+            "orig": 71,
+            "rt": 71
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 6,
+            "rt": 6
+          },
+          "RemoveObject2": {
+            "orig": 5,
+            "rt": 5
+          },
+          "DefineShape3": {
+            "orig": 83,
+            "rt": 83
+          },
+          "DefineButton2": {
+            "orig": 4,
+            "rt": 0
+          },
+          "DefineBitsLossless2": {
+            "orig": 66,
+            "rt": 66
+          },
+          "DefineEditText": {
+            "orig": 63,
+            "rt": 63
+          },
+          "DefineSprite": {
+            "orig": 208,
+            "rt": 208
+          },
+          "DefineMorphShape": {
+            "orig": 12,
+            "rt": 12
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 2,
+            "rt": 2
+          },
+          "CSMTextSettings": {
+            "orig": 55,
+            "rt": 55
+          },
+          "DefineFont3": {
+            "orig": 2,
+            "rt": 2
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineScalingGrid": {
+            "orig": 21,
+            "rt": 0
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 42,
+            "rt": 42
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 2,
+            "rt": 2
+          }
+        },
+        "leaf_tag_results": {
+          "DefineBitsLossless2": {
+            "total_orig": 66,
+            "total_rt": 66,
+            "matched": 66,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [
+          "DefineButton2",
+          "DefineScalingGrid"
+        ],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 57,
+          "rt": 57
+        },
+        "reref_DefineText": {
+          "orig": 51,
+          "rt": 51
+        },
+        "reref_DefineShape2": {
+          "orig": 71,
+          "rt": 71
+        },
+        "reref_DefineShape3": {
+          "orig": 83,
+          "rt": 83
+        },
+        "reref_DefineEditText": {
+          "orig": 63,
+          "rt": 63
+        },
+        "reref_DefineSprite": {
+          "orig": 208,
+          "rt": 208
+        },
+        "reref_DefineMorphShape": {
+          "orig": 12,
+          "rt": 12
+        },
+        "reref_DefineFont3": {
+          "orig": 2,
+          "rt": 2
+        },
+        "reref_DefineShape4": {
+          "orig": 42,
+          "rt": 42
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": [
+        "[ERROR] DefineSprite charID=163: sub-tag PlaceObject2 #4 references charID 159 which is not defined",
+        "[ERROR] DefineSprite charID=266: sub-tag PlaceObject2 #3 references charID 259 which is not defined",
+        "[ERROR] DefineSprite charID=270: sub-tag PlaceObject2 #3 references charID 259 which is not defined",
+        "[ERROR] DefineSprite charID=276: sub-tag PlaceObject2 #3 references charID 274 which is not defined",
+        "[ERROR] DefineSprite charID=279: sub-tag PlaceObject2 #3 references charID 274 which is not defined",
+        "[ERROR] DefineSprite charID=326: sub-tag PlaceObject2 #0 references charID 320 which is not defined"
+      ]
+    },
+    {
+      "file": "menu_solo.ssf",
+      "size_kb": 5343,
+      "status": "PASS",
+      "time_s": 18.71,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 484,
+        "rt_tag_count": 484,
+        "orig_define_count": 410,
+        "rt_define_count": 410,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 5,
+            "rt": 5
+          },
+          "DefineShape": {
+            "orig": 99,
+            "rt": 99
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 22,
+            "rt": 22
+          },
+          "DefineBitsLossless": {
+            "orig": 64,
+            "rt": 64
+          },
+          "DefineShape2": {
+            "orig": 5,
+            "rt": 5
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 4,
+            "rt": 4
+          },
+          "RemoveObject2": {
+            "orig": 3,
+            "rt": 3
+          },
+          "DefineShape3": {
+            "orig": 67,
+            "rt": 67
+          },
+          "DefineBitsJPEG3": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineBitsLossless2": {
+            "orig": 18,
+            "rt": 18
+          },
+          "DefineEditText": {
+            "orig": 31,
+            "rt": 31
+          },
+          "DefineSprite": {
+            "orig": 79,
+            "rt": 79
+          },
+          "DefineMorphShape": {
+            "orig": 8,
+            "rt": 8
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 4,
+            "rt": 4
+          },
+          "CSMTextSettings": {
+            "orig": 47,
+            "rt": 47
+          },
+          "DefineFont3": {
+            "orig": 4,
+            "rt": 4
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 12,
+            "rt": 12
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 4,
+            "rt": 4
+          }
+        },
+        "leaf_tag_results": {
+          "DefineBitsLossless": {
+            "total_orig": 64,
+            "total_rt": 64,
+            "matched": 64,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "total_orig": 1,
+            "total_rt": 1,
+            "matched": 1,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 18,
+            "total_rt": 18,
+            "matched": 18,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 99,
+          "rt": 99
+        },
+        "reref_DefineText": {
+          "orig": 22,
+          "rt": 22
+        },
+        "reref_DefineShape2": {
+          "orig": 5,
+          "rt": 5
+        },
+        "reref_DefineShape3": {
+          "orig": 67,
+          "rt": 67
+        },
+        "reref_DefineEditText": {
+          "orig": 31,
+          "rt": 31
+        },
+        "reref_DefineSprite": {
+          "orig": 79,
+          "rt": 79
+        },
+        "reref_DefineMorphShape": {
+          "orig": 8,
+          "rt": 8
+        },
+        "reref_DefineFont3": {
+          "orig": 4,
+          "rt": 4
+        },
+        "reref_DefineShape4": {
+          "orig": 12,
+          "rt": 12
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": []
+    },
+    {
+      "file": "menu_stages.ssf",
+      "size_kb": 2670,
+      "status": "PASS",
+      "time_s": 6.73,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 586,
+        "rt_tag_count": 584,
+        "orig_define_count": 559,
+        "rt_define_count": 559,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 3,
+            "rt": 3
+          },
+          "DefineShape": {
+            "orig": 159,
+            "rt": 159
+          },
+          "DefineBits": {
+            "orig": 2,
+            "rt": 2
+          },
+          "tag8": {
+            "orig": 1,
+            "rt": 0
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 13,
+            "rt": 13
+          },
+          "DefineBitsLossless": {
+            "orig": 63,
+            "rt": 63
+          },
+          "DefineShape2": {
+            "orig": 2,
+            "rt": 2
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 2,
+            "rt": 2
+          },
+          "RemoveObject2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape3": {
+            "orig": 10,
+            "rt": 10
+          },
+          "DefineButton2": {
+            "orig": 1,
+            "rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineBitsLossless2": {
+            "orig": 80,
+            "rt": 80
+          },
+          "DefineEditText": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineSprite": {
+            "orig": 180,
+            "rt": 180
+          },
+          "DefineMorphShape": {
+            "orig": 18,
+            "rt": 18
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 3,
+            "rt": 3
+          },
+          "CSMTextSettings": {
+            "orig": 6,
+            "rt": 6
+          },
+          "DefineFont3": {
+            "orig": 3,
+            "rt": 3
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 23,
+            "rt": 23
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 3,
+            "rt": 3
+          }
+        },
+        "leaf_tag_results": {
+          "DefineBits": {
+            "total_orig": 2,
+            "total_rt": 2,
+            "matched": 2,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless": {
+            "total_orig": 63,
+            "total_rt": 63,
+            "matched": 63,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "total_orig": 4,
+            "total_rt": 4,
+            "matched": 4,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 80,
+            "total_rt": 80,
+            "matched": 80,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [
+          "tag8",
+          "DefineButton2"
+        ],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 159,
+          "rt": 159
+        },
+        "reref_DefineText": {
+          "orig": 13,
+          "rt": 13
+        },
+        "reref_DefineShape2": {
+          "orig": 2,
+          "rt": 2
+        },
+        "reref_DefineShape3": {
+          "orig": 10,
+          "rt": 10
+        },
+        "reref_DefineEditText": {
+          "orig": 2,
+          "rt": 2
+        },
+        "reref_DefineSprite": {
+          "orig": 180,
+          "rt": 180
+        },
+        "reref_DefineMorphShape": {
+          "orig": 18,
+          "rt": 18
+        },
+        "reref_DefineFont3": {
+          "orig": 3,
+          "rt": 3
+        },
+        "reref_DefineShape4": {
+          "orig": 23,
+          "rt": 23
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": [
+        "[ERROR] DefineSprite charID=506: sub-tag PlaceObject2 #1 references charID 505 which is not defined"
+      ]
+    }
+  ],
+  "summary": {
+    "pass": 9,
+    "fail": 0,
+    "error": 0,
+    "total_issues": []
+  }
+}

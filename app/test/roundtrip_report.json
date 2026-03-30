@@ -1,0 +1,179 @@
+{
+  "source_dir": "C:\\Users\\glwex\\Documents\\GitHub\\ssf2-idk-140x-original\\src\\Super Smash Flash 2 Beta v1.4.0.1\\data",
+  "total_files": 1,
+  "timestamp": "2026-03-29 19:16:57",
+  "results": [
+    {
+      "file": "character\\bandanadee.ssf",
+      "size_kb": 3776,
+      "status": "PASS",
+      "time_s": 16.44,
+      "import_error": null,
+      "compile_error": null,
+      "compare": {
+        "orig_tag_count": 1256,
+        "rt_tag_count": 1256,
+        "orig_define_count": 1222,
+        "rt_define_count": 1222,
+        "tag_type_counts": {
+          "End": {
+            "orig": 1,
+            "rt": 1
+          },
+          "ShowFrame": {
+            "orig": 2,
+            "rt": 2
+          },
+          "DefineShape": {
+            "orig": 136,
+            "rt": 136
+          },
+          "SetBgColor": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineText": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineSound": {
+            "orig": 53,
+            "rt": 53
+          },
+          "Protect": {
+            "orig": 1,
+            "rt": 1
+          },
+          "PlaceObject2": {
+            "orig": 18,
+            "rt": 18
+          },
+          "DefineShape3": {
+            "orig": 43,
+            "rt": 43
+          },
+          "DefineBitsJPEG3": {
+            "orig": 37,
+            "rt": 37
+          },
+          "DefineBitsLossless2": {
+            "orig": 780,
+            "rt": 780
+          },
+          "DefineSprite": {
+            "orig": 144,
+            "rt": 144
+          },
+          "SoundStreamHead2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineMorphShape": {
+            "orig": 11,
+            "rt": 11
+          },
+          "FileAttributes": {
+            "orig": 1,
+            "rt": 1
+          },
+          "FontAlignZones": {
+            "orig": 1,
+            "rt": 1
+          },
+          "CSMTextSettings": {
+            "orig": 4,
+            "rt": 4
+          },
+          "DefineFont3": {
+            "orig": 1,
+            "rt": 1
+          },
+          "SymbolClass": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DoABC2": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineShape4": {
+            "orig": 13,
+            "rt": 13
+          },
+          "SceneFrameLabel": {
+            "orig": 1,
+            "rt": 1
+          },
+          "DefineFontName": {
+            "orig": 1,
+            "rt": 1
+          }
+        },
+        "leaf_tag_results": {
+          "DefineSound": {
+            "total_orig": 53,
+            "total_rt": 53,
+            "matched": 53,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsJPEG3": {
+            "total_orig": 37,
+            "total_rt": 37,
+            "matched": 37,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          },
+          "DefineBitsLossless2": {
+            "total_orig": 780,
+            "total_rt": 780,
+            "matched": 780,
+            "unmatched_orig": 0,
+            "unmatched_rt": 0
+          }
+        },
+        "missing_tag_types": [],
+        "extra_tag_types": [],
+        "issues": [],
+        "reref_DefineShape": {
+          "orig": 136,
+          "rt": 136
+        },
+        "reref_DefineText": {
+          "orig": 4,
+          "rt": 4
+        },
+        "reref_DefineShape3": {
+          "orig": 43,
+          "rt": 43
+        },
+        "reref_DefineSprite": {
+          "orig": 144,
+          "rt": 144
+        },
+        "reref_DefineMorphShape": {
+          "orig": 11,
+          "rt": 11
+        },
+        "reref_DefineFont3": {
+          "orig": 1,
+          "rt": 1
+        },
+        "reref_DefineShape4": {
+          "orig": 13,
+          "rt": 13
+        }
+      },
+      "issues": [],
+      "xref_errors": [],
+      "xref_warnings": [],
+      "orig_xref_errors": []
+    }
+  ],
+  "summary": {
+    "pass": 1,
+    "fail": 0,
+    "error": 0,
+    "total_issues": []
+  }
+}

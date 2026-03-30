@@ -105,6 +105,7 @@ TAG_DO_ABC2                 = 82
 TAG_FILE_ATTRIBUTES         = 69
 TAG_SET_BACKGROUND_COLOR    = 9
 TAG_DEFINE_FONT3            = 75
+TAG_DEFINE_BUTTON2          = 34
 TAG_START_SOUND             = 15
 TAG_START_SOUND2            = 89
 
@@ -1156,6 +1157,7 @@ def parse_define_edit_text(tag_data: bytes, font_names: Dict[int, str],
         'originBounds': dict(bounds),
         'thickness': 0,
         'thicknessColor': 0,
+        'html': html,
     }
 
 
@@ -1830,7 +1832,7 @@ class N2DBuilder:
             TAG_DEFINE_SHAPE3, TAG_DEFINE_SHAPE4, TAG_DEFINE_SPRITE,
             TAG_DEFINE_SOUND, TAG_DEFINE_TEXT, TAG_DEFINE_TEXT2,
             TAG_DEFINE_EDIT_TEXT, TAG_DEFINE_MORPH_SHAPE, TAG_DEFINE_MORPH_SHAPE2,
-            TAG_DEFINE_FONT3,
+            TAG_DEFINE_FONT3, TAG_DEFINE_BUTTON2,
         }
         past_symbol_class = False
         self.root_timeline_def_ids: List[int] = []  # charIds defined inside root timeline
@@ -1907,6 +1909,12 @@ class N2DBuilder:
                 except Exception:
                     pass  # code table extraction is best-effort
 
+            elif tag.tag_type == TAG_DEFINE_BUTTON2:
+                char_id = struct.unpack_from('<H', tag.data, 0)[0]
+                self.char_types[char_id] = 'button'
+                # Store raw tag body for 1:1 roundtrip
+                self.raw_tag_data[char_id] = (tag.tag_type, tag.data[2:])
+
             elif tag.tag_type == TAG_SYMBOL_CLASS:
                 sc = parse_symbol_class(tag.data)
                 self.symbol_names.update(sc)
@@ -1970,6 +1978,7 @@ class N2DBuilder:
             ('Sounds',      'sound'),
             ('Texts',       'text'),
             ('Fonts',       'font'),
+            ('Buttons',     'button'),
             ('MovieClips',  'container'),
         ]
         for fname, ctype in folder_defs:
@@ -2438,7 +2447,40 @@ class N2DBuilder:
 
         step(f"Built {font_count} font entries")
 
-        # Phase 7: Build MovieClip (container) entries from DefineSprite data
+        # Phase 7a: Build button entries (DefineButton2) — rawTagBody passthrough
+        button_count = 0
+        for cid in all_char_ids:
+            if self.char_types[cid] != 'button':
+                continue
+            lid = self.swf_to_n2d[cid]
+            sym_name = self.symbol_names.get(cid, '')
+            display_name = sym_name.split('.')[-1] if sym_name else f"Button_{cid}"
+            entry = {
+                'id': lid,
+                'swfCharId': cid,
+                'name': display_name,
+                'type': 'shape',
+                'isButton': True,
+                'symbol': sym_name,
+                'folderId': self.folder_ids.get('button', 0),
+                'bitmapId': 0,
+                'grid': None,
+                'inBitmap': False,
+                'recodes': [],
+                'bounds': {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20},
+                'lazy': True,
+            }
+            if cid in self.raw_tag_data:
+                tag_type, body = self.raw_tag_data[cid]
+                entry['rawTagType'] = tag_type
+                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
+            self.libraries.append(entry)
+            button_count += 1
+
+        if button_count:
+            step(f"Built {button_count} button entries")
+
+        # Phase 7b: Build MovieClip (container) entries from DefineSprite data
         sprite_count = 0
         for cid in all_char_ids:
             if self.char_types[cid] != 'container':
@@ -2539,6 +2581,7 @@ class N2DBuilder:
             ('Sounds',      'sound'),
             ('Texts',       'text'),
             ('Fonts',       'font'),
+            ('Buttons',     'button'),
             ('MovieClips',  'container'),
         ]
         for fname, ctype in folder_defs:
@@ -2767,6 +2810,38 @@ class N2DBuilder:
             font_count += 1
         step(f"Fonts: {font_count}")
 
+        # ── Buttons (DefineButton2) — rawTagBody passthrough ──
+        button_count = 0
+        for cid in all_char_ids:
+            if self.char_types[cid] != 'button':
+                continue
+            lid = self.swf_to_n2d[cid]
+            sym_name = self.symbol_names.get(cid, '')
+            display_name = sym_name.split('.')[-1] if sym_name else f"Button_{cid}"
+            entry = {
+                'id': lid,
+                'swfCharId': cid,
+                'name': display_name,
+                'type': 'shape',
+                'isButton': True,
+                'symbol': sym_name,
+                'folderId': self.folder_ids.get('button', 0),
+                'bitmapId': 0,
+                'grid': None,
+                'inBitmap': False,
+                'recodes': [],
+                'bounds': {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20},
+                'lazy': True,
+            }
+            if cid in self.raw_tag_data:
+                tag_type, body = self.raw_tag_data[cid]
+                entry['rawTagType'] = tag_type
+                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
+            self.libraries.append(entry)
+            button_count += 1
+        if button_count:
+            step(f"Buttons: {button_count}")
+
         # ── Containers (always built — timeline parse is fast) ──
         sprite_count = 0
         for cid in all_char_ids:
@@ -2839,6 +2914,7 @@ class N2DBuilder:
             ('Sounds',      'sound'),
             ('Texts',       'text'),
             ('Fonts',       'font'),
+            ('Buttons',     'button'),
             ('MovieClips',  'container'),
         ]
         for fname, ctype in folder_defs:
@@ -3231,6 +3307,38 @@ class N2DBuilder:
             self.libraries.append(entry)
             font_count += 1
         step(f"Fonts: {font_count}")
+
+        # ── Phase 6b: Buttons (DefineButton2) — rawTagBody passthrough ──
+        button_count = 0
+        for cid in all_char_ids:
+            if self.char_types[cid] != 'button':
+                continue
+            lid = self.swf_to_n2d[cid]
+            sym_name = self.symbol_names.get(cid, '')
+            display_name = sym_name.split('.')[-1] if sym_name else f"Button_{cid}"
+            entry = {
+                'id': lid,
+                'swfCharId': cid,
+                'name': display_name,
+                'type': 'shape',
+                'isButton': True,
+                'symbol': sym_name,
+                'folderId': self.folder_ids.get('button', 0),
+                'bitmapId': 0,
+                'grid': None,
+                'inBitmap': False,
+                'recodes': [],
+                'bounds': {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20},
+                'lazy': True,
+            }
+            if cid in self.raw_tag_data:
+                tag_type, body = self.raw_tag_data[cid]
+                entry['rawTagType'] = tag_type
+                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
+            self.libraries.append(entry)
+            button_count += 1
+        if button_count:
+            step(f"Buttons: {button_count}")
 
         # ── Phase 7: Containers (always built — timeline parse is fast) ──
         sprite_count = 0
