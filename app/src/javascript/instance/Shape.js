@@ -44,7 +44,6 @@ class Shape extends Instance
         }
 
         this._$graphicBuffer = null;
-        this._$lazyFetching  = false;
     }
 
     /**
@@ -291,29 +290,7 @@ class Shape extends Instance
                 const bitmapData = new BitmapData(
                     value.width, value.height, true, 0
                 );
-                
-                // Create canvas from buffer data to make it drawable
-                const canvas = document.createElement('canvas');
-                canvas.width = value.width;
-                canvas.height = value.height;
-                const ctx = canvas.getContext('2d');
-                if (ctx) {
-                    const imageData = ctx.createImageData(value.width, value.height);
-                    imageData.data.set(new Uint8Array(value.buffer));
-                    ctx.putImageData(imageData, 0, 0);
-                    // Set both canvas AND buffer via public API
-                    bitmapData.canvas = canvas;
-                    bitmapData.buffer = new Uint8Array(value.buffer);
-                    if (Instance._$lazyDebug) {
-                        console.log('[LAZY] recodes setter: canvas+buffer created for BitmapData w=' + value.width + ' h=' + value.height);
-                    }
-                } else {
-                    // Fallback to buffer if canvas creation fails
-                    bitmapData.buffer = new Uint8Array(value.buffer);
-                    if (Instance._$lazyDebug) {
-                        console.log('[LAZY] recodes setter: FAILED to create canvas context, using buffer');
-                    }
-                }
+                bitmapData._$buffer = new Uint8Array(value.buffer);
 
                 this._$recodes[idx] = bitmapData;
             }
@@ -1641,54 +1618,9 @@ class Shape extends Instance
     {
         const { Shape, Graphics } = window.next2d.display;
 
-        if (Instance._$lazyDebug && this._$lazy) {
-            console.log('[LAZY] Shape.createInstance CALLED: id=' + this.id 
-                + ', recodesLen=' + (this._$recodes ? this._$recodes.length : 0)
-                + ', hasGraphicBuffer=' + !!this._$graphicBuffer);
-        }
-
         const shape = new Shape();
         shape._$loaderInfo  = Util.$loaderInfo;
         shape._$characterId = this.id;
-
-        // Lazy: recodes empty and still has lazy flag — placeholder + fetch
-        if (this._$lazy && this._$swfCharId
-            && (!this._$recodes || !this._$recodes.length))
-        {
-            if (Instance._$lazyDebug && !this._$lazyFetching) {
-                console.log('[LAZY] Shape.createInstance LAZY path: id=' + this.id 
-                    + ', charId=' + this._$swfCharId
-                    + ', recodesLen=' + (this._$recodes ? this._$recodes.length : 0));
-            }
-            const b = this._$bounds || { xMin: 0, xMax: 20, yMin: 0, yMax: 20 };
-            const graphics = shape.graphics;
-            graphics._$maxAlpha = 1;
-            graphics._$canDraw  = false; // Don't draw until data loads
-            graphics._$xMin     = b.xMin;
-            graphics._$xMax     = b.xMax;
-            graphics._$yMin     = b.yMin;
-            graphics._$yMax     = b.yMax;
-            // Don't draw gray placeholder - just set empty buffer
-            graphics._$buffer = [];
-
-            if (!this._$lazyFetching) {
-                this._$lazyFetching = true;
-                const self = this;
-                Instance._$lazyFetch(this).then(function () {
-                    self._$lazyFetching = false;
-                    self._$graphicBuffer = null;
-                    Instance._$lazyRedraw();
-                });
-            }
-            return shape;
-        }
-
-        if (Instance._$lazyDebug && this._$swfCharId && Instance._$lazyStats.applied <= 5) {
-            console.log('[LAZY] Shape.createInstance NORMAL path: id=' + this.id
-                + ', charId=' + this._$swfCharId
-                + ', recodes=' + (this._$recodes ? this._$recodes.length : 'none')
-                + ', bitmapId=' + this._$bitmapId);
-        }
 
         if (this._$grid) {
             const { Rectangle } = window.next2d.geom;
@@ -1707,13 +1639,6 @@ class Shape extends Instance
         graphics._$yMin     = this._$bounds.yMin;
         graphics._$yMax     = this._$bounds.yMax;
 
-        if (Instance._$lazyDebug && this._$lazy) {
-            console.log('[LAZY] Shape.createInstance NON-LAZY path: id=' + this.id 
-                + ', hasBitmapId=' + !!this._$bitmapId
-                + ', recodesLen=' + (this._$recodes ? this._$recodes.length : 0)
-                + ', hasGraphicBuffer=' + !!this._$graphicBuffer);
-        }
-
         if (this._$bitmapId) {
 
             const { BitmapData } = window.next2d.display;
@@ -1724,137 +1649,59 @@ class Shape extends Instance
 
             if (instance) {
 
-                // Validate buffer before using bitmap fill (fixes lazy loading crash)
-                const hasValidBuffer = instance._$buffer 
-                    && instance._$buffer instanceof Uint8Array 
-                    && instance._$buffer.length > 0;
-                
-                // Validate canvas is a proper HTMLCanvasElement with dimensions AND can get context
-                let hasValidCanvas = false;
-                let canvasContext = null;
-                if (instance._$canvas 
-                    && instance._$canvas instanceof HTMLCanvasElement
-                    && instance._$canvas.width > 0
-                    && instance._$canvas.height > 0) {
-                    try {
-                        canvasContext = instance._$canvas.getContext('2d');
-                        hasValidCanvas = !!canvasContext;
-                    } catch (e) {
-                        if (Instance._$lazyDebug) {
-                            console.log('[LAZY] bitmap fill: canvas getContext failed for bitmapId=' + this._$bitmapId, e);
-                        }
+                graphics._$bitmapId = this._$bitmapId;
+                graphics._$mode     = "bitmap";
+
+                // setup
+                graphics._$recode = [];
+
+                const bitmapData = new BitmapData(
+                    instance.width, instance.height, true, 0
+                );
+                bitmapData._$buffer = instance._$buffer;
+
+                // clone
+                const recodes = this._$recodes;
+                if (recodes[recodes.length - 1] === Graphics.END_FILL) {
+
+                    const length  = recodes.length - 6;
+                    for (let idx = 0; idx < length; ++idx) {
+                        graphics._$recode.push(recodes[idx]);
                     }
-                }
-                
-                if (Instance._$lazyDebug && instance._$canvas) {
-                    console.log('[LAZY] bitmap fill validation: bitmapId=' + this._$bitmapId 
-                        + ', canvasType=' + (instance._$canvas ? instance._$canvas.constructor.name : 'null')
-                        + ', hasValidCanvas=' + hasValidCanvas
-                        + ', hasValidBuffer=' + hasValidBuffer);
-                }
 
-                if (hasValidBuffer || hasValidCanvas) {
-                    graphics._$bitmapId = this._$bitmapId;
-                    graphics._$mode     = "bitmap";
-                    graphics._$canDraw  = true; // Enable drawing for bitmap fills
-
-                    // setup
-                    graphics._$recode = [];
-
-                    const bitmapData = new BitmapData(
-                        instance.width, instance.height, true, 0
+                    // add Bitmap Fill
+                    graphics._$recode.push(
+                        Graphics.BITMAP_FILL,
+                        bitmapData,
+                        null,
+                        "repeat",
+                        false
                     );
-                    
-                    // Set private properties directly to avoid public setters
-                    // which clear each other (set buffer clears _$canvas, set canvas clears _$buffer)
-                    if (hasValidCanvas && canvasContext) {
-                        bitmapData._$canvas = instance._$canvas;
-                        if (hasValidBuffer) {
-                            bitmapData._$buffer = instance._$buffer;
-                        }
-                        if (Instance._$lazyDebug) {
-                            console.log('[LAZY] bitmap fill: using canvas w=' + instance.width 
-                                + ' h=' + instance.height + ' for bitmapId=' + this._$bitmapId
-                                + ', hasBuffer=' + hasValidBuffer);
-                        }
-                    } else if (hasValidBuffer) {
-                        // Create canvas from buffer
-                        const canvas = document.createElement('canvas');
-                        canvas.width = instance.width;
-                        canvas.height = instance.height;
-                        const ctx = canvas.getContext('2d');
-                        if (ctx) {
-                            const imageData = ctx.createImageData(instance.width, instance.height);
-                            imageData.data.set(instance._$buffer);
-                            ctx.putImageData(imageData, 0, 0);
-                            bitmapData._$canvas = canvas;
-                            bitmapData._$buffer = instance._$buffer;
-                            if (Instance._$lazyDebug) {
-                                console.log('[LAZY] bitmap fill: created canvas from buffer w=' + instance.width 
-                                    + ' h=' + instance.height + ' for bitmapId=' + this._$bitmapId);
-                            }
-                        } else {
-                            bitmapData._$buffer = instance._$buffer;
-                            if (Instance._$lazyDebug) {
-                                console.log('[LAZY] bitmap fill: FAILED canvas creation, using buffer only');
-                            }
-                        }
-                    } else {
-                        if (Instance._$lazyDebug) {
-                            console.log('[LAZY] bitmap fill: NO VALID DATA for bitmapId=' + this._$bitmapId);
-                        }
-                    }
-
-                    // clone
-                    const recodes = this._$recodes;
-                    if (recodes[recodes.length - 1] === Graphics.END_FILL) {
-
-                        const length  = recodes.length - 6;
-                        for (let idx = 0; idx < length; ++idx) {
-                            graphics._$recode.push(recodes[idx]);
-                        }
-
-                        // add Bitmap Fill
-                        graphics._$recode.push(
-                            Graphics.BITMAP_FILL,
-                            bitmapData,
-                            null,
-                            "repeat",
-                            false
-                        );
-
-                    } else {
-
-                        const width      = this._$recodes[recodes.length - 9];
-                        const caps       = this._$recodes[recodes.length - 8];
-                        const joints     = this._$recodes[recodes.length - 7];
-                        const miterLimit = this._$recodes[recodes.length - 6];
-
-                        const length  = recodes.length - 10;
-                        for (let idx = 0; idx < length; ++idx) {
-                            graphics._$recode.push(recodes[idx]);
-                        }
-
-                        graphics._$recode.push(
-                            Graphics.BITMAP_STROKE,
-                            width,
-                            caps,
-                            joints,
-                            miterLimit,
-                            bitmapData,
-                            [1, 0, 0, 1, graphics._$xMin, graphics._$yMin],
-                            "repeat",
-                            false
-                        );
-
-                    }
 
                 } else {
-                    // Buffer not ready (lazy loading) - use fallback recodes
-                    if (Instance._$lazyDebug) {
-                        console.log('[LAZY] Shape bitmap fill skipped - buffer not ready for bitmapId=' + this._$bitmapId);
+
+                    const width      = this._$recodes[recodes.length - 9];
+                    const caps       = this._$recodes[recodes.length - 8];
+                    const joints     = this._$recodes[recodes.length - 7];
+                    const miterLimit = this._$recodes[recodes.length - 6];
+
+                    const length  = recodes.length - 10;
+                    for (let idx = 0; idx < length; ++idx) {
+                        graphics._$recode.push(recodes[idx]);
                     }
-                    graphics._$recode = this._$recodes.slice(0);
+
+                    graphics._$recode.push(
+                        Graphics.BITMAP_STROKE,
+                        width,
+                        caps,
+                        joints,
+                        miterLimit,
+                        bitmapData,
+                        [1, 0, 0, 1, graphics._$xMin, graphics._$yMin],
+                        "repeat",
+                        false
+                    );
+
                 }
 
             } else {
@@ -1871,12 +1718,6 @@ class Shape extends Instance
                 && bitmapData.namespace === "next2d.display.BitmapData"
             ) {
                 graphics._$mode = "bitmap";
-                if (Instance._$lazyDebug) {
-                    console.log('[LAZY] Shape using recodes with BitmapData: id=' + this.id 
-                        + ', hasCanvas=' + !!bitmapData._$canvas 
-                        + ', hasImage=' + !!bitmapData._$image
-                        + ', hasBuffer=' + !!bitmapData._$buffer);
-                }
             }
 
         }
@@ -1885,65 +1726,6 @@ class Shape extends Instance
             Util.$root.stage._$player.removeCache(
                 `${Util.$loaderInfo._$id}@${this.id}`
             );
-            
-            // Check if any BitmapData in recodes is not ready yet
-            let bitmapDataReady = true;
-            if (graphics._$recode) {
-                for (let i = 0; i < graphics._$recode.length; i++) {
-                    const item = graphics._$recode[i];
-                    if (item && item.namespace === 'next2d.display.BitmapData') {
-                        // BitmapData needs image OR canvas to be drawable (buffer alone not enough)
-                        let hasValidCanvas = false;
-                        
-                        if (item._$image) {
-                            hasValidCanvas = true;
-                        } else if (item._$canvas) {
-                            // Verify canvas is a valid HTMLCanvasElement with proper dimensions
-                            hasValidCanvas = item._$canvas instanceof HTMLCanvasElement 
-                                && item._$canvas.width > 0 
-                                && item._$canvas.height > 0;
-                        }
-                        
-                        if (!hasValidCanvas) {
-                            bitmapDataReady = false;
-                            if (Instance._$lazyDebug) {
-                                console.log('[LAZY] Shape BitmapData not drawable: id=' + this.id 
-                                    + ', w=' + item.width + ', h=' + item.height
-                                    + ', hasBuffer=' + !!item._$buffer
-                                    + ', hasImage=' + !!item._$image
-                                    + ', hasCanvas=' + !!item._$canvas
-                                    + ', isValidCanvas=' + (item._$canvas instanceof HTMLCanvasElement));
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            if (!bitmapDataReady) {
-                // BitmapData not ready yet - skip rendering this frame
-                graphics._$buffer = [];
-                graphics._$canDraw = false;
-                return shape;
-            }
-            
-            // BitmapData is ready - enable drawing
-            graphics._$canDraw = true;
-            if (Instance._$lazyDebug) {
-                console.log('[LAZY] Shape rendering enabled: id=' + this.id + ', canDraw=true');
-                
-                // Log BitmapData state right before calling _$getRecodes
-                for (let i = 0; i < graphics._$recode.length; i++) {
-                    const item = graphics._$recode[i];
-                    if (item && item.namespace === 'next2d.display.BitmapData') {
-                        console.log('[LAZY] BitmapData before _$getRecodes: id=' + this.id
-                            + ', _$image type=' + (item._$image ? item._$image.constructor.name : 'null')
-                            + ', _$canvas type=' + (item._$canvas ? item._$canvas.constructor.name : 'null')
-                            + ', _$buffer=' + !!item._$buffer);
-                        break;
-                    }
-                }
-            }
             this._$graphicBuffer = graphics._$getRecodes();
         }
         graphics._$buffer = this._$graphicBuffer;

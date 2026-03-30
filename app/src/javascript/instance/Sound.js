@@ -16,15 +16,11 @@ class Sound extends Instance
     constructor (object)
     {
         super(object);
+        this.buffer = object.buffer;
 
-        this._$buffer    = null;
         this._$binary    = "";
         this._$volume    = 100;
         this._$loopCount = 0;
-
-        if (object.buffer) {
-            this.buffer = object.buffer;
-        }
 
         if ("volume" in object) {
             this.volume = object.volume;
@@ -35,19 +31,17 @@ class Sound extends Instance
         }
 
         this._$audio = document.createElement("audio");
+
         this._$audio.preload  = "auto";
         this._$audio.autoplay = false;
         this._$audio.loop     = false;
         this._$audio.controls = true;
 
-        // Only create audio source if buffer is available (skip for lazy)
-        if (this._$buffer) {
-            this._$audio.src = URL.createObjectURL(new Blob(
-                [new Uint8Array(this._$buffer)],
-                { "type": "audio/mp3" }
-            ));
-            this._$audio.load();
-        }
+        this._$audio.src = URL.createObjectURL(new Blob(
+            [new Uint8Array(this._$buffer)],
+            { "type": "audio/mp3" }
+        ));
+        this._$audio.load();
     }
 
     /**

@@ -6,16 +6,18 @@
  */
 this.addEventListener("message", function (event)
 {
-    const buffer = pako.inflate(event.data.buffer);
-
-    let json = "";
-    for (let idx = 0; idx < buffer.length; idx += 4096) {
-        json += String.fromCharCode.apply(null, buffer.slice(idx, idx + 4096));
+    try {
+        const buffer = pako.inflate(event.data.buffer);
+        this.postMessage({
+            "buffer": buffer,
+            "name": event.data.name,
+            "type": event.data.type
+        }, [buffer.buffer]);
+    } catch (e) {
+        this.postMessage({
+            "error": e.message || String(e),
+            "name": event.data.name,
+            "type": event.data.type
+        });
     }
-
-    this.postMessage({
-        "json": json,
-        "name": event.data.name,
-        "type": event.data.type
-    });
 });

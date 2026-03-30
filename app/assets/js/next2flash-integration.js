@@ -51,8 +51,6 @@
         if (online) {
           injectUI();
           _log.info('Server connected — SWF conversion available');
-          // Check for auto-load file (--load CLI flag)
-          _checkAutoload();
         } else if (++attempts < maxAttempts) {
           _log.debug('Server not ready, retrying in', delay, 'ms... (' + attempts + '/' + maxAttempts + ')');
           setTimeout(tryConnect, delay);
@@ -80,16 +78,18 @@
     // Add styles
     var style = document.createElement('style');
     style.textContent = [
-      '#n2f-toolbar { display:flex; align-items:center; gap:6px; padding:4px 10px;',
-      '  position:fixed; top:0; right:calc(var(--controller-width, 360px) + 14px); z-index:100000;',
+      '#n2f-toolbar { display:flex; flex-direction:column; align-items:stretch; gap:4px; padding:8px;',
+      '  position:fixed; bottom:10px; right:10px; z-index:100000;',
       '  background:rgba(30,30,30,.92); border:1px solid #444;',
-      '  border-top:none; border-radius:0 0 6px 6px;',
+      '  border-radius:6px;',
       '  box-shadow:0 2px 12px rgba(0,0,0,.4); }',
+      '#n2f-toolbar .n2f-header { display:flex; align-items:center; gap:4px; padding-bottom:2px; }',
       '#n2f-toolbar .n2f-btn { display:inline-flex; align-items:center; gap:4px;',
       '  padding:4px 10px; border:1px solid #555; border-radius:4px; cursor:pointer;',
       '  font:bold 11px/1.4 Arial,sans-serif; color:#ccc; background:#333;',
       '  transition:background .15s, border-color .15s; white-space:nowrap; }',
       '#n2f-toolbar .n2f-btn:hover { background:#444; border-color:#7af; }',
+      '#n2f-toolbar .n2f-btn:disabled { opacity:.45; cursor:default; pointer-events:none; }',
       '#n2f-toolbar .n2f-btn.primary { background:#2a6; border-color:#2a6; color:#fff; }',
       '#n2f-toolbar .n2f-btn.primary:hover { background:#3b7; border-color:#3b7; }',
       '#n2f-toolbar .n2f-dot { width:8px; height:8px; border-radius:50%; background:#2ecc71;',
@@ -112,14 +112,16 @@
     var toolbar = document.createElement('div');
     toolbar.id = 'n2f-toolbar';
     toolbar.innerHTML =
-      '<span class="n2f-dot"></span>' +
-      '<span class="n2f-label">Next2Flash</span>' +
+      '<div class="n2f-header"><span class="n2f-dot"></span>' +
+      '<span class="n2f-label">Next2Flash</span></div>' +
       '<button class="n2f-btn" id="n2f-import-swf" title="Import SWF into editable project folder (PNG/WAV/AS)">' +
         '\u{1F4E5} Import SWF</button>' +
       '<button class="n2f-btn" id="n2f-open-project" title="Open an N2D file (can be in a project folder with assets)">' +
         '\u{1F4C2} Import Project</button>' +
       '<button class="n2f-btn" id="n2f-refresh-assets" title="Refresh external assets from project folder" disabled>' +
         '\u{1F504} Refresh Assets</button>' +
+      '<button class="n2f-btn" id="n2f-save-project" title="Save current project to server folder" disabled>' +
+        '\u{1F4BE} Save Project</button>' +
       '<button class="n2f-btn primary" id="n2f-export-swf" title="Export current project as SWF">' +
         '\u{1F4E4} Export SWF</button>' +
       '<input type="file" id="n2f-swf-input" accept=".swf,.ssf" style="display:none">' +
@@ -142,6 +144,7 @@
     document.getElementById('n2f-import-swf').addEventListener('click', onImportSWF);
     document.getElementById('n2f-open-project').addEventListener('click', onOpenProject);
     document.getElementById('n2f-refresh-assets').addEventListener('click', onRefreshAssets);
+    document.getElementById('n2f-save-project').addEventListener('click', onSaveProject);
     document.getElementById('n2f-export-swf').addEventListener('click', onExportSWF);
     document.getElementById('n2f-swf-input').addEventListener('change', onSWFFileSelected);
     document.getElementById('n2f-n2d-input').addEventListener('change', onN2DFileSelected);
@@ -166,60 +169,6 @@
     var form = new FormData();
     form.append('file', file);
 
-    // Seamless priority import: main-timeline assets fully decoded,
-    // project folder created, no re-load needed.
-    fetch(API_BASE + '/api/swf-to-project-fast', { method: 'POST', body: form })
-      .then(function (r) {
-        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
-        var name = r.headers.get('X-N2D-Name') || file.name.replace('.swf', '');
-        var libs = r.headers.get('X-N2D-Libraries') || '?';
-        var scripts = r.headers.get('X-N2D-Scripts') || '0';
-        var projDir = r.headers.get('X-Project-Dir') || '';
-        return r.blob().then(function (blob) {
-          return { blob: blob, name: name, libs: libs, scripts: scripts, projDir: projDir };
-        });
-      })
-      .then(function (result) {
-        hideProgress();
-
-        // Set project directory for refresh/export
-        _currentProjectDir = result.projDir;
-        _log.info('Project created at:', _currentProjectDir);
-
-        var refreshBtn = document.getElementById('n2f-refresh-assets');
-        if (refreshBtn) refreshBtn.disabled = false;
-
-        // Configure lazy loading URL so the editor can fetch assets on-demand
-        window.__N2F_LAZY_BASE_URL__ = API_BASE;
-
-        // Store blob and feed to tool — done in one step, no re-load
-        _importedN2DBlob = result.blob.slice(0);
-        _saveImportedBlobToIDB(_importedN2DBlob);
-        _feedN2DToTool(result.blob, result.name);
-
-        // Kick off background sweep of all lazy assets after the tool has
-        // had time to process the N2D file and populate libraries.
-        _scheduleLazySweep();
-
-        toast('Project loaded: ' + result.name + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)\nFolder: ' + _currentProjectDir);
-      })
-      .catch(function (err) {
-        hideProgress();
-        _log.error('SWF import failed, trying full import:', err.message);
-        // Fallback to original full import endpoint
-        _fallbackFullImport(file);
-      });
-  }
-
-  /**
-   * Fallback: use the original full swf-to-project endpoint.
-   */
-  function _fallbackFullImport(file) {
-    showProgress('Importing SWF (full mode)...\n' + file.name + ' (' + formatBytes(file.size) + ')');
-
-    var form = new FormData();
-    form.append('file', file);
-
     fetch(API_BASE + '/api/swf-to-project', { method: 'POST', body: form })
       .then(function (r) {
         if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
@@ -238,11 +187,13 @@
 
         var refreshBtn = document.getElementById('n2f-refresh-assets');
         if (refreshBtn) refreshBtn.disabled = false;
+        var saveBtn = document.getElementById('n2f-save-project');
+        if (saveBtn) saveBtn.disabled = false;
 
         _importedN2DBlob = result.blob.slice(0);
         _saveImportedBlobToIDB(_importedN2DBlob);
-
         _feedN2DToTool(result.blob, result.name);
+
         toast('Project created: ' + result.name + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)\nFolder: ' + _currentProjectDir);
       })
       .catch(function (err) {
@@ -310,6 +261,8 @@
           _log.info('Opened project at:', _currentProjectDir);
           var refreshBtn = document.getElementById('n2f-refresh-assets');
           if (refreshBtn) refreshBtn.disabled = false;
+          var saveBtn = document.getElementById('n2f-save-project');
+          if (saveBtn) saveBtn.disabled = false;
         } else {
           console.warn('[N2F] No X-Project-Dir returned — bitmaps were NOT overlaid by server');
         }
@@ -354,83 +307,40 @@
       var oldTabEl = document.querySelector('#view-tab-area .active[data-tab-id]');
       var oldTabId = oldTabEl ? oldTabEl.dataset.tabId : null;
 
-      // Open a new blank in-app tab so the load goes into it
-      var addTabBtn = document.getElementById('view-tab-add');
-      if (addTabBtn) addTabBtn.click();
-
       showProgress('Refreshing project from server...');
 
-      // Re-run the exact same open-project pipeline with the stored file
+      // Re-run the exact same open-project pipeline with the stored file.
+      // The tool creates its own new tab when loading an N2D (via the unzlib
+      // worker onmessage handler), so we must NOT close the old tab until the
+      // new workspace has fully loaded — otherwise we corrupt workspace state.
       _doOpenProjectBlob(storedBlob, _currentProjectDir.split(/[\\/]/).pop() + '.n2d', function (result) {
-        // Close the old tab, bypassing the unsaved-data confirm dialog
-        if (oldTabId !== null) {
-          var closeBtn = document.getElementById('tab-delete-id-' + oldTabId);
-          if (closeBtn) {
-            var origConfirm = window.confirm;
-            window.confirm = function () { return true; };
-            try { closeBtn.click(); } finally { window.confirm = origConfirm; }
+        // Poll until the new tab becomes active in the DOM, then close the old one.
+        var attempts = 0;
+        function waitAndCloseOldTab() {
+          var activeEl = document.querySelector('#view-tab-area .active[data-tab-id]');
+          var activeId = activeEl ? activeEl.dataset.tabId : null;
+          if (activeId !== null && activeId !== oldTabId) {
+            // New workspace is loaded and active — safe to close old tab
+            if (oldTabId !== null) {
+              var closeBtn = document.getElementById('tab-delete-id-' + oldTabId);
+              if (closeBtn) {
+                var origConfirm = window.confirm;
+                window.confirm = function () { return true; };
+                try { closeBtn.click(); } finally { window.confirm = origConfirm; }
+              }
+            }
+            toast('Refreshed: ' + result.name + ' (' + result.libs + ' libraries)');
+          } else if (++attempts < 100) {
+            setTimeout(waitAndCloseOldTab, 100);
+          } else {
+            // Timed out (10s) — don't close the old tab to avoid corruption
+            _log.warn('Refresh: timed out waiting for new tab');
+            toast('Refreshed: ' + result.name + ' (old tab may still be open)');
           }
         }
-        toast('Refreshed: ' + result.name + ' (' + result.libs + ' libraries)');
+        setTimeout(waitAndCloseOldTab, 100);
       });
     });
-  }
-
-  /* ================================================================== */
-  /*  Helper: Check for auto-load file (--load CLI)                      */
-  /* ================================================================== */
-  function _checkAutoload() {
-    // Wait a bit for the tool UI to be ready before auto-loading
-    setTimeout(function () {
-      fetch(API_BASE + '/api/autoload', { method: 'GET' })
-        .then(function (r) {
-          if (!r.ok) return null;
-          var ct = r.headers.get('Content-Type') || '';
-          if (ct.indexOf('octet-stream') === -1) {
-            // JSON response means no file available
-            return null;
-          }
-          var name = r.headers.get('X-N2D-Name') || 'autoload';
-          var libs = r.headers.get('X-N2D-Libraries') || '?';
-          var scripts = r.headers.get('X-N2D-Scripts') || '0';
-          return r.blob().then(function (blob) {
-            return { blob: blob, name: name, libs: libs, scripts: scripts };
-          });
-        })
-        .then(function (result) {
-          if (!result) return;
-          console.log('[N2F] Auto-loading: ' + result.name + ' (' + result.libs + ' libraries)');
-          window.__N2F_LAZY_BASE_URL__ = API_BASE;
-          _importedN2DBlob = result.blob.slice(0);
-          _saveImportedBlobToIDB(_importedN2DBlob);
-          _feedN2DToTool(result.blob, result.name);
-          _scheduleLazySweep();
-          toast('Auto-loaded: ' + result.name + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)');
-        })
-        .catch(function (err) {
-          console.warn('[N2F] Autoload check failed:', err);
-        });
-    }, 1500); // Give the editor time to initialize
-  }
-
-  /* ================================================================== */
-  /*  Helper: Schedule lazy sweep after project loads                    */
-  /* ================================================================== */
-  function _scheduleLazySweep() {
-    // The tool processes the N2D async after the change event. Poll until
-    // the workspace libraries exist, then trigger the sweep.
-    var attempts = 0;
-    var timer = setInterval(function () {
-      attempts++;
-      if (typeof window.__N2F_LAZY_FETCH_ALL__ === 'function') {
-        window.__N2F_LAZY_FETCH_ALL__();
-        clearInterval(timer);
-        _log.info('Lazy sweep started (' + attempts + ' poll(s))');
-      } else if (attempts > 30) {  // 3 seconds max
-        clearInterval(timer);
-        _log.warn('Lazy sweep: __N2F_LAZY_FETCH_ALL__ never appeared');
-      }
-    }, 100);
   }
 
   /* ================================================================== */
@@ -470,6 +380,40 @@
   }
 
   /* ================================================================== */
+  /*  Save Project                                                      */
+  /* ================================================================== */
+  function onSaveProject() {
+    if (!_currentProjectDir) {
+      toast('No project folder active — import an SWF or open a project first.', true);
+      return;
+    }
+    _log.info('Save Project requested');
+    showProgress('Saving project...');
+
+    saveProjectAsN2D()
+      .then(function (n2dBlob) {
+        updateProgress('Uploading project to server...');
+        var form = new FormData();
+        form.append('n2d', n2dBlob, 'project.n2d');
+        return fetch(API_BASE + '/api/save-project', { method: 'POST', body: form });
+      })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Save failed'); });
+        return r.json();
+      })
+      .then(function (result) {
+        hideProgress();
+        _log.info('Project saved to:', result.folder);
+        toast('Project saved to: ' + result.folder);
+      })
+      .catch(function (err) {
+        hideProgress();
+        _log.error('Save project failed:', err.message);
+        toast('Save failed: ' + err.message, true);
+      });
+  }
+
+  /* ================================================================== */
   /*  Export SWF                                                         */
   /* ================================================================== */
   function onExportSWF() {
@@ -478,17 +422,30 @@
 
     var name = getProjectName() || 'output';
 
-    // When a project folder is active, compile directly from the project
-    // folder's project.n2d which has externalFile references for scripts,
-    // bitmaps and sounds.  This ensures external edits are picked up.
+    // When a project folder is active, capture the current editor state first
+    // (so timeline edits like position/filter changes are included), save it
+    // to the project folder, then compile from there.
     if (_currentProjectDir) {
-      _log.info('Project folder active — compiling from project folder');
-      updateProgress('Compiling SWF from project folder...');
+      _log.info('Project folder active — saving editor state then compiling');
+      updateProgress('Capturing editor state...');
 
-      var form = new FormData();
-      form.append('fromProject', 'true');
-
-      fetch(API_BASE + '/api/n2d-to-swf', { method: 'POST', body: form })
+      saveProjectAsN2D()
+        .then(function (n2dBlob) {
+          updateProgress('Saving project before compile...');
+          var saveForm = new FormData();
+          saveForm.append('n2d', n2dBlob, 'project.n2d');
+          return fetch(API_BASE + '/api/save-project', { method: 'POST', body: saveForm });
+        })
+        .then(function (r) {
+          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Save failed'); });
+          return r.json();
+        })
+        .then(function () {
+          updateProgress('Compiling SWF from project folder...');
+          var form = new FormData();
+          form.append('fromProject', 'true');
+          return fetch(API_BASE + '/api/n2d-to-swf', { method: 'POST', body: form });
+        })
         .then(function (r) {
           if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Compilation failed'); });
           return r.blob();

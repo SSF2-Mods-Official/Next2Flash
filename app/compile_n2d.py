@@ -2941,16 +2941,10 @@ class N2DCompiler:
     def _emit_container(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_container: lib_id=%d, swf_id=%d, name=%s', lib['id'], swf_id, lib.get('name', '?'))
-        # Raw tag passthrough for 1:1 roundtrip
-        if lib.get("rawTagBody"):
-            raw_body = _decode_raw_body(lib["rawTagBody"])
-            tag_type = lib.get("rawTagType", 39)  # DefineSprite
-            # Remap charID references inside sprite sub-tags
-            if tag_type == 39:  # DefineSprite
-                raw_body = _remap_sprite_raw_body(raw_body, self._orig_to_new_id)
-            tag_data = struct.pack('<H', swf_id) + raw_body
-            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
-            return
+        # Always rebuild containers from JSON so that editor placement edits
+        # (position, colorTransform, filters, etc.) are compiled into the SWF.
+        # rawTagBody pass-through is only used for non-container types where
+        # the binary data cannot be reconstructed from JSON.
         tp = to_publish(lib, self._lib_to_char_idx, self.id_to_lib)
         total_frames = lib.get("totalFrame", 1)
         labels = lib.get("labels", [])

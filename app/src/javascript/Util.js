@@ -1308,62 +1308,83 @@ Util.$unZlibWorker = new Worker(URL.createObjectURL(
     new Blob(["###ZLIB_INFLATE_WORKER###"], { "type": "text/javascript" })
 ));
 
+Util.$unZlibWorker.onerror = (event) =>
+{
+    console.error("[N2F] ZlibInflateWorker crashed:", event.message);
+    Util.$saveProgress.end();
+};
+
 /**
  * @param {MessageEvent} event
  * @public
  */
 Util.$unZlibWorker.onmessage = (event) =>
 {
-    if (event.data.type === "n2d") {
-
-        Util.$saveProgress.loadN2D();
-
-        const workSpaces = new WorkSpace(
-            decodeURIComponent(event.data.json)
-        );
-
-        workSpaces.name = event.data.name;
-
-        Util
-            .$workSpaces
-            .push(workSpaces);
-
-        Util
-            .$screenTab
-            .createElement(workSpaces, Util.$workSpaces.length - 1);
-
-        Util
-            .$screenTab
-            .activeTab({
-                "currentTarget": {
-                    "dataset": {
-                        "tabId": Util.$workSpaces.length - 1
-                    }
-                }
-            });
-
+    if (event.data.error) {
+        console.error("[N2F] ZlibInflateWorker error:", event.data.error);
         Util.$saveProgress.end();
+        return;
+    }
 
-    } else {
+    try {
 
-        Util.$saveProgress.loadJson();
+        const json = new TextDecoder().decode(event.data.buffer);
 
-        const values = JSON.parse(decodeURIComponent(event.data.json));
+        if (event.data.type === "n2d") {
 
-        for (let idx = 0; idx < values.length; ++idx) {
-            Util.$workSpaces.push(new WorkSpace(values[idx]));
+            Util.$saveProgress.loadN2D();
+
+            const workSpaces = new WorkSpace(
+                decodeURIComponent(json)
+            );
+
+            workSpaces.name = event.data.name;
+
+            Util
+                .$workSpaces
+                .push(workSpaces);
+
+            Util
+                .$screenTab
+                .createElement(workSpaces, Util.$workSpaces.length - 1);
+
+            Util
+                .$screenTab
+                .activeTab({
+                    "currentTarget": {
+                        "dataset": {
+                            "tabId": Util.$workSpaces.length - 1
+                        }
+                    }
+                });
+
+            Util.$saveProgress.end();
+
+        } else {
+
+            Util.$saveProgress.loadJson();
+
+            const values = JSON.parse(decodeURIComponent(json));
+
+            for (let idx = 0; idx < values.length; ++idx) {
+                Util.$workSpaces.push(new WorkSpace(values[idx]));
+            }
+
+            if (!Util.$workSpaces.length) {
+                Util.$workSpaces.push(new WorkSpace());
+            }
+
+            // タブセット
+            Util.$screenTab.run();
+
+            // end
+            Util.$initializeEnd();
+
         }
 
-        if (!Util.$workSpaces.length) {
-            Util.$workSpaces.push(new WorkSpace());
-        }
-
-        // タブセット
-        Util.$screenTab.run();
-
-        // end
-        Util.$initializeEnd();
-
+    } catch (e) {
+        console.error("[N2F] Failed to process inflated data:", e);
+        Util.$saveProgress.end();
     }
 };
 
