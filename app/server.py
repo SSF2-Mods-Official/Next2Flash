@@ -16,6 +16,7 @@ import base64
 import io
 import json
 import logging
+import msgpack
 import os
 import shutil
 import struct
@@ -433,13 +434,17 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
 
             n2d_json = builder.to_n2d_json()
 
-            # Compress to zlib format (native N2D format the tool expects).
-            # The tool's save pipeline: JSON → encodeURIComponent → zlib deflate.
-            # The load pipeline: zlib inflate → String.fromCharCode → decodeURIComponent → JSON.
-            # So we must URL-encode the JSON before compressing.
-            json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
-            url_encoded = quote(json_str, safe="")
-            compressed = zlib.compress(url_encoded.encode("ascii"), 1)
+            # Create ZIP with MessagePack format (new format that bypasses string length limit)
+            import zipfile
+            import io as _io
+            
+            zip_buffer = _io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+                # Write MessagePack binary (preferred format)
+                msgpack_data = msgpack.packb(n2d_json, use_bin_type=True)
+                zf.writestr('project.msgpack', msgpack_data)
+            
+            compressed = zip_buffer.getvalue()
 
             # Also produce the sidecar meta
             meta_json = self._build_sidecar(n2d_json)
@@ -454,6 +459,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self.send_header("X-N2D-Name", name)
             self.send_header("X-N2D-Libraries", str(len(n2d_json.get("libraries", []))))
             self.send_header("X-N2D-Scripts", str(len(n2d_json.get("scripts", []))))
+            self.send_header("X-N2D-Format", "msgpack")
             self.send_header("Content-Length", str(len(compressed)))
             self.end_headers()
             self.wfile.write(compressed)
@@ -531,14 +537,20 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             with self._project_lock:
                 Next2FlashHandler._current_project_dir = project_dir
 
-            # Return zlib-compressed N2D for loading into the tool.
-            # Tool pipeline: zlib inflate → decodeURIComponent → JSON.parse.
-            # Only % needs encoding (%25); full quote() is ~100x slower for no benefit.
-            json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
-            _tick(f"json.dumps: {len(json_str):,} chars")
-            url_encoded = json_str.replace('%', '%25')
-            compressed = zlib.compress(url_encoded.encode("ascii"), 1)
-            _tick(f"zlib.compress: {len(compressed):,} bytes → DONE")
+            # Return ZIP with MessagePack for loading into the tool (bypasses string length limit).
+            # New format: ZIP archive containing project.msgpack binary
+            import zipfile
+            import io as _io
+            
+            zip_buffer = _io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+                # Write MessagePack binary (preferred format - no string length limit)
+                msgpack_data = msgpack.packb(n2d_json, use_bin_type=True)
+                zf.writestr('project.msgpack', msgpack_data)
+                _tick(f"msgpack.packb: {len(msgpack_data):,} bytes")
+            
+            compressed = zip_buffer.getvalue()
+            _tick(f"ZIP: {len(compressed):,} bytes → DONE")
 
             self.send_response(200)
             self._cors_headers()
@@ -547,6 +559,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self.send_header("X-N2D-Name", name)
             self.send_header("X-N2D-Libraries", str(len(n2d_json.get("libraries", []))))
             self.send_header("X-N2D-Scripts", str(len(n2d_json.get("scripts", []))))
+            self.send_header("X-N2D-Format", "msgpack")
             self.send_header("X-Project-Dir", project_dir)
             self.send_header("Content-Length", str(len(compressed)))
             self.end_headers()

@@ -669,10 +669,35 @@
     if (data.length >= 4 && data[0] === 0x50 && data[1] === 0x4B) {
       if (typeof JSZip !== 'undefined') {
         return JSZip.loadAsync(data.buffer).then(function (zip) {
+          // Try MessagePack format first (preferred)
+          if (zip.file('project.msgpack')) {
+            _log.info('Loading MessagePack format (binary)');
+            return zip.file('project.msgpack').async('uint8array').then(function (msgpackData) {
+              // Check if @msgpack/msgpack is available
+              if (typeof MessagePack !== 'undefined' && MessagePack.decode) {
+                try {
+                  var decoded = MessagePack.decode(msgpackData);
+                  _log.info('MessagePack decoded successfully');
+                  return decoded;
+                } catch (e) {
+                  _log.error('MessagePack decode failed:', e);
+                  return null;
+                }
+              } else {
+                _log.error('MessagePack library not loaded, cannot decode .msgpack format');
+                return null;
+              }
+            });
+          }
+          // Fall back to JSON format (legacy)
+          _log.info('Loading JSON format (legacy)');
           return zip.file('project.json').async('string');
-        }).then(function (text) {
+        }).then(function (result) {
+          // If result is already an object (from MessagePack), return it
+          if (typeof result === 'object') return result;
+          // Otherwise parse JSON
           try {
-            return JSON.parse(text);
+            return JSON.parse(result);
           } catch (e) {
             return null;
           }

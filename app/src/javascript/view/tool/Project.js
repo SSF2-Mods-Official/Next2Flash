@@ -205,16 +205,96 @@ class Project
 
         file
             .arrayBuffer()
-            .then((buffer) =>
+            .then(async (buffer) =>
             {
-                Util.$saveProgress.zlibInflate();
-
                 const uint8Array = new Uint8Array(buffer);
-                Util.$unZlibWorker.postMessage({
-                    "buffer": uint8Array,
-                    "name"  : file.name.replace(".n2d", ""),
-                    "type"  : "n2d"
-                }, [uint8Array.buffer]);
+                
+                // Check if it's a ZIP file (new format with MessagePack)
+                // ZIP files start with PK signature (0x50 0x4B)
+                if (uint8Array.length >= 4 && 
+                    uint8Array[0] === 0x50 && uint8Array[1] === 0x4B) {
+                    
+                    console.log('[N2F] Detected ZIP format, extracting MessagePack/JSON...');
+                    
+                    try {
+                        // Load ZIP
+                        const zip = await JSZip.loadAsync(buffer);
+                        
+                        let jsonData;
+                        
+                        // Check for MessagePack format first (preferred)
+                        if (zip.file('project.msgpack')){
+                            console.log('[N2F] Loading MessagePack format (binary)');
+                            const msgpackData = await zip.file('project.msgpack').async('uint8array');
+                            
+                            if (!window.MessagePack || !window.MessagePack.decode) {
+                                throw new Error('MessagePack library not loaded');
+                            }
+                            
+                            jsonData = window.MessagePack.decode(msgpackData);
+                            console.log('[N2F] MessagePack decoded successfully');
+                            
+                        } else if (zip.file('project.json')) {
+                            console.log('[N2F] Loading JSON format (legacy)');
+                            const jsonText = await zip.file('project.json').async('string');
+                            jsonData = JSON.parse(jsonText);
+                            
+                        } else {
+                            throw new Error('N2D file contains neither project.msgpack nor project.json');
+                        }
+                        
+                        // Load object directly into WorkSpace (bypasses string conversion limit!)
+                        console.log('[N2F] Loading object directly into WorkSpace');
+                        console.time('[N2F] WorkSpace creation from object');
+                        
+                        Util.$saveProgress.loadN2D();
+                        
+                        const sizeInMB = buffer.byteLength / (1024 * 1024);
+                        const librariesCount = jsonData.libraries ? jsonData.libraries.length : 0;
+                        console.log(`[N2F] Data size: ${sizeInMB.toFixed(2)} MB, ${librariesCount} libraries`);
+                        
+                        // Use progressive loading for large files (>300MB or >1000 libraries)
+                        if (sizeInMB > 300 || librariesCount > 1000) {
+                            console.log('[N2F] Using progressive loading...');
+                            Util.$loadWorkSpaceProgressivelyFromObject(jsonData, file.name.replace(".n2d", ""));
+                        } else {
+                            const workSpace = new WorkSpace();
+                            workSpace.name = file.name.replace(".n2d", "");
+                            workSpace.loadFromObject(jsonData);
+                            console.timeEnd('[N2F] WorkSpace creation from object');
+                            
+                            Util.$workSpaces.push(workSpace);
+                            
+                            Util.$screenTab.createElement(workSpace, Util.$workSpaces.length - 1);
+                            
+                            Util.$screenTab.activeTab({
+                                "currentTarget": {
+                                    "dataset": {
+                                        "tabId": Util.$workSpaces.length - 1
+                                    }
+                                }
+                            });
+                            
+                            Util.$saveProgress.end();
+                        }
+                        
+                    } catch (error) {
+                        console.error('[N2F] Failed to load ZIP/MessagePack format:', error);
+                        Util.$saveProgress.end();
+                        alert('Failed to load N2D file: ' + error.message);
+                    }
+                    
+                } else {
+                    // Old format: zlib-compressed URL-encoded JSON
+                    console.log('[N2F] Detected zlib format (legacy)');
+                    Util.$saveProgress.zlibInflate();
+                    
+                    Util.$unZlibWorker.postMessage({
+                        "buffer": uint8Array,
+                        "name"  : file.name.replace(".n2d", ""),
+                        "type"  : "n2d"
+                    }, [uint8Array.buffer]);
+                }
             });
     }
 

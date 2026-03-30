@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import logging
+import msgpack
 import os
 import re
 import struct
@@ -750,14 +751,16 @@ def _overlay_external_scripts(data: dict, project_dir: str) -> None:
 
 
 def load_n2d(path: str) -> Tuple[dict, Optional[str]]:
-    """Load an .n2D file → (parsed JSON dict, project_dir or None).
+    """Load an .n2D file → (parsed dict, project_dir or None).
 
     Supports:
       - Project folder: path is a directory containing project.n2d
-      - ZIP format (PK magic): project.json + bitmaps/*.bin entries
+      - ZIP format (PK magic): 
+          * project.msgpack (MessagePack binary - preferred)
+          * project.json (legacy JSON format)
       - Legacy zlib format (full URI-encoded or minimal % escaping)
 
-    Returns the parsed JSON dict and the project directory path (if the
+    Returns the parsed dict and the project directory path (if the
     source is a folder with external assets) or None.
     """
     log.info('load_n2d: loading %s', path)
@@ -774,7 +777,13 @@ def load_n2d(path: str) -> Tuple[dict, Optional[str]]:
         import zipfile as _zipfile
         import io as _io
         with _zipfile.ZipFile(_io.BytesIO(raw)) as zf:
-            data = json.loads(zf.read('project.json'))
+            # Try MessagePack first, fall back to JSON
+            if 'project.msgpack' in zf.namelist():
+                log.info('load_n2d: loading MessagePack format')
+                data = msgpack.unpackb(zf.read('project.msgpack'), raw=False)
+            else:
+                log.info('load_n2d: loading JSON format (legacy)')
+                data = json.loads(zf.read('project.json'))
         _overlay_external_scripts(data, project_dir)
         return data, project_dir
 
@@ -791,7 +800,13 @@ def load_n2d(path: str) -> Tuple[dict, Optional[str]]:
         import zipfile as _zipfile
         import io as _io
         with _zipfile.ZipFile(_io.BytesIO(raw)) as zf:
-            data = json.loads(zf.read('project.json'))
+            # Try MessagePack first, fall back to JSON
+            if 'project.msgpack' in zf.namelist():
+                log.info('load_n2d: loading MessagePack format')
+                data = msgpack.unpackb(zf.read('project.msgpack'), raw=False)
+            else:
+                log.info('load_n2d: loading JSON format (legacy)')
+                data = json.loads(zf.read('project.json'))
             if project_dir:
                 _overlay_external_scripts(data, project_dir)
             return data, project_dir

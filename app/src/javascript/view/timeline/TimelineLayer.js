@@ -571,7 +571,11 @@ class TimelineLayer extends BaseTimeline
             .hide();
 
         const frame = Util.$timelineFrame.currentFrame;
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) {
+            return;
+        }
+        const scene = workSpace.scene;
 
         // 複数選択ようにshiftキーをonにする
         const cacheValue = Util.$shiftKey;
@@ -1063,7 +1067,11 @@ class TimelineLayer extends BaseTimeline
 
         let reload = false;
         const frame = Util.$timelineFrame.currentFrame;
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) {
+            return;
+        }
+        const scene = workSpace.scene;
         const targetFrames = this.targetFrames;
         for (const layerId of targetFrames.keys()) {
 
@@ -1186,7 +1194,11 @@ class TimelineLayer extends BaseTimeline
             document.getElementById("timeline-content").children
         );
 
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) {
+            return;
+        }
+        const scene = workSpace.scene;
         const index = children.indexOf(element);
         const node  = children[index + 1];
         if (node) {
@@ -1590,7 +1602,11 @@ class TimelineLayer extends BaseTimeline
         window.removeEventListener("mouseup", this._$executeMoveLayer);
 
         let exitLayer = null;
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) {
+            return;
+        }
+        const scene = workSpace.scene;
         if (this._$exitLayer) {
 
             exitLayer = scene.getLayer(
@@ -2060,7 +2076,12 @@ class TimelineLayer extends BaseTimeline
      */
     moveTimeLine ()
     {
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) {
+            return;
+        }
+        
+        const scene = workSpace.scene;
         if (!scene) {
             return ;
         }
@@ -2343,7 +2364,11 @@ class TimelineLayer extends BaseTimeline
         this._$selectLayerId = element.dataset.layerId | 0;
 
         // アクティブ表示
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) {
+            return;
+        }
+        const scene = workSpace.scene;
         const frame = Util.$timelineFrame.currentFrame;
         for (const layerElement of this.targetLayers.values()) {
 
@@ -2633,9 +2658,12 @@ class TimelineLayer extends BaseTimeline
         element.value = "";
 
         // labelがあればセット
-        const scene = Util.$currentWorkSpace().scene;
-        if (scene.hasLabel(frame)) {
-            element.value = scene.getLabel(frame);
+        const workSpace = Util.$currentWorkSpace();
+        if (workSpace && workSpace.scene) {
+            const scene = workSpace.scene;
+            if (scene.hasLabel(frame)) {
+                element.value = scene.getLabel(frame);
+            }
         }
     }
 
@@ -3074,7 +3102,11 @@ class TimelineLayer extends BaseTimeline
         });
 
         let frames = null;
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) {
+            return;
+        }
+        const scene = workSpace.scene;
         for (let idx = 0; idx < targetFrames.length; ++idx) {
 
             const object  = targetFrames[idx].value;
@@ -4174,7 +4206,11 @@ class TimelineLayer extends BaseTimeline
         const rightFrame    = leftFrame + elementCount;
 
         const frame = Util.$timelineTool.getFirstFrame();
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) {
+            return;
+        }
+        const scene = workSpace.scene;
         for (const [layerId, values] of this._$targetFrames) {
 
             const layer = scene.getLayer(layerId);
@@ -4359,7 +4395,11 @@ class TimelineLayer extends BaseTimeline
         }
 
         // 再度、選択した範囲でアクティブ計算を行う
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) {
+            return;
+        }
+        const scene = workSpace.scene;
         for (let idx = 0; idx < selectIds.length; ++idx) {
 
             const layerId = selectIds[idx] | 0;

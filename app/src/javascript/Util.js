@@ -999,6 +999,12 @@ Util.$rebuildRuler = () =>
  */
 Util.$rebuildTimeline = () =>
 {
+    // Check if workspace exists before rebuilding
+    const workSpace = Util.$currentWorkSpace();
+    if (!workSpace) {
+        return;
+    }
+
     // ヘッダーを再構成
     Util.$timelineHeader._$currentFrame = -1;
     Util.$timelineHeader.setWidth();
@@ -1315,6 +1321,388 @@ Util.$unZlibWorker.onerror = (event) =>
 };
 
 /**
+ * @description Decode large buffer in chunks using TextDecoder
+ * @param {Uint8Array} buffer
+ * @return {string}
+ * @method
+ * @public
+ */
+Util.$decodeBufferChunked = function(buffer)
+{
+    const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks
+    const totalChunks = Math.ceil(buffer.byteLength / CHUNK_SIZE);
+    
+    console.log(`[N2F] Decoding ${(buffer.byteLength / (1024 * 1024)).toFixed(2)}MB buffer in ${totalChunks} chunks...`);
+    
+    const decoder = new TextDecoder();
+    const chunks = []; // Use array instead of string concatenation
+    
+    for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, buffer.byteLength);
+        const chunk = buffer.subarray(start, end);
+        
+        try {
+            // Use stream: true for all but last chunk to handle multi-byte characters
+            const isLastChunk = (i === totalChunks - 1);
+            chunks.push(decoder.decode(chunk, { stream: !isLastChunk }));
+            
+            if ((i + 1) % 10 === 0) {
+                console.log(`[N2F] Decoded ${i + 1}/${totalChunks} chunks (${Math.round((i + 1) / totalChunks * 100)}%)`);
+            }
+        } catch (e) {
+            console.error(`[N2F] Chunk ${i} decode failed:`, e);
+            console.error(`[N2F] Current chunks array length: ${chunks.length}, total size: ~${(chunks.join('').length / (1024 * 1024)).toFixed(2)}MB`);
+            throw e;
+        }
+    }
+    
+    console.log(`[N2F] All chunks decoded, joining into single string...`);
+    try {
+        const result = chunks.join('');
+        console.log(`[N2F] Buffer decode complete: ${(result.length / (1024 * 1024)).toFixed(2)}MB string`);
+        return result;
+    } catch (e) {
+        console.error(`[N2F] Failed to join chunks into string:`, e);
+        console.error(`[N2F] This file (${(buffer.byteLength / (1024 * 1024)).toFixed(0)}MB) exceeds browser string length limit (~500-1000MB)`);
+        
+        const errorMsg = 
+            `FILE TOO LARGE FOR BROWSER\n\n` +
+            `This file (${(buffer.byteLength / (1024 * 1024)).toFixed(0)}MB uncompressed) exceeds browser's maximum string length (~500-1000MB).\n\n` +
+            `JavaScript cannot create strings larger than this limit.\n\n` +
+            `Solutions:\n` +
+            `• Split the SWF into multiple smaller files before conversion\n` +
+            `• Remove unused assets/libraries from the SWF\n` +
+            `• Use a different tool for files this large\n\n` +
+            `This is a hard browser limitation, not a bug in the tool.`;
+        
+        alert(errorMsg);
+        throw new Error(`File exceeds browser string length limit`);
+    }
+};
+
+/**
+ * @description Decode URI component in chunks for very large strings
+ * @param {string} str
+ * @return {string}
+ * @method
+ * @public
+ */
+Util.$decodeURIComponentChunked = function(str)
+{
+    const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks
+    const totalChunks = Math.ceil(str.length / CHUNK_SIZE);
+    
+    if (totalChunks === 1) {
+        return decodeURIComponent(str);
+    }
+    
+    console.log(`[N2F] Decoding in ${totalChunks} chunks...`);
+    let result = "";
+    
+    for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, str.length);
+        const chunk = str.substring(start, end);
+        
+        try {
+            result += decodeURIComponent(chunk);
+        } catch (e) {
+            console.warn(`[N2F] Chunk ${i} decode failed, using raw chunk`);
+            result += chunk;
+        }
+    }
+    
+    return result;
+};
+
+/**
+ * @description Load large N2D workspace progressively to avoid UI freezing
+ * @param {string} json
+ * @param {string} name
+ * @return {void}
+ * @method
+ * @public
+ */
+Util.$loadWorkSpaceProgressively = async function(json, name)
+{
+    console.time("[N2F] Progressive JSON.parse");
+    
+    try {
+        // Parse the JSON (this is still the bottleneck, but we time it separately)
+        const object = JSON.parse(json);
+        console.timeEnd("[N2F] Progressive JSON.parse");
+        
+        console.log(`[N2F] Parsed object with ${object.libraries ? object.libraries.length : 0} libraries`);
+        
+        // Create workspace without libraries
+        const workSpaces = new WorkSpace();
+        workSpaces.name = name;
+        
+        // Load metadata first (fast)
+        console.time("[N2F] Load metadata");
+        workSpaces._$characterId = object.characterId | 0;
+        workSpaces._$name = object.name;
+        workSpaces._$stage = new Stage(object.stage);
+        
+        if (object.plugins) {
+            for (let idx = 0; idx < object.plugins.length; ++idx) {
+                const plugin = object.plugins[idx];
+                workSpaces._$plugins.set(plugin.name, plugin);
+            }
+        }
+        
+        if (object.setting) {
+            workSpaces._$timelineHeight = object.setting.timelineHeight;
+            workSpaces._$controllerWidth = object.setting.controllerWidth;
+            workSpaces._$ruler = !!object.setting.ruler;
+            workSpaces._$rulerX = object.setting.rulerX || [];
+            workSpaces._$rulerY = object.setting.rulerY || [];
+        }
+        console.timeEnd("[N2F] Load metadata");
+        
+        // Add workspace to array early so UI can show something
+        Util.$workSpaces.push(workSpaces);
+        Util.$screenTab.createElement(workSpaces, Util.$workSpaces.length - 1);
+        Util.$screenTab.activeTab({
+            "currentTarget": {
+                "dataset": {
+                    "tabId": Util.$workSpaces.length - 1
+                }
+            }
+        });
+        
+        // Load libraries in chunks to avoid blocking UI and memory issues
+        const libraries = object.libraries || [];
+        
+        // Use smaller chunks for very large files to reduce memory pressure
+        let CHUNK_SIZE = 50;
+        let DELAY_MS = 0;
+        if (libraries.length > 3000) {
+            CHUNK_SIZE = 25; // Smaller chunks for huge files
+            DELAY_MS = 10; // Give GC more time between chunks
+            console.log(`[N2F] Large file detected (${libraries.length} libraries), using conservative loading...`);
+        }
+        
+        const totalChunks = Math.ceil(libraries.length / CHUNK_SIZE);
+        
+        console.log(`[N2F] Loading ${libraries.length} libraries in ${totalChunks} chunks (${CHUNK_SIZE} per chunk)...`);
+        console.time("[N2F] Load all libraries");
+        
+        for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+            const start = chunkIdx * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, libraries.length);
+            
+            // Process chunk with delay to allow UI updates and GC
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
+            // Load this chunk of libraries
+            for (let idx = start; idx < end; idx++) {
+                workSpaces.addLibrary(libraries[idx]);
+            }
+            
+            // Update progress
+            const progress = Math.round((end / libraries.length) * 100);
+            console.log(`[N2F] Loaded ${end}/${libraries.length} libraries (${progress}%)`);
+        }
+        
+        console.timeEnd("[N2F] Load all libraries");
+        console.log("[N2F] Progressive loading complete!");
+        
+        // Re-initialize UI now that libraries are loaded
+        console.log("[N2F] Refreshing UI with loaded libraries...");
+        try {
+            workSpaces.initialize(workSpaces.root);
+            console.log("[N2F] UI refresh complete!");
+        } catch (e) {
+            console.warn("[N2F] Scene rendering failed (common with complex graphics):", e.message);
+            console.log("[N2F] Setting up UI manually (skipping scene rendering)...");
+            
+            // Manually set up UI components without triggering scene rendering
+            try {
+                // Set scene directly without triggering setter/initialize
+                workSpaces._$scene = workSpaces.root;
+                
+                // Clear active library
+                Util.$libraryController.clearActive();
+                
+                // Reload library panel with all libraries
+                Util.$libraryController.reload(
+                    Array.from(workSpaces._$libraries.values())
+                );
+                
+                // Initialize javascript controller
+                Util.$javascriptController.reload();
+                
+                // Initialize plugins
+                Util.$pluginController.reload(
+                    Array.from(workSpaces._$plugins.values())
+                );
+                
+                // Set up timeline WITHOUT rendering
+                Util.$sceneChange.reload();
+                
+                console.log("[N2F] UI setup complete! Library panel and timeline are now populated.");
+                console.log("[N2F] Note: Stage preview may not render due to complex graphics.");
+            } catch (uiError) {
+                console.error("[N2F] UI setup failed:", uiError);
+            }
+        }
+        
+        // Clear the libraries array to free memory (do this AFTER initialize)
+        object.libraries = null;
+        
+        // Initialize the workspace
+        Util.$saveProgress.end();
+        
+    } catch (e) {
+        console.error("[N2F] Progressive loading failed:", e);
+        console.error("[N2F] Error stack:", e.stack);
+        throw e;
+    }
+};
+
+/**
+ * @description Load large N2D workspace progressively from object (MessagePack path - no JSON.parse needed!)
+ * @param {object} object - Already parsed object
+ * @param {string} name
+ * @return {void}
+ * @method
+ * @public
+ */
+Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
+{
+    console.log(`[N2F] Progressive loading from object with ${object.libraries ? object.libraries.length : 0} libraries`);
+    
+    try {
+        // Create workspace without libraries
+        const workSpaces = new WorkSpace();
+        workSpaces.name = name;
+        
+        // Load metadata first (fast)
+        console.time("[N2F] Load metadata");
+        workSpaces._$characterId = object.characterId | 0;
+        workSpaces._$name = object.name;
+        workSpaces._$stage = new Stage(object.stage);
+        
+        if (object.plugins) {
+            for (let idx = 0; idx < object.plugins.length; ++idx) {
+                const plugin = object.plugins[idx];
+                workSpaces._$plugins.set(plugin.name, plugin);
+            }
+        }
+        
+        if (object.setting) {
+            workSpaces._$timelineHeight = object.setting.timelineHeight;
+            workSpaces._$controllerWidth = object.setting.controllerWidth;
+            workSpaces._$ruler = !!object.setting.ruler;
+            workSpaces._$rulerX = object.setting.rulerX || [];
+            workSpaces._$rulerY = object.setting.rulerY || [];
+        }
+        console.timeEnd("[N2F] Load metadata");
+        
+        // Add workspace to array early so UI can show something
+        Util.$workSpaces.push(workSpaces);
+        Util.$screenTab.createElement(workSpaces, Util.$workSpaces.length - 1);
+        Util.$screenTab.activeTab({
+            "currentTarget": {
+                "dataset": {
+                    "tabId": Util.$workSpaces.length - 1
+                }
+            }
+        });
+        
+        // Load libraries in chunks to avoid blocking UI and memory issues
+        const libraries = object.libraries || [];
+        
+        // Use smaller chunks for very large files to reduce memory pressure
+        let CHUNK_SIZE = 50;
+        let DELAY_MS = 0;
+        if (libraries.length > 3000) {
+            CHUNK_SIZE = 25; // Smaller chunks for huge files
+            DELAY_MS = 10; // Give GC more time between chunks
+            console.log(`[N2F] Large file detected (${libraries.length} libraries), using conservative loading...`);
+        }
+        
+        const totalChunks = Math.ceil(libraries.length / CHUNK_SIZE);
+        
+        console.log(`[N2F] Loading ${libraries.length} libraries in ${totalChunks} chunks (${CHUNK_SIZE} per chunk)...`);
+        console.time("[N2F] Load all libraries");
+        
+        for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+            const start = chunkIdx * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, libraries.length);
+            
+            // Process chunk with delay to allow UI updates and GC
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
+            // Load this chunk of libraries
+            for (let idx = start; idx < end; idx++) {
+                workSpaces.addLibrary(libraries[idx]);
+            }
+            
+            // Update progress
+            const progress = Math.round((end / libraries.length) * 100);
+            console.log(`[N2F] Loaded ${end}/${libraries.length} libraries (${progress}%)`);
+        }
+        
+        console.timeEnd("[N2F] Load all libraries");
+        console.log("[N2F] Progressive loading complete!");
+        
+        // Re-initialize UI now that libraries are loaded
+        console.log("[N2F] Refreshing UI with loaded libraries...");
+        try {
+            workSpaces.initialize(workSpaces.root);
+            console.log("[N2F] UI refresh complete!");
+        } catch (e) {
+            console.warn("[N2F] Scene rendering failed (common with complex graphics):", e.message);
+            console.log("[N2F] Setting up UI manually (skipping scene rendering)...");
+            
+            // Manually set up UI components without triggering scene rendering
+            try {
+                // Set scene directly without triggering setter/initialize
+                workSpaces._$scene = workSpaces.root;
+                
+                // Clear active library
+                Util.$libraryController.clearActive();
+                
+                // Reload library panel with all libraries
+                Util.$libraryController.reload(
+                    Array.from(workSpaces._$libraries.values())
+                );
+                
+                // Initialize javascript controller
+                Util.$javascriptController.reload();
+                
+                // Initialize plugins
+                Util.$pluginController.reload(
+                    Array.from(workSpaces._$plugins.values())
+                );
+                
+                // Set up timeline WITHOUT rendering
+                Util.$sceneChange.reload();
+                
+                console.log("[N2F] UI setup complete! Library panel and timeline are now populated.");
+                console.log("[N2F] Note: Stage preview may not render due to complex graphics.");
+            } catch (uiError) {
+                console.error("[N2F] UI setup failed:", uiError);
+            }
+        }
+        
+        // Clear the libraries array to free memory (do this AFTER initialize)
+        object.libraries = null;
+        
+        // Initialize the workspace
+        Util.$saveProgress.end();
+        
+    } catch (e) {
+        console.error("[N2F] Progressive loading from object failed:", e);
+        console.error("[N2F] Error stack:", e.stack);
+        throw e;
+    }
+};
+
+/**
  * @param {MessageEvent} event
  * @public
  */
@@ -1328,37 +1716,128 @@ Util.$unZlibWorker.onmessage = (event) =>
 
     try {
 
-        const json = new TextDecoder().decode(event.data.buffer);
+        // Check decompressed size before processing
+        const sizeInMB = event.data.buffer.byteLength / (1024 * 1024);
+        console.log(`[N2F] Decompressed size: ${sizeInMB.toFixed(2)} MB`);
+        console.log(`[N2F] Buffer details: byteLength=${event.data.buffer.byteLength}, type=${event.data.buffer.constructor.name}`);
+
+        // Warn if file is very large (may cause performance issues)
+        if (sizeInMB > 300) {
+            console.warn(`[N2F] Large file detected (${sizeInMB.toFixed(0)}MB). This may take a while...`);
+            if (sizeInMB > 500) {
+                const proceed = confirm(
+                    `WARNING: File is extremely large (${sizeInMB.toFixed(0)}MB).\n\n` +
+                    `This may cause browser slowdown or crash.\n\n` +
+                    `Recommendations:\n` +
+                    `• Split the SWF into smaller files before conversion\n` +
+                    `• Remove unused library items\n` +
+                    `• Close other browser tabs\n\n` +
+                    `Continue loading?`
+                );
+                if (!proceed) {
+                    console.log("[N2F] User cancelled large file load");
+                    Util.$saveProgress.end();
+                    return;
+                }
+            }
+        }
+
+        console.time("[N2F] TextDecoder.decode");
+        let json;
+        try {
+            // For buffers >100MB, TextDecoder can fail or return empty string
+            // Use chunked decoding for large buffers
+            if (event.data.buffer.byteLength > 100 * 1024 * 1024) {
+                console.log("[N2F] Using chunked TextDecoder for large buffer...");
+                json = Util.$decodeBufferChunked(event.data.buffer);
+            } else {
+                json = new TextDecoder().decode(event.data.buffer);
+            }
+        } catch (e) {
+            console.error("[N2F] TextDecoder failed:", e);
+            alert("Failed to decode file: " + e.message);
+            Util.$saveProgress.end();
+            return;
+        }
+        console.timeEnd("[N2F] TextDecoder.decode");
+        console.log(`[N2F] Decoded string length: ${(json.length / (1024 * 1024)).toFixed(2)} MB (${json.length} chars)`);
+        
+        // Validate TextDecoder output
+        if (!json || json.length === 0) {
+            console.error("[N2F] TextDecoder returned empty string!");
+            alert("File decode failed: TextDecoder returned empty result. File may be corrupted or too large for browser.");
+            Util.$saveProgress.end();
+            return;
+        }
 
         if (event.data.type === "n2d") {
 
             Util.$saveProgress.loadN2D();
 
-            const workSpaces = new WorkSpace(
-                decodeURIComponent(json)
-            );
+            console.time("[N2F] decodeURIComponent");
+            let decodedJson;
+            try {
+                // Check if string is actually URL-encoded (contains % characters)
+                const hasEncoding = json.includes('%');
+                console.log(`[N2F] String appears ${hasEncoding ? '' : 'NOT '}to be URL-encoded`);
+                
+                if (!hasEncoding) {
+                    // Not URL-encoded, use as-is
+                    console.log("[N2F] Skipping decodeURIComponent (no encoding detected)");
+                    decodedJson = json;
+                } else if (json.length > 100 * 1024 * 1024) {
+                    // For very large strings (>100MB), decodeURIComponent can fail silently
+                    // Try chunked decoding for large files
+                    console.log("[N2F] Using chunked URI decoding for large string...");
+                    decodedJson = Util.$decodeURIComponentChunked(json);
+                } else {
+                    decodedJson = decodeURIComponent(json);
+                }
+                
+                // Validate result
+                if (!decodedJson || decodedJson.length === 0) {
+                    console.warn("[N2F] decodeURIComponent returned empty, using raw string");
+                    decodedJson = json;
+                }
+            } catch (e) {
+                console.error("[N2F] decodeURIComponent failed:", e.message);
+                console.log("[N2F] Using raw decoded string instead");
+                decodedJson = json;
+            }
+            console.timeEnd("[N2F] decodeURIComponent");
+            console.log(`[N2F] Final JSON length: ${(decodedJson.length / (1024 * 1024)).toFixed(2)} MB`);
 
-            workSpaces.name = event.data.name;
+            // For large files, use progressive/chunked loading
+            if (sizeInMB > 300) {
+                console.log("[N2F] Using progressive loading for large file...");
+                Util.$loadWorkSpaceProgressively(decodedJson, event.data.name);
+            } else {
+                console.time("[N2F] WorkSpace constructor");
+                const workSpaces = new WorkSpace(decodedJson);
+                console.timeEnd("[N2F] WorkSpace constructor");
 
-            Util
-                .$workSpaces
-                .push(workSpaces);
+                workSpaces.name = event.data.name;
 
-            Util
-                .$screenTab
-                .createElement(workSpaces, Util.$workSpaces.length - 1);
+                Util
+                    .$workSpaces
+                    .push(workSpaces);
 
-            Util
-                .$screenTab
-                .activeTab({
-                    "currentTarget": {
-                        "dataset": {
-                            "tabId": Util.$workSpaces.length - 1
+                Util
+                    .$screenTab
+                    .createElement(workSpaces, Util.$workSpaces.length - 1);
+
+                Util
+                    .$screenTab
+                    .activeTab({
+                        "currentTarget": {
+                            "dataset": {
+                                "tabId": Util.$workSpaces.length - 1
+                            }
                         }
-                    }
-                });
+                    });
 
-            Util.$saveProgress.end();
+                Util.$saveProgress.end();
+            }
 
         } else {
 
@@ -1384,6 +1863,20 @@ Util.$unZlibWorker.onmessage = (event) =>
 
     } catch (e) {
         console.error("[N2F] Failed to process inflated data:", e);
+        console.error("[N2F] Error stack:", e.stack);
+        
+        // Provide helpful error message based on error type
+        let errorMsg = "Failed to load file: " + e.message;
+        if (e.name === "RangeError" || e.message.includes("memory")) {
+            errorMsg = "File too large for browser memory. Try:\n" +
+                      "• Split SWF into smaller parts\n" +
+                      "• Remove unused assets\n" +
+                      "• Use a 64-bit browser with more RAM";
+        } else if (e instanceof SyntaxError) {
+            errorMsg = "File data corrupted or invalid JSON format";
+        }
+        
+        alert(errorMsg);
         Util.$saveProgress.end();
     }
 };

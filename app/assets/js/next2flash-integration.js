@@ -696,9 +696,33 @@
         // Detect ZIP-based N2D format (PK magic bytes)
         if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4B) {
           return JSZip.loadAsync(buf).then(function (zip) {
+            // Try MessagePack format first (preferred)
+            if (zip.file('project.msgpack')) {
+              _log.info('[N2F] Loading MessagePack format (binary)');
+              return zip.file('project.msgpack').async('uint8array').then(function (msgpackData) {
+                if (typeof MessagePack !== 'undefined' && MessagePack.decode) {
+                  try {
+                    var decoded = MessagePack.decode(msgpackData);
+                   _log.info('[N2F] MessagePack decoded successfully');
+                    return decoded;
+                  } catch (e) {
+                    _log.error('[N2F] MessagePack decode failed:', e);
+                    return null;
+                  }
+                } else {
+                  _log.error('[N2F] MessagePack library not loaded');
+                  return null;
+                }
+              });
+            }
+            // Fall back to JSON format (legacy)
+            _log.info('[N2F] Loading JSON format (legacy)');
             return zip.file('project.json').async('string');
-          }).then(function (text) {
-            try { return JSON.parse(text); }
+          }).then(function (result) {
+            // If result is already an object (from MessagePack), return it
+            if (typeof result === 'object') return result;
+            // Otherwise parse JSON
+            try { return JSON.parse(result); }
             catch (e) { return null; }
           });
         }

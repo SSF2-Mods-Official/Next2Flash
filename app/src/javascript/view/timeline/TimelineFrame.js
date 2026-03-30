@@ -76,7 +76,8 @@ class TimelineFrame extends BaseTimeline
     {
         const element = document.getElementById("current-frame");
         if (element) {
-            const scene = Util.$currentWorkSpace().scene;
+            const workSpace = Util.$currentWorkSpace();
+            const scene = workSpace ? workSpace.scene : null;
             const totalFrame = scene
                 ? scene.totalFrame + TimelineScroll.FRAME_COUNT - 2
                 : TimelineScroll.FRAME_COUNT - 2;
@@ -288,7 +289,11 @@ class TimelineFrame extends BaseTimeline
             }
 
             // clampで補正された値をセット
-            const scene = Util.$currentWorkSpace().scene;
+            const workSpace = Util.$currentWorkSpace();
+            if (!workSpace || !workSpace.scene) {
+                return;
+            }
+            const scene = workSpace.scene;
             const totalFrame = scene.totalFrame + TimelineScroll.FRAME_COUNT - 2;
             const frame = Math.max(1, Math.min(currentValue + diff, totalFrame));
 
@@ -322,9 +327,12 @@ class TimelineFrame extends BaseTimeline
         if (event.type === "focusout") {
 
             // Inputの値を更新
-            const scene = Util.$currentWorkSpace().scene;
-            const totalFrame = scene.totalFrame + TimelineScroll.FRAME_COUNT - 2;
-            event.target.value = `${Math.max(1, Math.min(event.target.value | 0, totalFrame))}`;
+            const workSpace = Util.$currentWorkSpace();
+            if (workSpace && workSpace.scene) {
+                const scene = workSpace.scene;
+                const totalFrame = scene.totalFrame + TimelineScroll.FRAME_COUNT - 2;
+                event.target.value = `${Math.max(1, Math.min(event.target.value | 0, totalFrame))}`;
+            }
 
             // タイムラインの座標の補正
             this.moveTimeline();

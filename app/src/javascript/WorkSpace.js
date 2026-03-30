@@ -258,7 +258,7 @@ class WorkSpace
     }
 
     /**
-     * @description 指定のプロジェクトJSONを読み込む
+     * @description 指定のプロジェクトJSONを読み込む (従来方式)
      *
      * @param  {string} json
      * @return {void}
@@ -268,7 +268,19 @@ class WorkSpace
     load (json)
     {
         const object = JSON.parse(json);
+        this.loadFromObject(object);
+    }
 
+    /**
+     * @description プロジェクトオブジェクトから読み込む (ストリーミング対応)
+     *
+     * @param  {object} object
+     * @return {void}
+     * @method
+     * @public
+     */
+    loadFromObject (object)
+    {
         // copy
         this._$characterId = object.characterId | 0;
         this._$name        = object.name;

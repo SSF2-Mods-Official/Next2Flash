@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import msgpack
 import os
 import sys
 import time
@@ -221,8 +222,15 @@ def cmd_info(args):
     if magic == b"PK":
         import zipfile
         with zipfile.ZipFile(n2d_path, "r") as zf:
-            with zf.open("project.json") as pf:
-                data = json.loads(pf.read())
+            # Try MessagePack first, fall back to JSON
+            if 'project.msgpack' in zf.namelist():
+                print('Format: MessagePack (binary)')
+                with zf.open("project.msgpack") as pf:
+                    data = msgpack.unpackb(pf.read(), raw=False)
+            else:
+                print('Format: JSON (legacy)')
+                with zf.open("project.json") as pf:
+                    data = json.loads(pf.read())
     else:
         import zlib
         with open(n2d_path, "rb") as f:

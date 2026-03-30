@@ -304,7 +304,11 @@ class TimelineScroll extends BaseTimeline
 
         window.requestAnimationFrame(() =>
         {
-            const scene = Util.$currentWorkSpace().scene;
+            const workSpace = Util.$currentWorkSpace();
+            if (!workSpace || !workSpace.scene) {
+                return;
+            }
+            const scene = workSpace.scene;
 
             if (this._$pageY) {
 
@@ -365,7 +369,11 @@ class TimelineScroll extends BaseTimeline
      */
     get maxX ()
     {
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace || !workSpace.scene) {
+            return 0;
+        }
+        const scene = workSpace.scene;
 
         const clientWidth   = Util.$timelineLayer.clientWidth - 10;
         const totalFrame    = scene.totalFrame + TimelineScroll.FRAME_COUNT;
