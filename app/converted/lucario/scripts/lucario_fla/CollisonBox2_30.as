@@ -1,0 +1,22 @@
+package lucario_fla
+{
+    import flash.display.MovieClip;
+
+    public dynamic class CollisonBox2_30 extends MovieClip
+    {
+
+        public function CollisonBox2_30()
+        {
+            super();
+            addFrameScript(0, this.frame1);
+        }
+
+        internal function frame1():*
+        {
+            this.visible = false;
+        }
+
+
+    }
+}
+

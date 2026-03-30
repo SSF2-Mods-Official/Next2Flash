@@ -245,6 +245,10 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             })
         elif self.path.startswith("/api/test-file/"):
             self._handle_test_file()
+        elif self.path.startswith("/api/lazy/asset/"):
+            self._handle_lazy_asset()
+        elif self.path == "/api/autoload":
+            self._handle_autoload()
         else:
             super().do_GET()
 
@@ -263,6 +267,10 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self._handle_n2d_to_swf()
         elif self.path == "/api/swf-to-project":
             self._handle_swf_to_project()
+        elif self.path == "/api/swf-to-project-fast":
+            self._handle_swf_to_project_fast()
+        elif self.path == "/api/lazy/hydrate":
+            self._handle_lazy_hydrate()
         elif self.path == "/api/open-project":
             self._handle_open_project()
         elif self.path == "/api/refresh-assets":
@@ -554,6 +562,355 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             traceback.print_exc()
             log.error('_handle_swf_to_project: failed: %s', e)
             self._error_response(500, f"SWF->Project conversion failed: {e}")
+
+    # ── Pending SWF data for lazy hydration ──
+    _pending_swf_data = None      # raw SWF bytes
+    _pending_swf_name = None      # project name
+    _pending_swf_lock = threading.Lock()
+    _pending_builder  = None      # cached N2DBuilder after catalog
+
+    # ── Autoload data (set by --load CLI flag) ──
+    _autoload_blob  = None        # compressed N2D bytes ready to serve
+    _autoload_name  = None        # project name
+    _autoload_libs  = 0           # library count
+    _autoload_scripts = 0         # script count
+
+    def _handle_swf_to_project_fast(self):
+        """POST /api/swf-to-project-fast — Instant skeleton SWF import.
+
+        Parses SWF structure and timelines only — NO bitmap/shape/sound decoding.
+        All heavy assets are marked lazy. The editor fetches decoded data
+        on-demand via /api/lazy/asset/<charId> when assets are first rendered.
+
+        Stores the raw SWF + cached builder for lazy asset decoding.
+        """
+        try:
+            body = self._read_body()
+            if not body:
+                return self._error_response(400, "No data received")
+
+            swf_data, filename = self._extract_upload(body, "file")
+            if not swf_data:
+                swf_data = body
+                filename = "upload.swf"
+
+            name = os.path.splitext(filename)[0] if filename else "converted"
+            log.info('_handle_swf_to_project_fast: %s (%d bytes)', filename, len(swf_data))
+
+            _t0 = time.time()
+            def _tick(label):
+                print(f"[FAST-IMPORT {time.time()-_t0:6.2f}s] {label}", flush=True)
+
+            _tick(f"start — {len(swf_data):,} bytes")
+
+            mod = _get_swf_to_n2d()
+
+            header, tags = mod.parse_swf(swf_data)
+            _tick(f"parse_swf: {len(tags)} tags")
+
+            builder = mod.N2DBuilder(header, name=name)
+            builder.catalog_swf_tags(tags)
+            _tick(f"catalog: {len(builder.char_types)} chars")
+
+            # Decompile scripts — needed for frame scripts on main timeline
+            scripts, frame_scripts = mod.decompile_all_scripts(builder.global_raw_tags)
+            builder.frame_scripts = frame_scripts
+            if scripts:
+                builder.scripts.extend(scripts)
+            _tick(f"decompile: {len(scripts)} scripts")
+
+            # Skeleton build: metadata only, all heavy assets lazy
+            builder.build_skeleton(tags)
+            _tick("build_skeleton")
+
+            builder.build_main_timeline(tags)
+            _tick("build_main_timeline")
+
+            n2d_json = builder.to_n2d_json()
+            _tick(f"to_n2d_json: {len(n2d_json.get('libraries', []))} libs")
+
+            # Save minimal project folder (scripts only, no bitmap/sound files)
+            project_dir = os.path.join(SERVER_DIR, "converted", name)
+            mod.save_project_folder(n2d_json, project_dir)
+            _tick("save_project_folder")
+
+            with self._project_lock:
+                Next2FlashHandler._current_project_dir = project_dir
+
+            # Store raw SWF + builder for lazy asset decoding
+            with self._pending_swf_lock:
+                Next2FlashHandler._pending_swf_data = swf_data
+                Next2FlashHandler._pending_swf_name = name
+                Next2FlashHandler._pending_builder = builder
+
+            # Return compressed N2D
+            json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
+            url_encoded = json_str.replace('%', '%25')
+            compressed = zlib.compress(url_encoded.encode("ascii"), 1)
+            _tick(f"compressed: {len(compressed):,} bytes — DONE")
+
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}.n2d"')
+            self.send_header("X-N2D-Name", name)
+            self.send_header("X-N2D-Libraries", str(len(n2d_json.get("libraries", []))))
+            self.send_header("X-N2D-Scripts", str(len(n2d_json.get("scripts", []))))
+            self.send_header("X-Project-Dir", project_dir)
+            self.send_header("Content-Length", str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_swf_to_project_fast: failed: %s', e)
+            self._error_response(500, f"Fast SWF import failed: {e}")
+
+    def _handle_lazy_hydrate(self):
+        """POST /api/lazy/hydrate — Full conversion of the pending SWF.
+
+        Called at save/export time to fully decode ALL assets (including
+        those that were lazy stubs during priority import). Re-creates
+        the project folder with complete data.
+
+        Returns the fully-hydrated N2D blob.
+        """
+        try:
+            with self._pending_swf_lock:
+                swf_data = Next2FlashHandler._pending_swf_data
+                name = Next2FlashHandler._pending_swf_name
+
+            if not swf_data:
+                return self._error_response(400, "No pending SWF — call /api/swf-to-project-fast first")
+
+            log.info('_handle_lazy_hydrate: hydrating %s (%d bytes)', name, len(swf_data))
+
+            _t0 = time.time()
+            def _tick(label):
+                print(f"[HYDRATE {time.time()-_t0:6.2f}s] {label}", flush=True)
+
+            _tick(f"start")
+
+            mod = _get_swf_to_n2d()
+
+            header, tags = mod.parse_swf(swf_data)
+            _tick(f"parse_swf: {len(tags)} tags")
+
+            builder = mod.N2DBuilder(header, name=name)
+            builder.catalog_swf_tags(tags)
+            _tick(f"catalog: {len(builder.char_types)} chars")
+
+            scripts, frame_scripts = mod.decompile_all_scripts(builder.global_raw_tags)
+            builder.frame_scripts = frame_scripts
+            if scripts:
+                builder.scripts.extend(scripts)
+            _tick(f"decompile: {len(scripts)} scripts")
+
+            builder.build_all()
+            _tick("build_all")
+
+            builder.build_main_timeline(tags)
+            _tick("build_main_timeline")
+
+            builder._embed_bitmap_data_in_recodes()
+            _tick("embed_bitmaps")
+
+            n2d_json = builder.to_n2d_json()
+            _tick(f"to_n2d_json: {len(n2d_json.get('libraries', []))} libs")
+
+            # Save project folder
+            project_dir = os.path.join(SERVER_DIR, "converted", name)
+            mod.save_project_folder(n2d_json, project_dir)
+            _tick("save_project_folder")
+
+            with self._project_lock:
+                Next2FlashHandler._current_project_dir = project_dir
+
+            # Clear pending SWF to free memory
+            with self._pending_swf_lock:
+                Next2FlashHandler._pending_swf_data = None
+                Next2FlashHandler._pending_swf_name = None
+
+            # Return compressed full N2D
+            json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
+            url_encoded = json_str.replace('%', '%25')
+            compressed = zlib.compress(url_encoded.encode("ascii"), 1)
+            _tick(f"compressed: {len(compressed):,} bytes — DONE")
+
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}.n2d"')
+            self.send_header("X-N2D-Name", name)
+            self.send_header("X-N2D-Libraries", str(len(n2d_json.get("libraries", []))))
+            self.send_header("X-N2D-Scripts", str(len(n2d_json.get("scripts", []))))
+            self.send_header("X-Project-Dir", project_dir)
+            self.send_header("Content-Length", str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_lazy_hydrate: failed: %s', e)
+            self._error_response(500, f"Hydration failed: {e}")
+
+    def _handle_lazy_asset(self):
+        """GET /api/lazy/asset/<swfCharId> — Decode a single asset on demand.
+
+        Returns JSON with the decoded asset data (bitmap RGBA, shape recodes,
+        or sound audio bytes). Used by the editor's lazy loading system.
+        """
+        try:
+            # Extract character ID from URL
+            char_id_str = self.path.rsplit('/', 1)[-1]
+            char_id = int(char_id_str)
+
+            with self._pending_swf_lock:
+                swf_data = Next2FlashHandler._pending_swf_data
+                builder = Next2FlashHandler._pending_builder
+
+            if not swf_data:
+                return self._error_response(400, "No pending SWF data")
+
+            mod = _get_swf_to_n2d()
+
+            # Re-use cached builder or create and cache one
+            if builder is None:
+                header, tags = mod.parse_swf(swf_data)
+                builder = mod.N2DBuilder(header, name=Next2FlashHandler._pending_swf_name or 'lazy')
+                builder.catalog_swf_tags(tags)
+                with self._pending_swf_lock:
+                    Next2FlashHandler._pending_builder = builder
+
+            char_type = builder.char_types.get(char_id)
+            if not char_type:
+                return self._error_response(404, f"Character {char_id} not found")
+
+            result = {'type': char_type}
+
+            if char_type == 'bitmap':
+                if char_id in builder.raw_tag_data:
+                    tag_type, body = builder.raw_tag_data[char_id]
+                    width, height = builder.bitmap_dims.get(char_id, (0, 0))
+                    rgba = b''
+                    TAG_DEFINE_BITS_LOSSLESS = 20
+                    TAG_DEFINE_BITS_LOSSLESS2 = 36
+                    TAG_DEFINE_BITS = 6
+                    TAG_DEFINE_BITS_JPEG2 = 21
+                    TAG_DEFINE_BITS_JPEG3 = 35
+                    TAG_DEFINE_BITS_JPEG4 = 90
+                    if tag_type in (TAG_DEFINE_BITS_LOSSLESS, TAG_DEFINE_BITS_LOSSLESS2):
+                        dw, dh, rgba = mod.decode_lossless_to_rgba(tag_type, body)
+                        if dw and dh:
+                            width, height = dw, dh
+                    elif tag_type in (TAG_DEFINE_BITS, TAG_DEFINE_BITS_JPEG2,
+                                      TAG_DEFINE_BITS_JPEG3, TAG_DEFINE_BITS_JPEG4):
+                        dw, dh, rgba = mod.decode_jpeg_to_rgba(tag_type, b'\x00\x00' + body)
+                        if dw and dh:
+                            width, height = dw, dh
+                    if rgba:
+                        _MAX_TEX = 4096
+                        if width > _MAX_TEX or height > _MAX_TEX:
+                            from PIL import Image as _PilImage
+                            scale = min(_MAX_TEX / width, _MAX_TEX / height)
+                            new_w = max(1, int(width * scale))
+                            new_h = max(1, int(height * scale))
+                            img = _PilImage.frombytes('RGBA', (width, height), rgba)
+                            img = img.resize((new_w, new_h), _PilImage.LANCZOS)
+                            rgba = img.tobytes()
+                            width, height = new_w, new_h
+                        result['buffer'] = base64.b64encode(rgba).decode('ascii')
+                    result['width'] = width
+                    result['height'] = height
+
+            elif char_type == 'shape':
+                if char_id in builder.raw_tag_data:
+                    tag_type, body = builder.raw_tag_data[char_id]
+                    from swf_shape_to_recodes import parse_define_shape_to_recodes
+                    # Build bitmap_id_map for shape parsing
+                    bitmap_id_map = {}
+                    for cid in builder.char_types:
+                        if builder.char_types[cid] == 'bitmap':
+                            bitmap_id_map[cid] = builder.swf_to_n2d.get(cid, 0)
+                    try:
+                        recodes, parsed_bounds, has_bitmap_fill = \
+                            parse_define_shape_to_recodes(tag_type, bytes(body), bitmap_id_map)
+                        if recodes and isinstance(recodes[-1], bool):
+                            recodes.pop()
+                        result['recodes'] = recodes
+                        if parsed_bounds:
+                            result['bounds'] = parsed_bounds
+                        result['inBitmap'] = has_bitmap_fill
+
+                        # If shape uses a bitmap fill, include that bitmap's data
+                        if has_bitmap_fill:
+                            for cid, n2d_id in bitmap_id_map.items():
+                                # Check if this bitmap is referenced in recodes
+                                if n2d_id in recodes and cid in builder.raw_tag_data:
+                                    result['bitmapId'] = n2d_id
+                                    bt, bb = builder.raw_tag_data[cid]
+                                    bw, bh = builder.bitmap_dims.get(cid, (0, 0))
+                                    brgba = b''
+                                    if bt in (20, 36):
+                                        dw, dh, brgba = mod.decode_lossless_to_rgba(bt, bb)
+                                        if dw and dh: bw, bh = dw, dh
+                                    elif bt in (6, 21, 35, 90):
+                                        dw, dh, brgba = mod.decode_jpeg_to_rgba(bt, b'\x00\x00' + bb)
+                                        if dw and dh: bw, bh = dw, dh
+                                    if brgba:
+                                        result['bitmapData'] = {
+                                            'type': 'bitmap',
+                                            'buffer': base64.b64encode(brgba).decode('ascii'),
+                                            'width': bw, 'height': bh
+                                        }
+                                    break
+                    except Exception as e:
+                        log.warning('lazy asset shape %d parse failed: %s', char_id, e)
+                        result['recodes'] = []
+
+            elif char_type == 'sound':
+                if char_id in builder.raw_tag_data:
+                    tag_type, body = builder.raw_tag_data[char_id]
+                    fmt_name, audio_bytes, swf_rate = mod.extract_sound_buffer(body)
+                    if fmt_name == 'nellymoser' and audio_bytes:
+                        try:
+                            mp3 = mod.convert_nellymoser_to_mp3(audio_bytes, swf_rate)
+                            if mp3:
+                                audio_bytes = mp3
+                        except Exception:
+                            pass
+                    if audio_bytes:
+                        result['buffer'] = base64.b64encode(
+                            audio_bytes if isinstance(audio_bytes, (bytes, bytearray))
+                            else bytes(audio_bytes)
+                        ).decode('ascii')
+
+            self._json_response(result)
+
+        except ValueError:
+            self._error_response(400, "Invalid character ID")
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_lazy_asset: failed: %s', e)
+            self._error_response(500, f"Lazy asset decode failed: {e}")
+
+    def _handle_autoload(self):
+        """GET /api/autoload — Return pre-loaded N2D data if --load was used."""
+        blob = Next2FlashHandler._autoload_blob
+        if not blob:
+            self._json_response({"available": False})
+            return
+        name = Next2FlashHandler._autoload_name or "autoload"
+        self.send_response(200)
+        self._cors_headers()
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", f'attachment; filename="{name}.n2d"')
+        self.send_header("X-N2D-Name", name)
+        self.send_header("X-N2D-Libraries", str(Next2FlashHandler._autoload_libs))
+        self.send_header("X-N2D-Scripts", str(Next2FlashHandler._autoload_scripts))
+        self.send_header("Content-Length", str(len(blob)))
+        self.end_headers()
+        self.wfile.write(blob)
 
     def _handle_open_project(self):
         """POST /api/open-project — Open an .n2d file.
@@ -1108,6 +1465,7 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose debug logging")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress debug logging (WARNING+ only)")
+    parser.add_argument("--load", metavar="FILE", help="Auto-load an SWF or N2D file on startup (browser will open and import it)")
     args = parser.parse_args()
 
     # ── Configure logging so log.debug() etc. actually print to terminal ──
@@ -1160,7 +1518,59 @@ def main():
     print(f"    POST /api/decompile-abc - Decompile ABC bytecode")
     print(f"    GET  /api/health        - Health check")
     print(f"    GET  /api/capabilities  - Available features")
+    print(f"    GET  /api/autoload      - Auto-load file (--load)")
     print()
+
+    # ── Pre-load file if --load specified ──
+    if args.load:
+        load_path = os.path.abspath(args.load)
+        if not os.path.isfile(load_path):
+            print(f"  Error: --load file not found: {load_path}")
+            return 1
+        ext = os.path.splitext(load_path)[1].lower()
+        name = os.path.splitext(os.path.basename(load_path))[0]
+        print(f"  Auto-loading: {load_path}")
+        try:
+            with open(load_path, 'rb') as f:
+                file_data = f.read()
+            if ext == '.swf':
+                mod = _get_swf_to_n2d()
+                header, tags = mod.parse_swf(file_data)
+                builder = mod.N2DBuilder(header, name=name)
+                builder.catalog_swf_tags(tags)
+                scripts, frame_scripts = mod.decompile_all_scripts(builder.global_raw_tags)
+                builder.frame_scripts = frame_scripts
+                if scripts:
+                    builder.scripts.extend(scripts)
+                builder.build_skeleton(tags)
+                builder.build_main_timeline(tags)
+                n2d_json = builder.to_n2d_json()
+                project_dir = os.path.join(SERVER_DIR, "converted", name)
+                mod.save_project_folder(n2d_json, project_dir)
+                Next2FlashHandler._pending_swf_data = file_data
+                Next2FlashHandler._pending_swf_name = name
+                Next2FlashHandler._pending_builder = builder
+                Next2FlashHandler._current_project_dir = project_dir
+                json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
+                url_encoded = json_str.replace('%', '%25')
+                compressed = zlib.compress(url_encoded.encode("ascii"), 1)
+                Next2FlashHandler._autoload_blob = compressed
+                Next2FlashHandler._autoload_name = name
+                Next2FlashHandler._autoload_libs = len(n2d_json.get("libraries", []))
+                Next2FlashHandler._autoload_scripts = len(n2d_json.get("scripts", []))
+                print(f"  Pre-loaded SWF: {name} ({len(n2d_json.get('libraries', []))} libraries)")
+            elif ext == '.n2d':
+                Next2FlashHandler._autoload_blob = file_data
+                Next2FlashHandler._autoload_name = name
+                print(f"  Pre-loaded N2D: {name} ({len(file_data):,} bytes)")
+            else:
+                print(f"  Error: --load only supports .swf and .n2d files")
+                return 1
+        except Exception as e:
+            print(f"  Error pre-loading {load_path}: {e}")
+            traceback.print_exc()
+            return 1
+
     print(f"  Press Ctrl+C to stop.")
     print()
 

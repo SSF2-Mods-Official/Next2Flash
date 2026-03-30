@@ -51,6 +51,8 @@
         if (online) {
           injectUI();
           _log.info('Server connected — SWF conversion available');
+          // Check for auto-load file (--load CLI flag)
+          _checkAutoload();
         } else if (++attempts < maxAttempts) {
           _log.debug('Server not ready, retrying in', delay, 'ms... (' + attempts + '/' + maxAttempts + ')');
           setTimeout(tryConnect, delay);
@@ -159,7 +161,61 @@
     _log.info('SWF file selected:', file.name, formatBytes(file.size));
     e.target.value = '';  // reset for re-selecting same file
 
-    showProgress('Importing SWF into project folder...\n' + file.name + ' (' + formatBytes(file.size) + ')');
+    showProgress('Importing SWF...\n' + file.name + ' (' + formatBytes(file.size) + ')');
+
+    var form = new FormData();
+    form.append('file', file);
+
+    // Seamless priority import: main-timeline assets fully decoded,
+    // project folder created, no re-load needed.
+    fetch(API_BASE + '/api/swf-to-project-fast', { method: 'POST', body: form })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
+        var name = r.headers.get('X-N2D-Name') || file.name.replace('.swf', '');
+        var libs = r.headers.get('X-N2D-Libraries') || '?';
+        var scripts = r.headers.get('X-N2D-Scripts') || '0';
+        var projDir = r.headers.get('X-Project-Dir') || '';
+        return r.blob().then(function (blob) {
+          return { blob: blob, name: name, libs: libs, scripts: scripts, projDir: projDir };
+        });
+      })
+      .then(function (result) {
+        hideProgress();
+
+        // Set project directory for refresh/export
+        _currentProjectDir = result.projDir;
+        _log.info('Project created at:', _currentProjectDir);
+
+        var refreshBtn = document.getElementById('n2f-refresh-assets');
+        if (refreshBtn) refreshBtn.disabled = false;
+
+        // Configure lazy loading URL so the editor can fetch assets on-demand
+        window.__N2F_LAZY_BASE_URL__ = API_BASE;
+
+        // Store blob and feed to tool — done in one step, no re-load
+        _importedN2DBlob = result.blob.slice(0);
+        _saveImportedBlobToIDB(_importedN2DBlob);
+        _feedN2DToTool(result.blob, result.name);
+
+        // Kick off background sweep of all lazy assets after the tool has
+        // had time to process the N2D file and populate libraries.
+        _scheduleLazySweep();
+
+        toast('Project loaded: ' + result.name + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)\nFolder: ' + _currentProjectDir);
+      })
+      .catch(function (err) {
+        hideProgress();
+        _log.error('SWF import failed, trying full import:', err.message);
+        // Fallback to original full import endpoint
+        _fallbackFullImport(file);
+      });
+  }
+
+  /**
+   * Fallback: use the original full swf-to-project endpoint.
+   */
+  function _fallbackFullImport(file) {
+    showProgress('Importing SWF (full mode)...\n' + file.name + ' (' + formatBytes(file.size) + ')');
 
     var form = new FormData();
     form.append('file', file);
@@ -180,11 +236,9 @@
         _currentProjectDir = result.projDir;
         _log.info('Project created at:', _currentProjectDir);
 
-        // Enable refresh button
         var refreshBtn = document.getElementById('n2f-refresh-assets');
         if (refreshBtn) refreshBtn.disabled = false;
 
-        // Store and load into tool
         _importedN2DBlob = result.blob.slice(0);
         _saveImportedBlobToIDB(_importedN2DBlob);
 
@@ -320,6 +374,63 @@
         toast('Refreshed: ' + result.name + ' (' + result.libs + ' libraries)');
       });
     });
+  }
+
+  /* ================================================================== */
+  /*  Helper: Check for auto-load file (--load CLI)                      */
+  /* ================================================================== */
+  function _checkAutoload() {
+    // Wait a bit for the tool UI to be ready before auto-loading
+    setTimeout(function () {
+      fetch(API_BASE + '/api/autoload', { method: 'GET' })
+        .then(function (r) {
+          if (!r.ok) return null;
+          var ct = r.headers.get('Content-Type') || '';
+          if (ct.indexOf('octet-stream') === -1) {
+            // JSON response means no file available
+            return null;
+          }
+          var name = r.headers.get('X-N2D-Name') || 'autoload';
+          var libs = r.headers.get('X-N2D-Libraries') || '?';
+          var scripts = r.headers.get('X-N2D-Scripts') || '0';
+          return r.blob().then(function (blob) {
+            return { blob: blob, name: name, libs: libs, scripts: scripts };
+          });
+        })
+        .then(function (result) {
+          if (!result) return;
+          console.log('[N2F] Auto-loading: ' + result.name + ' (' + result.libs + ' libraries)');
+          window.__N2F_LAZY_BASE_URL__ = API_BASE;
+          _importedN2DBlob = result.blob.slice(0);
+          _saveImportedBlobToIDB(_importedN2DBlob);
+          _feedN2DToTool(result.blob, result.name);
+          _scheduleLazySweep();
+          toast('Auto-loaded: ' + result.name + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)');
+        })
+        .catch(function (err) {
+          console.warn('[N2F] Autoload check failed:', err);
+        });
+    }, 1500); // Give the editor time to initialize
+  }
+
+  /* ================================================================== */
+  /*  Helper: Schedule lazy sweep after project loads                    */
+  /* ================================================================== */
+  function _scheduleLazySweep() {
+    // The tool processes the N2D async after the change event. Poll until
+    // the workspace libraries exist, then trigger the sweep.
+    var attempts = 0;
+    var timer = setInterval(function () {
+      attempts++;
+      if (typeof window.__N2F_LAZY_FETCH_ALL__ === 'function') {
+        window.__N2F_LAZY_FETCH_ALL__();
+        clearInterval(timer);
+        _log.info('Lazy sweep started (' + attempts + ' poll(s))');
+      } else if (attempts > 30) {  // 3 seconds max
+        clearInterval(timer);
+        _log.warn('Lazy sweep: __N2F_LAZY_FETCH_ALL__ never appeared');
+      }
+    }, 100);
   }
 
   /* ================================================================== */

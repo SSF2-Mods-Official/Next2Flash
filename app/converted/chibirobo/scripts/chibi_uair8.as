@@ -1,0 +1,15 @@
+package
+{
+    import flash.display.BitmapData;
+
+    public dynamic class chibi_uair8 extends BitmapData
+    {
+
+        public function chibi_uair8(_arg_1:int=20, _arg_2:int=2)
+        {
+            super(_arg_1, _arg_2);
+        }
+
+    }
+}
+

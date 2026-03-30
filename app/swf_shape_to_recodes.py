@@ -640,10 +640,11 @@ def _emit_fill(recodes, obj, bmap):
     if fst in (64, 65, 66, 67):
         bmp_id = bmap.get(obj.get('bitmapId', 0), 0)
         mtx = obj.get('bitmapMatrix', [1, 0, 0, 1, 0, 0])
-        # Scale the non-translate part by 1/20 (twips → pixels)
+        # Scale ALL matrix components by 1/20 (twips → pixels)
+        # Including translation components (mtx[4], mtx[5])
         smtx = [mtx[0] * 0.05, mtx[1] * 0.05,
                 mtx[2] * 0.05, mtx[3] * 0.05,
-                mtx[4], mtx[5]]
+                mtx[4] * 0.05, mtx[5] * 0.05]
         repeat = 'repeat' if fst in (64, 66) else 'no-repeat'
         smooth = fst in (64, 65)
         recodes.extend([BITMAP_FILL, bmp_id, smtx, repeat, smooth])
@@ -694,9 +695,10 @@ def _emit_stroke(recodes, obj, bmap):
     if fst in (64, 65, 66, 67):
         bmp_id = bmap.get(inner.get('bitmapId', 0), 0)
         mtx = inner.get('bitmapMatrix', [1, 0, 0, 1, 0, 0])
+        # Scale ALL matrix components by 1/20 (twips → pixels)
         smtx = [mtx[0] * 0.05, mtx[1] * 0.05,
                 mtx[2] * 0.05, mtx[3] * 0.05,
-                mtx[4], mtx[5]]
+                mtx[4] * 0.05, mtx[5] * 0.05]
         repeat = 'repeat' if fst in (64, 66) else 'no-repeat'
         smooth = fst in (64, 65)
         recodes.extend([BITMAP_STROKE, width, cap, join, miter,

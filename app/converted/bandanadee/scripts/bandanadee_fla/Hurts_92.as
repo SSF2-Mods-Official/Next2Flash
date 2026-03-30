@@ -1,0 +1,189 @@
+package bandanadee_fla
+{
+    import flash.display.MovieClip;
+
+    public dynamic class Hurts_92 extends MovieClip
+    {
+
+        public var hitBox:MovieClip;
+        public var hitBox2:MovieClip;
+        public var hitBox3:MovieClip;
+        public var itemBox:MovieClip;
+        public var self:BandanaDeeExt;
+        public var xframe:String;
+
+        public function Hurts_92()
+        {
+            super();
+            addFrameScript(0, this.frame1, 8, this.frame9, 9, this.frame10, 10, this.frame11, 18, this.frame19, 19, this.frame20, 20, this.frame21, 28, this.frame29, 29, this.frame30, 30, this.frame31, 38, this.frame39, 39, this.frame40, 40, this.frame41, 48, this.frame49, 49, this.frame50, 50, this.frame51, 58, this.frame59, 59, this.frame60, 60, this.frame61, 69, this.frame70, 78, this.frame79, 79, this.frame80, 80, this.frame81, 86, this.frame87, 88, this.frame89, 89, this.frame90, 90, this.frame91, 98, this.frame99, 99, this.frame100);
+        }
+
+        internal function frame1():*
+        {
+            this.self = (SSF2API.getCharacter(this) as BandanaDeeExt);
+            this.xframe = "hurt1";
+        }
+
+        internal function frame9():*
+        {
+            this.xframe = "done1";
+            stop();
+        }
+
+        internal function frame10():*
+        {
+            this.self.stancePlayFrame("done1");
+        }
+
+        internal function frame11():*
+        {
+            this.xframe = "hurt2";
+        }
+
+        internal function frame19():*
+        {
+            this.xframe = "done2";
+            stop();
+        }
+
+        internal function frame20():*
+        {
+            this.self.stancePlayFrame("done2");
+        }
+
+        internal function frame21():*
+        {
+            this.xframe = "hurt3";
+        }
+
+        internal function frame29():*
+        {
+            this.xframe = "done3";
+            stop();
+        }
+
+        internal function frame30():*
+        {
+            this.self.stancePlayFrame("done3");
+        }
+
+        internal function frame31():*
+        {
+            this.xframe = "hurt4";
+        }
+
+        internal function frame39():*
+        {
+            this.xframe = "done4";
+            stop();
+        }
+
+        internal function frame40():*
+        {
+            this.self.stancePlayFrame("done4");
+        }
+
+        internal function frame41():*
+        {
+            this.xframe = "hurt5";
+        }
+
+        internal function frame49():*
+        {
+            this.xframe = "done5";
+            stop();
+        }
+
+        internal function frame50():*
+        {
+            this.self.stancePlayFrame("done5");
+        }
+
+        internal function frame51():*
+        {
+            this.xframe = "downed";
+        }
+
+        internal function frame59():*
+        {
+            this.xframe = "downed";
+            stop();
+        }
+
+        internal function frame60():*
+        {
+            this.self.stancePlayFrame("downed");
+        }
+
+        internal function frame61():*
+        {
+            this.xframe = "shock";
+            stop();
+        }
+
+        internal function frame70():*
+        {
+            this.self.stancePlayFrame("shock");
+        }
+
+        internal function frame79():*
+        {
+            this.xframe = "ball";
+            stop();
+        }
+
+        internal function frame80():*
+        {
+            this.self.stancePlayFrame("ball");
+        }
+
+        internal function frame81():*
+        {
+            this.xframe = "faint";
+        }
+
+        internal function frame87():*
+        {
+            SSF2API.getCamera().shake(2);
+            this.self.attachEffect("effect_land");
+            if (this.self.getMetalStatus())
+            {
+                this.self.playSound("metal_land_s");
+            }
+            else
+            {
+                this.self.playSound("bandanadee_land1");
+            };
+        }
+
+        internal function frame89():*
+        {
+            this.xframe = "faintDone";
+            stop();
+        }
+
+        internal function frame90():*
+        {
+            this.self.stancePlayFrame("faintDone");
+        }
+
+        internal function frame91():*
+        {
+            this.xframe = "spin";
+        }
+
+        internal function frame99():*
+        {
+            this.xframe = "spin";
+            stop();
+        }
+
+        internal function frame100():*
+        {
+            this.self.stancePlayFrame("spin");
+        }
+
+
+    }
+}
+

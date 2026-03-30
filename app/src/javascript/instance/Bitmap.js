@@ -28,6 +28,7 @@ class Bitmap extends Instance
 
         this._$graphicBuffer = null;
         this._$binary        = "";
+        this._$lazyFetching  = false;
     }
 
     /**
@@ -273,15 +274,76 @@ class Bitmap extends Instance
      */
     createInstance ()
     {
-        const { Shape, BitmapData } = window.next2d.display;
+        const { Shape, BitmapData, Graphics } = window.next2d.display;
         const { width, height } = this;
 
         const shape = new Shape();
         shape._$loaderInfo  = Util.$loaderInfo;
         shape._$characterId = this.id;
 
+        // Lazy: no buffer yet — show placeholder and trigger fetch
+        if (!this._$buffer && this._$lazy && this._$swfCharId) {
+            if (Instance._$lazyDebug && !this._$lazyFetching) {
+                console.log('[LAZY] Bitmap.createInstance LAZY path: id=' + this.id + ', charId=' + this._$swfCharId + ', w=' + width + ', h=' + height);
+            }
+            const graphics = shape.graphics;
+            graphics._$maxAlpha = 1;
+            graphics._$canDraw  = true;
+            graphics._$xMin     = 0;
+            graphics._$xMax     = width;
+            graphics._$yMin     = 0;
+            graphics._$yMax     = height;
+            // Gray placeholder rectangle
+            graphics.beginFill(0xCCCCCC, 0.5);
+            graphics.drawRect(0, 0, width, height);
+            graphics.endFill();
+            this._$graphicBuffer = null;
+            graphics._$buffer = graphics._$getRecodes();
+
+            // Kick off lazy fetch (once)
+            if (!this._$lazyFetching) {
+                this._$lazyFetching = true;
+                const self = this;
+                Instance._$lazyFetch(this).then(function () {
+                    self._$lazyFetching = false;
+                    self._$graphicBuffer = null;
+                    Instance._$lazyRedraw();
+                });
+            }
+            return shape;
+        }
+
+        // Normal path: buffer is available
+        if (Instance._$lazyDebug && this._$swfCharId && Instance._$lazyStats.applied <= 5) {
+            console.log('[LAZY] Bitmap.createInstance NORMAL path: id=' + this.id
+                + ', charId=' + this._$swfCharId
+                + ', w=' + width + ', h=' + height
+                + ', bufLen=' + (this._$buffer ? this._$buffer.length : 'none')
+                + ', hasCanvas=' + !!this._$canvas);
+        }
+        if (!this._$buffer) {
+            this._$buffer = new Uint8Array(width * height * 4);
+        }
+
         const bitmapData = new BitmapData(width, height, true, 0);
-        bitmapData._$buffer = this._$buffer;
+        
+        // Use canvas if available (from lazy loading), otherwise use buffer
+        // Use PUBLIC API (canvas/buffer without _$) to properly trigger setters
+        // Set BOTH canvas and buffer when canvas is available for proper rendering
+        if (this._$canvas) {
+            bitmapData.canvas = this._$canvas;
+            if (this._$buffer) {
+                bitmapData.buffer = this._$buffer;
+            }
+            if (Instance._$lazyDebug) {
+                console.log('[LAZY] Bitmap using canvas+buffer via public API: id=' + this.id + ', hasBuffer=' + !!this._$buffer);
+            }
+        } else {
+            bitmapData.buffer = this._$buffer;
+            if (Instance._$lazyDebug) {
+                console.log('[LAZY] Bitmap using buffer via public API: id=' + this.id);
+            }
+        }
 
         const graphics = shape.graphics;
 

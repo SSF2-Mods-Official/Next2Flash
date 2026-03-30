@@ -19,6 +19,7 @@ module.exports = function(config)
             "src/languages/src/*.js",
             "src/javascript/Util.replaced.js",
             "src/javascript/GlobalKeyboardCommand.js",
+            "src/javascript/utils/CanvasValidator.js",
             "src/javascript/encoder/*.js",
             "src/javascript/instance/Instance.js",
             "src/javascript/instance/*.js",
@@ -44,6 +45,7 @@ module.exports = function(config)
 
         // list of files / patterns to exclude
         "exclude": [
+            "test/test_lazy_bitmap_runner.js"
         ],
 
         // preprocess matching files before serving them to the browser

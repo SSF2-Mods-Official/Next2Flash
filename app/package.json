@@ -36,5 +36,8 @@
     "karma-jasmine": "^5.1.0",
     "karma-spec-reporter": "^0.0.34",
     "minimist": "^1.2.6"
+  },
+  "dependencies": {
+    "puppeteer": "^24.40.0"
   }
 }

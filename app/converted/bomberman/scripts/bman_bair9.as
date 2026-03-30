@@ -1,0 +1,15 @@
+package
+{
+    import flash.display.BitmapData;
+
+    public dynamic class bman_bair9 extends BitmapData
+    {
+
+        public function bman_bair9(_arg_1:int=89, _arg_2:int=74)
+        {
+            super(_arg_1, _arg_2);
+        }
+
+    }
+}
+
