@@ -33,11 +33,12 @@ from urllib.parse import unquote
 
 log = logging.getLogger(__name__)
 
+from swf_binary_io import BitWriter
+from swf_constants import (
+    SWFTag, TAG_DEFINE_SHAPE3, TAG_DO_ABC, TAG_DEFINE_SOUND
+)
 from swf_writer import (
     NEXT2D_BLEND_MAP,
-    BitWriter,
-    TAG_DEFINE_SHAPE3,
-    TAG_DO_ABC,
     _nbits_signed_list,
     build_define_sprite,
     build_file_attributes,
@@ -65,9 +66,6 @@ from shape_converter import (
     parse_next2d_shape_buffer,
 )
 from text_converter import build_define_edit_text
-
-# SWF tag IDs not imported above
-TAG_DEFINE_SOUND = 14
 
 
 def _decode_raw_body(s: str) -> bytes:
@@ -2371,170 +2369,28 @@ class N2DCompiler:
         return cid
 
     def compile(self):
-        log.info('compile: starting compilation of %s', self.n2d_path)
-        t0 = time.time()
+        """
+        Compile N2D to SWF using the pipeline architecture.
 
-        # ── Load ──
-        print(f"Loading: {self.n2d_path}")
-        self.data, self._project_dir = load_n2d(self.n2d_path)
-        if self._project_dir:
-            print(f"  Project folder mode: {self._project_dir}")
+        This method now delegates all work to the CompilationPipeline,
+        which breaks the monolithic compilation process into discrete,
+        testable stages.
+        """
+        from compilation_pipeline import create_default_pipeline, CompilationContext
 
-        self.stage = self.data.get("stage", {})
-        self.libs = self.data.get("libraries", [])
-        self.id_to_lib = {lib["id"]: lib for lib in self.libs}
-        print(f"  {len(self.libs)} libraries loaded")
+        log.info('compile: starting compilation of %s (pipeline mode)', self.n2d_path)
 
-        # ── Assign IDs ──
-        self._assign_ids()
+        # Create compilation context
+        ctx = CompilationContext(
+            n2d_path=self.n2d_path,
+            shared_dir=self.shared_dir,
+            output_path=self.output_path,
+            sdk_path=self.sdk_path
+        )
 
-        # ── Build set of bitmap SWF char IDs (for PO3 has_image flag) ──
-        self._bitmap_char_ids: Set[int] = set()
-        for lib in self.libs:
-            if lib["type"] == "bitmap" and lib["id"] in self._lib_to_swf_id:
-                self._bitmap_char_ids.add(self._lib_to_swf_id[lib["id"]])
-
-        # ── Parse raw global tags early (font aux needed during emission) ──
-        raw_global = self.data.get("rawGlobalTags", [])
-        raw_doabc_tags = bytearray()
-        raw_aux_tags = bytearray()       # header-level aux (Protect, SceneLabel, SndStreamHd)
-        raw_aux_map: Dict[int, bytes] = {}  # tag_type → raw body (for SymbolClass etc.)
-        # Font/text auxiliary tags keyed by the charId they reference.
-        # They must appear right after their referenced definition in the
-        # tag stream (matching the original SWF structure).
-        self._font_aux_tags: Dict[int, List[Tuple[int, bytes]]] = {}
-        for rgt in raw_global:
-            tag_type = rgt["tagType"]
-            body = _decode_raw_body(rgt["body"])
-            if tag_type in (72, 82):  # DoABC, DoABC2
-                raw_doabc_tags.extend(build_tag(tag_type, body))
-            elif tag_type == 76:  # SymbolClass — store raw body for passthrough
-                raw_aux_map[76] = body
-            elif tag_type in (73, 74, 88):  # FontAlignZones, CSMTextSettings, FontName
-                # These reference font/text char IDs by the first UI16 in the body.
-                # The ref_cid is the ORIGINAL SWF char ID.  We need to map:
-                #   original charID → lib_id (via swfCharId) → new SWF ID.
-                ref_cid = struct.unpack_from('<H', body, 0)[0] if len(body) >= 2 else 0
-                # Build reverse map: original swfCharId → lib_id
-                target_lib_id = None
-                for lib in self.libs:
-                    if lib.get('swfCharId') == ref_cid:
-                        target_lib_id = lib['id']
-                        break
-                new_swf_id = self._lib_to_swf_id.get(target_lib_id) if target_lib_id is not None else None
-                if new_swf_id is not None and len(body) >= 2:
-                    body = struct.pack('<H', new_swf_id) + body[2:]
-                    self._font_aux_tags.setdefault(new_swf_id, []).append((tag_type, body))
-                else:
-                    log.warning('Font aux tag %d references unknown charId %d — skipped', tag_type, ref_cid)
-            elif tag_type in (24, 45, 86):  # Protect, SoundStreamHead2, SceneAndFrameLabel
-                raw_aux_tags.extend(build_tag(tag_type, body, force_long=(tag_type == 86)))
-
-        # Also load font aux tags from library entries (fontAuxTags field),
-        # which persist without the sidecar / rawGlobalTags.
-        # These are keyed by the original SWF charId in their body;
-        # we'll re-key by the *new* SWF ID during emission.
-        for lib in self.libs:
-            if not lib.get("fontAuxTags"):
-                continue
-            # Map from original char ID (in aux body) to the new SWF ID
-            lib_id = lib["id"]
-            new_swf_id = self._lib_to_swf_id.get(lib_id)
-            if new_swf_id is None:
-                continue
-            for fat in lib["fontAuxTags"]:
-                tag_type = fat["tagType"]
-                body = _decode_raw_body(fat["body"])
-                # Rewrite the first UI16 (char ID reference) to the new SWF ID
-                if len(body) >= 2:
-                    body = struct.pack('<H', new_swf_id) + body[2:]
-                # Only add if not already loaded from rawGlobalTags
-                if new_swf_id not in self._font_aux_tags:
-                    self._font_aux_tags.setdefault(new_swf_id, []).append((tag_type, body))
-
-        # ── Define all assets in dependency order ──
-        print("Defining assets (dependency order)...")
-        self._define_all_assets()
-
-        # ── Build root timeline ──
-        print("Building root timeline...")
-        root_tags = self._build_root_timeline()
-
-        # ── Compile AS3 ──
-        doabc_tags = b""
-        sym_to_class: Dict[str, str] = {}
-        fla_classes: Dict[int, str] = {}
-
-        # raw_global tags were already parsed above (before _define_all_assets).
-
-        # If scripts were edited in the tool, skip raw DoABC passthrough
-        # and recompile from source via mxmlc.
-        scripts_modified = self.data.get('scriptsModified', False)
-        use_raw_doabc = bool(raw_doabc_tags) and not scripts_modified
-
-        if scripts_modified and raw_doabc_tags:
-            print("  Scripts were modified — will recompile from source "
-                  "(ignoring raw DoABC passthrough)")
-
-        if use_raw_doabc:
-            doabc_tags = bytes(raw_doabc_tags)
-            print(f"  Using raw DoABC from original: {len(doabc_tags)} bytes")
-            # Build sym_to_class from actual symbol names (passthrough)
-            for lib in self.libs:
-                sym = lib.get("symbol", "")
-                if sym:
-                    sym_to_class[sym] = sym
-        else:
-            # Derive project name from input filename
-            project_name = os.path.splitext(os.path.basename(self.n2d_path))[0]
-            swc_path = os.path.join(self.shared_dir, "SSF2 API.swc")
-            if self.sdk_path:
-                try:
-                    embedded_scripts = self.data.get('scripts', [])
-                    doabc_tags, sym_to_class, fla_classes = compile_as3(
-                        self.shared_dir, swc_path, self.sdk_path,
-                        self.libs, "Main", project_name,
-                        embedded_scripts=embedded_scripts,
-                    )
-                    print(f"  DoABC: {len(doabc_tags)} bytes")
-                except Exception as e:
-                    print(f"  AS3 compilation failed: {e}", file=sys.stderr)
-                    import traceback
-                    traceback.print_exc()
-                    if raw_doabc_tags:
-                        # Fall back to raw DoABC on compilation failure
-                        doabc_tags = bytes(raw_doabc_tags)
-                        print("  Falling back to raw DoABC from original")
-                        for lib in self.libs:
-                            sym = lib.get("symbol", "")
-                            if sym:
-                                sym_to_class[sym] = sym
-                    else:
-                        print("  Continuing without AS3 bytecode...", file=sys.stderr)
-            else:
-                if scripts_modified:
-                    print("  WARNING: Scripts were modified but no Flex SDK found — "
-                          "using original DoABC (edits will NOT be applied)")
-                    if raw_doabc_tags:
-                        doabc_tags = bytes(raw_doabc_tags)
-                        for lib in self.libs:
-                            sym = lib.get("symbol", "")
-                            if sym:
-                                sym_to_class[sym] = sym
-                else:
-                    print("  WARNING: No Flex SDK found — skipping AS3 compilation")
-
-        # ── Assemble SWF ──
-        print("Assembling SWF...")
-        swf = self._assemble_swf(root_tags, doabc_tags, sym_to_class, fla_classes,
-                                  raw_aux_tags=bytes(raw_aux_tags),
-                                  raw_aux_map=raw_aux_map)
-
-        with open(self.output_path, "wb") as f:
-            f.write(swf)
-
-        elapsed = time.time() - t0
-        print(f"Done! {len(swf):,} bytes -> {self.output_path} ({elapsed:.1f}s)")
+        # Execute pipeline
+        pipeline = create_default_pipeline()
+        pipeline.execute(ctx)
 
     # ── ID assignment ────────────────────────────────────────────────────
 
@@ -2776,19 +2632,19 @@ class N2DCompiler:
     def _emit_bitmap(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_bitmap: lib_id=%d, swf_id=%d', lib['id'], swf_id)
-        # Try external file first (project folder mode)
-        if self._project_dir and lib.get("externalFile"):
-            tag_bytes = _load_external_bitmap(self._project_dir, lib, swf_id)
-            if tag_bytes:
-                self._definition_tags.extend(tag_bytes)
-                return
-        # Raw tag passthrough for 1:1 roundtrip
+        # Raw tag passthrough for 1:1 roundtrip (fastest path)
         if lib.get("rawTagBody"):
             raw_body = _decode_raw_body(lib["rawTagBody"])
             tag_type = lib.get("rawTagType", 36)  # DefineBitsLossless2
             tag_data = struct.pack('<H', swf_id) + raw_body
             self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
             return
+        # Try external file (project folder mode)
+        if self._project_dir and lib.get("externalFile"):
+            tag_bytes = _load_external_bitmap(self._project_dir, lib, swf_id)
+            if tag_bytes:
+                self._definition_tags.extend(tag_bytes)
+                return
         w = lib.get("width", 1)
         h = lib.get("height", 1)
         buf_str = lib.get("buffer", "")

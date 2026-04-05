@@ -1,0 +1,59 @@
+{
+  "name": "next2flash",
+  "version": "1.0.0",
+  "description": "Next2Flash — Desktop SWF authoring tool powered by Electron",
+  "main": "main.js",
+  "author": "Next2Flash",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build-app": "cd ../app && npm run build",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "electron-is-dev": "^2.0.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.next2flash.app",
+    "productName": "Next2Flash",
+    "directories": {
+      "output": "../dist"
+    },
+    "files": [
+      "**/*",
+      "../app/index.html",
+      "../app/assets/**/*",
+      "../app/editor.html"
+    ],
+    "extraResources": [
+      {
+        "from": "../app",
+        "to": "app",
+        "filter": [
+          "**/*.py",
+          "as3_decompiler/**/*",
+          "requirements.txt",
+          "converted/**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": ["nsis", "portable"],
+      "icon": "icons/icon.ico"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "icons/icon.icns"
+    },
+    "linux": {
+      "target": ["AppImage"]
+    }
+  }
+}

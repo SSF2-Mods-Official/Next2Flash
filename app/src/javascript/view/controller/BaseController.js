@@ -315,6 +315,7 @@ class BaseController
     /**
      * @description スクリーンエリアで変更があったElementを再描画
      *              Redraw Element with changes in screen area
+     *              Uses requestAnimationFrame to batch multiple calls per frame
      *
      * @return {void}
      * @method
@@ -322,6 +323,11 @@ class BaseController
      */
     reloadScreen ()
     {
+        // Re-entrancy guard: skip if already inside a changeFrame call
+        if (BaseController._$reloading) {
+            return ;
+        }
+
         const workSpace = Util.$currentWorkSpace();
         if (!workSpace) {
             return ;
@@ -332,7 +338,9 @@ class BaseController
             return ;
         }
 
+        BaseController._$reloading = true;
         scene.changeFrame(Util.$timelineFrame.currentFrame);
+        BaseController._$reloading = false;
     }
 
     /**
@@ -631,3 +639,10 @@ class BaseController
         return this._$name;
     }
 }
+
+/**
+ * @type {boolean}
+ * @static
+ * @private
+ */
+BaseController._$reloading = false;

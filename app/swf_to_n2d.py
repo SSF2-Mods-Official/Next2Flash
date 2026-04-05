@@ -52,6 +52,19 @@ except ImportError:
     _HAS_NUMPY = False
 
 from swf_shape_to_recodes import parse_define_shape_to_recodes, parse_define_morph_shape_to_recodes
+from swf_binary_io import BitReader
+from swf_constants import (
+    SWFTag, TAG_END, TAG_SHOW_FRAME, TAG_DEFINE_SHAPE, TAG_DEFINE_SHAPE2,
+    TAG_DEFINE_SHAPE3, TAG_DEFINE_SHAPE4, TAG_DEFINE_BITS, TAG_DEFINE_BITS_JPEG2,
+    TAG_DEFINE_BITS_JPEG3, TAG_DEFINE_BITS_JPEG4, TAG_DEFINE_BITS_LOSSLESS,
+    TAG_DEFINE_BITS_LOSSLESS2, TAG_DEFINE_SPRITE, TAG_PLACE_OBJECT2,
+    TAG_PLACE_OBJECT3, TAG_REMOVE_OBJECT2, TAG_FRAME_LABEL, TAG_DEFINE_SOUND,
+    TAG_DEFINE_TEXT, TAG_DEFINE_TEXT2, TAG_DEFINE_EDIT_TEXT, TAG_DEFINE_MORPH_SHAPE,
+    TAG_DEFINE_MORPH_SHAPE2, TAG_SYMBOL_CLASS, TAG_DO_ABC, TAG_DO_ABC2,
+    TAG_FILE_ATTRIBUTES, TAG_SET_BACKGROUND_COLOR, TAG_DEFINE_FONT3,
+    TAG_DEFINE_BUTTON2, TAG_START_SOUND, TAG_START_SOUND2
+)
+from cycle_detector import validate_swf_sprites
 
 # AS3 Weaver — pure-Python AVM2/ABC decompiler
 # Locate the as3_decompiler package:
@@ -75,118 +88,6 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════════════
 #  SWF BINARY PARSER
 # ═══════════════════════════════════════════════════════════════════════════
-
-# SWF tag type constants
-TAG_END                     = 0
-TAG_SHOW_FRAME              = 1
-TAG_DEFINE_SHAPE            = 2
-TAG_DEFINE_SHAPE2           = 22
-TAG_DEFINE_SHAPE3           = 32
-TAG_DEFINE_SHAPE4           = 83
-TAG_DEFINE_BITS             = 6
-TAG_DEFINE_BITS_JPEG2       = 21
-TAG_DEFINE_BITS_JPEG3       = 35
-TAG_DEFINE_BITS_JPEG4       = 90
-TAG_DEFINE_BITS_LOSSLESS    = 20
-TAG_DEFINE_BITS_LOSSLESS2   = 36
-TAG_DEFINE_SPRITE           = 39
-TAG_PLACE_OBJECT2           = 26
-TAG_PLACE_OBJECT3           = 70
-TAG_REMOVE_OBJECT2          = 28
-TAG_FRAME_LABEL             = 43
-TAG_DEFINE_SOUND            = 14
-TAG_DEFINE_TEXT              = 11
-TAG_DEFINE_TEXT2             = 33
-TAG_DEFINE_EDIT_TEXT         = 37
-TAG_DEFINE_MORPH_SHAPE      = 46
-TAG_DEFINE_MORPH_SHAPE2     = 84
-TAG_SYMBOL_CLASS            = 76
-TAG_DO_ABC                  = 72
-TAG_DO_ABC2                 = 82
-TAG_FILE_ATTRIBUTES         = 69
-TAG_SET_BACKGROUND_COLOR    = 9
-TAG_DEFINE_FONT3            = 75
-TAG_DEFINE_BUTTON2          = 34
-TAG_START_SOUND             = 15
-TAG_START_SOUND2            = 89
-
-
-class BitReader:
-    """Read individual bits from a byte buffer."""
-
-    def __init__(self, data: bytes, byte_offset: int = 0):
-        self.data = data
-        self.byte_pos = byte_offset
-        self.bit_pos = 0
-
-    @property
-    def pos(self):
-        return self.byte_pos * 8 + self.bit_pos
-
-    def align(self):
-        """Align to next byte boundary."""
-        if self.bit_pos > 0:
-            self.byte_pos += 1
-            self.bit_pos = 0
-
-    def read_ub(self, n: int) -> int:
-        """Read n unsigned bits."""
-        if n == 0:
-            return 0
-        result = 0
-        for _ in range(n):
-            byte_val = self.data[self.byte_pos]
-            bit = (byte_val >> (7 - self.bit_pos)) & 1
-            result = (result << 1) | bit
-            self.bit_pos += 1
-            if self.bit_pos >= 8:
-                self.bit_pos = 0
-                self.byte_pos += 1
-        return result
-
-    def read_sb(self, n: int) -> int:
-        """Read n signed bits (two's complement)."""
-        if n == 0:
-            return 0
-        val = self.read_ub(n)
-        if val & (1 << (n - 1)):  # sign bit set
-            val -= (1 << n)
-        return val
-
-    def read_fb(self, n: int) -> float:
-        """Read n-bit fixed-point 16.16 value."""
-        return self.read_sb(n) / 65536.0
-
-    def read_ui8(self) -> int:
-        self.align()
-        val = self.data[self.byte_pos]
-        self.byte_pos += 1
-        return val
-
-    def read_ui16(self) -> int:
-        self.align()
-        val = struct.unpack_from('<H', self.data, self.byte_pos)[0]
-        self.byte_pos += 2
-        return val
-
-    def read_ui32(self) -> int:
-        self.align()
-        val = struct.unpack_from('<I', self.data, self.byte_pos)[0]
-        self.byte_pos += 4
-        return val
-
-    def read_si16(self) -> int:
-        self.align()
-        val = struct.unpack_from('<h', self.data, self.byte_pos)[0]
-        self.byte_pos += 2
-        return val
-
-    def read_string(self) -> str:
-        self.align()
-        end = self.data.index(0, self.byte_pos)
-        s = self.data[self.byte_pos:end].decode('utf-8', errors='replace')
-        self.byte_pos = end + 1
-        return s
 
 
 def read_rect(br: BitReader) -> dict:
@@ -278,72 +179,134 @@ class SWFTag:
 
 def parse_swf(swf_data: bytes) -> Tuple[dict, List[SWFTag]]:
     """Parse SWF header and all top-level tags.
-    Returns (header_info, [SWFTag, ...])."""
+    Returns (header_info, [SWFTag, ...]).
+    
+    Raises:
+        ValueError: If SWF signature is invalid or data is too short
+        struct.error: If binary data is malformed
+    """
+    # ── M1.3: Input validation ──
+    if not swf_data or len(swf_data) < 8:
+        raise ValueError(f"SWF data too short: {len(swf_data)} bytes (minimum 8 bytes)")
+    
     log.debug('parse_swf: parsing %d bytes', len(swf_data))
+    
+    # ── M1.3: Signature validation ──
     sig = swf_data[0:3]
     if sig not in (b'FWS', b'CWS', b'ZWS'):
-        raise ValueError(f"Not a SWF file (signature: {sig!r})")
+        raise ValueError(f"Not a SWF file (invalid signature: {sig!r}, expected FWS/CWS/ZWS)")
 
     version = swf_data[3]
-    file_length = struct.unpack_from('<I', swf_data, 4)[0]
+    if version < 1 or version > 50:  # Sanity check
+        log.warning(f"Unusual SWF version: {version} (expected 1-50)")
+    
+    try:
+        file_length = struct.unpack_from('<I', swf_data, 4)[0]
+    except struct.error as e:
+        raise ValueError(f"Failed to read SWF file length: {e}")
 
-    # Decompress
-    if sig == b'CWS':
-        body = zlib.decompress(swf_data[8:])
-        data = swf_data[:8] + body
-    elif sig == b'ZWS':
-        import lzma
-        body = lzma.decompress(swf_data[12:])
-        data = swf_data[:8] + body
-    else:
-        data = swf_data
+    # ── M1.3: Decompression with error handling ──
+    try:
+        if sig == b'CWS':
+            if len(swf_data) < 8:
+                raise ValueError("CWS (zlib) SWF too short for header")
+            body = zlib.decompress(swf_data[8:])
+            data = swf_data[:8] + body
+        elif sig == b'ZWS':
+            if len(swf_data) < 12:
+                raise ValueError("ZWS (LZMA) SWF too short for header")
+            import lzma
+            body = lzma.decompress(swf_data[12:])
+            data = swf_data[:8] + body
+        else:
+            data = swf_data
+    except (zlib.error, Exception) as e:
+        raise ValueError(f"Failed to decompress SWF ({sig.decode('latin-1')}): {e}")
 
-    # Parse header RECT
-    br = BitReader(data, 8)
-    rect = read_rect(br)
-    br.align()
+    # ── M1.3: Bounds checking for struct operations ──
+    if len(data) < 16:
+        raise ValueError(f"Decompressed SWF too short: {len(data)} bytes (minimum 16 bytes)")
 
-    # Frame rate + frame count
-    fps_raw = struct.unpack_from('<H', data, br.byte_pos)[0]
-    fps = fps_raw >> 8
-    if fps == 0:
-        fps = fps_raw & 0xFF or 24
-    frame_count = struct.unpack_from('<H', data, br.byte_pos + 2)[0]
+    try:
+        # Parse header RECT
+        br = BitReader(data, 8)
+        rect = read_rect(br)
+        br.align()
 
-    header = {
-        'version': version,
-        'compressed': (sig == b'CWS' or sig == b'ZWS'),
-        'width': max((rect['xMax'] - rect['xMin']) // 20, 1),
-        'height': max((rect['yMax'] - rect['yMin']) // 20, 1),
-        'fps': fps,
-        'frameCount': max(frame_count, 1),
-    }
+        # Frame rate + frame count
+        if br.byte_pos + 4 > len(data):
+            raise ValueError("SWF header incomplete: missing frame rate/count")
+        
+        fps_raw = struct.unpack_from('<H', data, br.byte_pos)[0]
+        fps = fps_raw >> 8
+        if fps == 0:
+            fps = fps_raw & 0xFF or 24
+        frame_count = struct.unpack_from('<H', data, br.byte_pos + 2)[0]
 
-    # Parse tags
-    tag_offset = br.byte_pos + 4
-    tags = parse_tags(data, tag_offset)
+        header = {
+            'version': version,
+            'compressed': (sig == b'CWS' or sig == b'ZWS'),
+            'width': max((rect['xMax'] - rect['xMin']) // 20, 1),
+            'height': max((rect['yMax'] - rect['yMin']) // 20, 1),
+            'fps': fps,
+            'frameCount': max(frame_count, 1),
+        }
 
-    return header, tags
+        # Parse tags
+        tag_offset = br.byte_pos + 4
+        tags = parse_tags(data, tag_offset)
+
+        return header, tags
+    
+    except (IndexError, struct.error) as e:
+        raise ValueError(f"Failed to parse SWF header: {e}")
 
 
 def parse_tags(data: bytes, offset: int) -> List[SWFTag]:
-    """Parse a sequence of SWF tags starting at offset."""
+    """Parse a sequence of SWF tags starting at offset.
+    
+    Gracefully handles malformed tags by stopping at the first error.
+    """
     log.debug('parse_tags: starting at offset %d, data len %d', offset, len(data))
     tags = []
     pos = offset
+    
+    # ── M1.3: Bounds checking in tag parsing loop ──
     while pos < len(data) - 1:
-        tag_code_and_length = struct.unpack_from('<H', data, pos)[0]
-        tag_type = tag_code_and_length >> 6
-        tag_length = tag_code_and_length & 0x3F
-        pos += 2
-        if tag_length == 0x3F:  # long tag
-            tag_length = struct.unpack_from('<I', data, pos)[0]
-            pos += 4
-        tag_data = data[pos:pos + tag_length]
-        tags.append(SWFTag(tag_type, tag_data, pos))
-        pos += tag_length
-        if tag_type == TAG_END:
-            break
+        try:
+            # Need at least 2 bytes for tag code+length
+            if pos + 2 > len(data):
+                log.warning(f"parse_tags: incomplete tag header at offset {pos}")
+                break
+            
+            tag_code_and_length = struct.unpack_from('<H', data, pos)[0]
+            tag_type = tag_code_and_length >> 6
+            tag_length = tag_code_and_length & 0x3F
+            pos += 2
+            
+            if tag_length == 0x3F:  # long tag
+                if pos + 4 > len(data):
+                    log.warning(f"parse_tags: incomplete long tag length at offset {pos}")
+                    break
+                tag_length = struct.unpack_from('<I', data, pos)[0]
+                pos += 4
+            
+            # Bounds check for tag data
+            if pos + tag_length > len(data):
+                log.warning(f"parse_tags: tag {tag_type} claims {tag_length} bytes but only {len(data) - pos} available")
+                tag_length = len(data) - pos  # Clip to available data
+            
+            tag_data = data[pos:pos + tag_length]
+            tags.append(SWFTag(tag_type, tag_data, pos))
+            pos += tag_length
+            
+            if tag_type == TAG_END:
+                break
+        
+        except (struct.error, ValueError) as e:
+            log.error(f"parse_tags: failed to parse tag at offset {pos}: {e}")
+            break  # Stop parsing on error instead of crashing
+    
     return tags
 
 
@@ -3405,6 +3368,14 @@ def main():
     header, tags = parse_swf(swf_data)
     step(f"SWF: {header['width']}x{header['height']} @ {header['fps']}fps, "
          f"{header['frameCount']} frames, {len(tags)} top-level tags")
+
+    # 1a. Validate sprite dependencies (Bug Fix #2: detect circular references)
+    try:
+        validate_swf_sprites(tags)
+        step("Sprite dependency validation passed (no circular references)")
+    except ValueError as e:
+        log.error(f"Sprite validation failed: {e}")
+        raise ValueError(f"Invalid SWF structure: {e}") from e
 
     # 2. Build n2d
     step("Building n2d project...")

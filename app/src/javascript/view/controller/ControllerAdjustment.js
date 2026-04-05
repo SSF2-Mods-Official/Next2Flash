@@ -150,7 +150,7 @@ class ControllerAdjustment
 
             const width = Math.max(
                 ControllerAdjustment.DEFAULT_SIZE,
-                workSpace._$controllerWidth + diff
+                workSpace._$uiState.controllerWidth + diff
             );
 
             document
@@ -161,7 +161,7 @@ class ControllerAdjustment
                     `${width}px`
                 );
 
-            workSpace._$controllerWidth = width;
+            workSpace._$uiState.controllerWidth = width;
 
             this._$pointX = event.screenX;
 

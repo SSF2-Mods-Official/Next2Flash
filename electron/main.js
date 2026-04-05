@@ -1,0 +1,397 @@
+/**
+ * Next2Flash — Electron main process.
+ *
+ * Spawns the Python server.py as a child process, waits for it to be ready,
+ * then opens a BrowserWindow pointing at the local server.  All the existing
+ * web UI + REST API just works — zero porting required.
+ *
+ * Gains over the pure-browser setup:
+ *   • No V8 string-length limits (Python does all heavy serialization)
+ *   • Direct filesystem access via IPC (native Save / Open dialogs)
+ *   • No CORS / upload-size limits
+ *   • Can increase renderer memory with --max-old-space-size
+ */
+
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron');
+const path = require('path');
+const { spawn } = require('child_process');
+const http = require('http');
+const fs = require('fs');
+
+// ── Paths ──────────────────────────────────────────────────────────────────
+const isDev = !app.isPackaged;
+const APP_DIR = isDev
+  ? path.join(__dirname, '..', 'app')
+  : path.join(process.resourcesPath, 'app');
+
+const PYTHON = process.env.N2F_PYTHON || 'python';
+const SERVER_SCRIPT = path.join(APP_DIR, 'server.py');
+const SERVER_PORT = parseInt(process.env.N2F_PORT || '5000', 10);
+const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
+
+let mainWindow = null;
+let profilerWindow = null;
+let pythonProcess = null;
+let profilerLogPath = null;
+let profilerLogStream = null;
+
+// ── Python server management ───────────────────────────────────────────────
+
+function startPythonServer() {
+  return new Promise((resolve, reject) => {
+    console.log(`[N2F] Starting Python server: ${PYTHON} ${SERVER_SCRIPT}`);
+    console.log(`[N2F] APP_DIR = ${APP_DIR}`);
+
+    pythonProcess = spawn(PYTHON, [SERVER_SCRIPT], {
+      cwd: APP_DIR,
+      env: { ...process.env, N2F_PORT: String(SERVER_PORT), N2F_ELECTRON: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    pythonProcess.stdout.on('data', (data) => {
+      process.stdout.write(`[PY] ${data}`);
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      process.stderr.write(`[PY] ${data}`);
+    });
+
+    pythonProcess.on('error', (err) => {
+      console.error('[N2F] Failed to start Python:', err.message);
+      reject(err);
+    });
+
+    pythonProcess.on('exit', (code) => {
+      console.log(`[N2F] Python server exited with code ${code}`);
+      pythonProcess = null;
+    });
+
+    // Poll until the server responds
+    const startTime = Date.now();
+    const TIMEOUT = 15000;
+
+    function poll() {
+      if (Date.now() - startTime > TIMEOUT) {
+        return reject(new Error('Python server did not start within 15 s'));
+      }
+
+      const req = http.get(`${SERVER_URL}/api/health`, (res) => {
+        if (res.statusCode === 200) {
+          console.log('[N2F] Python server ready');
+          resolve();
+        } else {
+          setTimeout(poll, 200);
+        }
+      });
+      req.on('error', () => setTimeout(poll, 200));
+      req.setTimeout(1000, () => { req.destroy(); setTimeout(poll, 200); });
+    }
+
+    // Give the process a moment to start before first poll
+    setTimeout(poll, 500);
+  });
+}
+
+function stopPythonServer() {
+  if (pythonProcess) {
+    console.log('[N2F] Stopping Python server');
+    pythonProcess.kill();
+    pythonProcess = null;
+  }
+}
+
+// ── Window management ──────────────────────────────────────────────────────
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1600,
+    height: 1000,
+    minWidth: 1024,
+    minHeight: 700,
+    title: 'Next2Flash',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+    show: false,
+  });
+
+  mainWindow.loadURL(SERVER_URL);
+
+  // Block ad/analytics requests — they're for the web version, not desktop
+  mainWindow.webContents.session.webRequest.onBeforeRequest(
+    { urls: ['*://pagead2.googlesyndication.com/*', '*://www.googletagmanager.com/*', '*://cdn.ravenjs.com/*'] },
+    (details, callback) => { callback({ cancel: true }); }
+  );
+
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+
+  // Open external links in the OS browser
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http')) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+}
+
+// ── Profiler window ────────────────────────────────────────────────────────
+
+function createProfilerWindow() {
+  if (profilerWindow) {
+    profilerWindow.focus();
+    return;
+  }
+
+  // Set up log file
+  const logsDir = path.join(app.getPath('userData'), 'profiler-logs');
+  if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  profilerLogPath = path.join(logsDir, `profiler-${ts}.log`);
+  profilerLogStream = fs.createWriteStream(profilerLogPath, { flags: 'a' });
+  profilerLogStream.write(`=== N2F Profiler Log — ${new Date().toISOString()} ===\n`);
+
+  profilerWindow = new BrowserWindow({
+    width: 700,
+    height: 600,
+    minWidth: 400,
+    minHeight: 300,
+    title: 'N2F Profiler',
+    webPreferences: {
+      preload: path.join(__dirname, 'profiler-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  profilerWindow.loadFile(path.join(__dirname, 'profiler.html'));
+
+  profilerWindow.on('closed', () => {
+    profilerWindow = null;
+    if (profilerLogStream) {
+      profilerLogStream.end();
+      profilerLogStream = null;
+    }
+  });
+}
+
+function sendProfilerEvent(event) {
+  // Write to log file (skip heartbeats — too noisy)
+  if (profilerLogStream && event.type !== 'heartbeat') {
+    const ts = new Date().toISOString();
+    const ms = event.ms !== undefined ? ` [${event.ms.toFixed(1)}ms]` : '';
+    profilerLogStream.write(`${ts}  ${event.type || 'timer'}  ${event.label || event.name || ''}${ms}\n`);
+  }
+  // Forward to profiler window
+  if (profilerWindow && !profilerWindow.isDestroyed()) {
+    profilerWindow.webContents.send('profiler:event', event);
+  }
+}
+
+// ── Application menu ───────────────────────────────────────────────────────
+
+function buildMenu() {
+  const template = [
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Import SWF...',
+          accelerator: 'CmdOrCtrl+O',
+          click: () => handleImportSWF(),
+        },
+        {
+          label: 'Open Project...',
+          accelerator: 'CmdOrCtrl+Shift+O',
+          click: () => handleOpenProject(),
+        },
+        { type: 'separator' },
+        {
+          label: 'Save Project',
+          accelerator: 'CmdOrCtrl+S',
+          click: () => mainWindow?.webContents.send('menu:save'),
+        },
+        {
+          label: 'Export SWF',
+          accelerator: 'CmdOrCtrl+Shift+E',
+          click: () => mainWindow?.webContents.send('menu:export-swf'),
+        },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Performance Profiler',
+          accelerator: 'CmdOrCtrl+Shift+P',
+          click: () => createProfilerWindow(),
+        },
+        { type: 'separator' },
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { role: 'resetZoom' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'About Next2Flash',
+          click: () => {
+            dialog.showMessageBox(mainWindow, {
+              type: 'info',
+              title: 'About Next2Flash',
+              message: 'Next2Flash v1.0.0',
+              detail: 'Desktop SWF authoring tool.\nPowered by Electron + Next2D + Python.',
+            });
+          },
+        },
+      ],
+    },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+// ── IPC handlers (native dialogs, filesystem) ──────────────────────────────
+
+async function handleImportSWF() {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import SWF File',
+    filters: [{ name: 'SWF Files', extensions: ['swf'] }],
+    properties: ['openFile'],
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    mainWindow.webContents.send('file:import-swf', result.filePaths[0]);
+  }
+}
+
+async function handleOpenProject() {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Open N2D Project',
+    filters: [{ name: 'N2D Files', extensions: ['n2d'] }],
+    properties: ['openFile'],
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    mainWindow.webContents.send('file:open-project', result.filePaths[0]);
+  }
+}
+
+// IPC: native file dialogs for the renderer
+ipcMain.handle('dialog:open-file', async (_event, options) => {
+  return dialog.showOpenDialog(mainWindow, options);
+});
+
+ipcMain.handle('dialog:save-file', async (_event, options) => {
+  return dialog.showSaveDialog(mainWindow, options);
+});
+
+ipcMain.handle('dialog:save-swf', async (_event, defaultName) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export SWF',
+    defaultPath: defaultName || 'output.swf',
+    filters: [{ name: 'SWF Files', extensions: ['swf'] }],
+  });
+  return result.canceled ? null : result.filePath;
+});
+
+ipcMain.handle('dialog:open-swf', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import SWF File',
+    filters: [
+      { name: 'SWF Files', extensions: ['swf', 'ssf'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+    properties: ['openFile'],
+  });
+  return (result.canceled || !result.filePaths.length) ? null : result.filePaths[0];
+});
+
+// IPC: direct filesystem read/write (avoids HTTP upload/download)
+ipcMain.handle('fs:read-file', async (_event, filePath) => {
+  return fs.promises.readFile(filePath);
+});
+
+ipcMain.handle('fs:write-file', async (_event, filePath, data) => {
+  await fs.promises.writeFile(filePath, Buffer.from(data));
+});
+
+ipcMain.handle('fs:exists', async (_event, filePath) => {
+  return fs.existsSync(filePath);
+});
+
+// IPC: profiler events from renderer → profiler window + log file
+ipcMain.on('profiler:send-event', (_event, data) => {
+  sendProfilerEvent(data);
+});
+
+ipcMain.on('profiler:export-log', () => {
+  if (profilerLogPath && fs.existsSync(profilerLogPath)) {
+    shell.showItemInFolder(profilerLogPath);
+  }
+});
+
+// ── App lifecycle ──────────────────────────────────────────────────────────
+
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=8192');
+
+// Set a dedicated userData path so Electron doesn't conflict with other instances
+const userDataPath = path.join(app.getPath('appData'), 'Next2Flash');
+app.setPath('userData', userDataPath);
+
+app.whenReady().then(async () => {
+  try {
+    await startPythonServer();
+  } catch (err) {
+    dialog.showErrorBox(
+      'Failed to start Python server',
+      `${err.message}\n\nMake sure Python 3.10+ is installed and on PATH.\nOr set the N2F_PYTHON environment variable.`
+    );
+    app.quit();
+    return;
+  }
+
+  buildMenu();
+  createWindow();
+  createProfilerWindow();
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+app.on('window-all-closed', () => {
+  stopPythonServer();
+  if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  stopPythonServer();
+});

@@ -35,6 +35,13 @@ class ArrowTool extends BaseTool
         this._$activeElements = [];
 
         /**
+         * @type {number}
+         * @default 0
+         * @private
+         */
+        this._$lastClickTime = 0;
+
+        /**
          * @type {boolean}
          * @default false
          * @private
@@ -96,6 +103,14 @@ class ArrowTool extends BaseTool
         this.addEventListener(EventType.MOUSE_DOWN, (event) =>
         {
             this.active = false;
+
+            // Throttle rapid clicks to prevent stacking heavy render calls
+            const now = performance.now();
+            if (now - this._$lastClickTime < 150) {
+                return ;
+            }
+            this._$lastClickTime = now;
+
             switch (true) {
 
                 case event.displayObject:

@@ -193,7 +193,7 @@ class ScreenRuler extends BaseScreen
                     screen.getElementsByClassName("ruler-border-x")
                 ).indexOf(this._$target);
 
-                workSpace._$rulerX.splice(index, 1);
+                workSpace._$uiState.rulerX.splice(index, 1);
 
             } else {
 
@@ -201,7 +201,7 @@ class ScreenRuler extends BaseScreen
                     screen.getElementsByClassName("ruler-border-y")
                 ).indexOf(this._$target);
 
-                workSpace._$rulerY.splice(index, 1);
+                workSpace._$uiState.rulerY.splice(index, 1);
 
             }
             this._$target.remove();
@@ -247,7 +247,7 @@ class ScreenRuler extends BaseScreen
                 screen.getElementsByClassName("ruler-border-x")
             ).indexOf(target);
 
-            workSpace._$rulerX[index] = Math.ceil(
+            workSpace._$uiState.rulerX[index] = Math.ceil(
                 (target.offsetLeft - Util.$offsetLeft) / Util.$zoomScale
             );
 
@@ -257,7 +257,7 @@ class ScreenRuler extends BaseScreen
                 screen.getElementsByClassName("ruler-border-y")
             ).indexOf(target);
 
-            workSpace._$rulerY[index] = Math.ceil(
+            workSpace._$uiState.rulerY[index] = Math.ceil(
                 (target.offsetTop - Util.$offsetTop) / Util.$zoomScale
             );
         }
@@ -578,9 +578,9 @@ class ScreenRuler extends BaseScreen
         const screen = document.getElementById("screen");
 
         // x座標の線を生成
-        for (let idx = workSpace._$rulerX.length - 1; idx > -1; --idx) {
+        for (let idx = workSpace._$uiState.rulerX.length - 1; idx > -1; --idx) {
 
-            const left = workSpace._$rulerX[idx];
+            const left = workSpace._$uiState.rulerX[idx];
 
             const div = this.createBorderX();
             div.style.left = `${Util.$offsetLeft + left * Util.$zoomScale}px`;
@@ -589,9 +589,9 @@ class ScreenRuler extends BaseScreen
         }
 
         // y座標の線を生成
-        for (let idx = workSpace._$rulerY.length - 1; idx > -1; --idx) {
+        for (let idx = workSpace._$uiState.rulerY.length - 1; idx > -1; --idx) {
 
-            const top = workSpace._$rulerY[idx];
+            const top = workSpace._$uiState.rulerY[idx];
 
             const div = this.createBorderY();
             div.style.top = `${Util.$offsetTop + top * Util.$zoomScale}px`;
@@ -692,7 +692,7 @@ class ScreenRuler extends BaseScreen
 
         // プロジェクト情報として補完
         const workSpace = Util.$currentWorkSpace();
-        workSpace._$ruler = true;
+        workSpace._$uiState.ruler = true;
 
         // 状態を更新
         this._$state = "show";
@@ -716,7 +716,7 @@ class ScreenRuler extends BaseScreen
 
         // プロジェクト情報として補完
         const workSpace = Util.$currentWorkSpace();
-        workSpace._$ruler = false;
+        workSpace._$uiState.ruler = false;
 
         // 初期化
         this.clear();

@@ -628,6 +628,9 @@ class Screen extends BaseScreen
     ) {
 
         const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) {
+            return Promise.resolve();
+        }
         const scene     = parent_scene || workSpace.scene;
 
         const layer = scene.getLayer(layer_id);
@@ -763,10 +766,26 @@ class Screen extends BaseScreen
         const matrix = Util.$sceneChange.concatenatedMatrix;
         const bounds = character.getBounds(matrix, parent_scene ? frame : 0);
 
-        return character
-            .draw(Util.$getCanvas(), frame)
+        let drawPromise;
+        try {
+            drawPromise = character.draw(Util.$getCanvas(), frame);
+        } catch (e) {
+            drawPromise = Promise.reject(e);
+        }
+
+        return drawPromise
+            .catch(() =>
+            {
+                // Suppress drawImage errors from stale character data
+                return null;
+            })
             .then((canvas) =>
             {
+                // Guard: skip if canvas is invalid (e.g. after tab close/reimport)
+                if (!canvas) {
+                    return null;
+                }
+
                 const div = document.createElement("div");
                 if (!parent_scene) {
                     div.setAttribute("class", "display-object");
@@ -1210,18 +1229,20 @@ class Screen extends BaseScreen
             return ;
         }
 
-        let idx = 0;
-        while (stageArea.children.length > idx) {
-
-            const node = stageArea.children[idx];
-
-            // 中心点や回転などのelementは削除しない
+        // Collect non-removable nodes first, then batch replace
+        const keepNodes = [];
+        const children = stageArea.children;
+        for (let idx = children.length - 1; idx >= 0; --idx) {
+            const node = children[idx];
             if (!node.dataset.child) {
-                idx++;
-                continue;
+                keepNodes.push(node);
             }
+        }
 
-            node.remove();
+        // Clear all children at once, then re-add kept nodes
+        stageArea.textContent = "";
+        for (let idx = keepNodes.length - 1; idx >= 0; --idx) {
+            stageArea.appendChild(keepNodes[idx]);
         }
     }
 }

@@ -14,6 +14,7 @@ module.exports = function(config)
 
         // list of files / patterns to load in the browser
         "files": [
+            "test/next2d-mock.js",
             "test/test.html",
             "src/languages/src/Language.js",
             "src/languages/src/*.js",
@@ -27,6 +28,10 @@ module.exports = function(config)
             "src/javascript/filter/*.js",
             "src/javascript/parser/SVGTransformable.js",
             "src/javascript/parser/*.js",
+            "src/javascript/repository/*.js",
+            "src/javascript/command/Command.js",
+            "src/javascript/command/*.js",
+            "src/javascript/model/*.js",
             "src/javascript/WorkSpace.js",
             "src/javascript/event/*.js",
             "src/javascript/view/KeyboardCommand.js",

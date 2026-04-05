@@ -1658,7 +1658,15 @@ class Shape extends Instance
                 const bitmapData = new BitmapData(
                     instance.width, instance.height, true, 0
                 );
-                bitmapData._$buffer = instance._$buffer;
+                if (instance._$buffer) {
+                    bitmapData._$buffer = instance._$buffer;
+                } else {
+                    // Lazy stub: transparent placeholder
+                    const c = document.createElement('canvas');
+                    c.width = instance.width || 1;
+                    c.height = instance.height || 1;
+                    bitmapData.canvas = c;
+                }
 
                 // clone
                 const recodes = this._$recodes;
@@ -1723,6 +1731,69 @@ class Shape extends Instance
         }
 
         if (!this._$graphicBuffer) {
+
+            // Resolve numeric bitmap library IDs to BitmapData objects.
+            // The SWF converter stores bitmap references as library IDs,
+            // but the player's _$getRecodes expects BitmapData instances.
+            if (this._$inBitmap && graphics._$recode) {
+                const { BitmapData } = window.next2d.display;
+                const recode = graphics._$recode;
+                for (let idx = 0; idx < recode.length; idx++) {
+
+                    // BITMAP_FILL pattern: [13, bmpId(number), matrix(Array), ...]
+                    if (recode[idx] === Graphics.BITMAP_FILL
+                        && typeof recode[idx + 1] === "number"
+                        && Array.isArray(recode[idx + 2])
+                    ) {
+                        const libId  = recode[idx + 1];
+                        const bitmap = Util
+                            .$currentWorkSpace()
+                            .getLibrary(libId);
+
+                        const bd = new BitmapData(
+                            bitmap && bitmap.width  || 0,
+                            bitmap && bitmap.height || 0,
+                            true, 0
+                        );
+                        if (bitmap && bitmap._$buffer) {
+                            bd._$buffer = bitmap._$buffer;
+                        } else {
+                            const c = document.createElement('canvas');
+                            c.width = (bitmap && bitmap.width) || 1;
+                            c.height = (bitmap && bitmap.height) || 1;
+                            bd.canvas = c;
+                        }
+                        recode[idx + 1] = bd;
+                    }
+
+                    // BITMAP_STROKE pattern: [14, w, cap, join, miter, bmpId(number), matrix(Array), ...]
+                    if (recode[idx] === Graphics.BITMAP_STROKE
+                        && typeof recode[idx + 5] === "number"
+                        && Array.isArray(recode[idx + 6])
+                    ) {
+                        const libId  = recode[idx + 5];
+                        const bitmap = Util
+                            .$currentWorkSpace()
+                            .getLibrary(libId);
+
+                        const bd = new BitmapData(
+                            bitmap && bitmap.width  || 0,
+                            bitmap && bitmap.height || 0,
+                            true, 0
+                        );
+                        if (bitmap && bitmap._$buffer) {
+                            bd._$buffer = bitmap._$buffer;
+                        } else {
+                            const c = document.createElement('canvas');
+                            c.width = (bitmap && bitmap.width) || 1;
+                            c.height = (bitmap && bitmap.height) || 1;
+                            bd.canvas = c;
+                        }
+                        recode[idx + 5] = bd;
+                    }
+                }
+            }
+
             Util.$root.stage._$player.removeCache(
                 `${Util.$loaderInfo._$id}@${this.id}`
             );
@@ -1731,5 +1802,20 @@ class Shape extends Instance
         graphics._$buffer = this._$graphicBuffer;
 
         return shape;
+    }
+
+    /**
+     * @override
+     */
+    _applyHydratedData (data)
+    {
+        if (data.recodes) {
+            this.recodes = data.recodes;
+        }
+        if (data.bounds) {
+            this.bounds = data.bounds;
+        }
+        // Invalidate cached graphics so next render uses real data
+        this._$graphicBuffer = null;
     }
 }

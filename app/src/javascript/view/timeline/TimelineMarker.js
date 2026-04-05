@@ -337,9 +337,9 @@ class TimelineMarker extends BaseTimeline
         }
 
         const workSpace = Util.$currentWorkSpace();
-        if (this._$controllerWidth !== workSpace._$controllerWidth) {
+        if (this._$controllerWidth !== workSpace._$uiState.controllerWidth) {
             if (content.clientWidth) {
-                this._$controllerWidth = workSpace._$controllerWidth;
+                this._$controllerWidth = workSpace._$uiState.controllerWidth;
                 this._$clientWidth = content.clientWidth;
             } else {
                 // 表示幅がセットされてなければ初期化
@@ -347,8 +347,8 @@ class TimelineMarker extends BaseTimeline
             }
         }
 
-        if (this._$timelineHeight !== workSpace._$timelineHeight) {
-            this._$timelineHeight = workSpace._$timelineHeight;
+        if (this._$timelineHeight !== workSpace._$uiState.timelineHeight) {
+            this._$timelineHeight = workSpace._$uiState.timelineHeight;
             this._$offsetTop = content.offsetTop;
         }
 

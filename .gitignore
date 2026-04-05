@@ -3,8 +3,48 @@ app/converted/
 
 # Dependencies
 app/node_modules/
+electron/node_modules/
+node_modules/
+
+# Lock files
+package-lock.json
 
 # Python bytecode
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+
+# Test artifacts
+app/test_*.txt
+app/test_output.txt
+app/test_errors.txt
+app/test_results.txt
+app/test_full_output.txt
+app/test_final_run.txt
+app/test_sound.txt
+app/test_response.json
+app/final_test.txt
+
+# Dev / debug scripts
+app/_dev/
+app/_check_n2d.py
+app/trace_*.py
+app/verify_*.py
+app/debug_*.py
+app/diagnose_*.py
+app/scan_scales.py
+app/check_exported.py
+app/create_corrupt_test.py
+
+# Archive docs
+_archive_mds/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Editor
+.vscode/
+*.swp
+*.swo

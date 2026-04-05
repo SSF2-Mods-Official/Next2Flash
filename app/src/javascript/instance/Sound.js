@@ -16,11 +16,15 @@ class Sound extends Instance
     constructor (object)
     {
         super(object);
-        this.buffer = object.buffer;
 
+        this._$buffer    = null;
         this._$binary    = "";
         this._$volume    = 100;
         this._$loopCount = 0;
+
+        if (object.buffer) {
+            this.buffer = object.buffer;
+        }
 
         if ("volume" in object) {
             this.volume = object.volume;
@@ -37,11 +41,13 @@ class Sound extends Instance
         this._$audio.loop     = false;
         this._$audio.controls = true;
 
-        this._$audio.src = URL.createObjectURL(new Blob(
-            [new Uint8Array(this._$buffer)],
-            { "type": "audio/mp3" }
-        ));
-        this._$audio.load();
+        if (this._$buffer) {
+            this._$audio.src = URL.createObjectURL(new Blob(
+                [new Uint8Array(this._$buffer)],
+                { "type": "audio/mp3" }
+            ));
+            this._$audio.load();
+        }
     }
 
     /**
@@ -235,5 +241,21 @@ class Sound extends Instance
             "buffer": Array.from(this._$buffer),
             "audioBuffer": null
         };
+    }
+
+    /**
+     * @override
+     */
+    _applyHydratedData (data)
+    {
+        if (data.buffer) {
+            this.buffer = data.buffer;
+            // Rebuild audio element
+            this._$audio.src = URL.createObjectURL(new Blob(
+                [new Uint8Array(this._$buffer)],
+                { "type": "audio/mp3" }
+            ));
+            this._$audio.load();
+        }
     }
 }

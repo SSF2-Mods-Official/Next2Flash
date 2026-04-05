@@ -18,107 +18,21 @@ import logging
 import struct
 from typing import Dict, List, Optional, Tuple
 
+from swf_binary_io import BitReader
+from swf_constants import ShapeCommand, MOVE_TO, CURVE_TO, LINE_TO, CUBIC, ARC, FILL_STYLE, STROKE_STYLE, END_FILL, END_STROKE, BEGIN_PATH, GRADIENT_FILL, GRADIENT_STROKE, CLOSE_PATH, BITMAP_FILL, BITMAP_STROKE
+
 log = logging.getLogger(__name__)
-
-# ─── Next2D Graphics command codes ───
-MOVE_TO         = 0
-CURVE_TO        = 1
-LINE_TO         = 2
-CUBIC           = 3
-ARC             = 4
-FILL_STYLE      = 5
-STROKE_STYLE    = 6
-END_FILL        = 7
-END_STROKE      = 8
-BEGIN_PATH      = 9
-GRADIENT_FILL   = 10
-GRADIENT_STROKE = 11
-CLOSE_PATH      = 12
-BITMAP_FILL     = 13
-BITMAP_STROKE   = 14
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  BIT READER
-# ═══════════════════════════════════════════════════════════════════════════
-
-class _BitReader:
-    """Read individual bits from a byte buffer."""
-
-    __slots__ = ('data', 'byte_pos', 'bit_pos')
-
-    def __init__(self, data: bytes, byte_offset: int = 0):
-        self.data = data
-        self.byte_pos = byte_offset
-        self.bit_pos = 0
-
-    def align(self):
-        if self.bit_pos > 0:
-            self.byte_pos += 1
-            self.bit_pos = 0
-
-    def read_ub(self, n: int) -> int:
-        if n == 0:
-            return 0
-        result = 0
-        for _ in range(n):
-            if self.byte_pos >= len(self.data):
-                return result
-            byte = self.data[self.byte_pos]
-            bit = (byte >> (7 - self.bit_pos)) & 1
-            result = (result << 1) | bit
-            self.bit_pos += 1
-            if self.bit_pos >= 8:
-                self.bit_pos = 0
-                self.byte_pos += 1
-        return result
-
-    def read_sb(self, n: int) -> int:
-        if n == 0:
-            return 0
-        val = self.read_ub(n)
-        if val & (1 << (n - 1)):
-            val -= (1 << n)
-        return val
-
-    def read_ui8(self) -> int:
-        self.align()
-        if self.byte_pos >= len(self.data):
-            return 0
-        val = self.data[self.byte_pos]
-        self.byte_pos += 1
-        return val
-
-    def read_ui16(self) -> int:
-        self.align()
-        if self.byte_pos + 1 >= len(self.data):
-            return 0
-        val = struct.unpack_from('<H', self.data, self.byte_pos)[0]
-        self.byte_pos += 2
-        return val
-
-    def read_si16(self) -> int:
-        self.align()
-        if self.byte_pos + 1 >= len(self.data):
-            return 0
-        val = struct.unpack_from('<h', self.data, self.byte_pos)[0]
-        self.byte_pos += 2
-        return val
-
-    @property
-    def remaining(self) -> int:
-        return len(self.data) - self.byte_pos
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  SWF PRIMITIVE READERS
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _read_rgb(br: _BitReader) -> dict:
+def _read_rgb(br: BitReader) -> dict:
     return {'R': br.read_ui8(), 'G': br.read_ui8(), 'B': br.read_ui8(), 'A': 1.0}
 
 
-def _read_rgba(br: _BitReader) -> dict:
+def _read_rgba(br: BitReader) -> dict:
     r = br.read_ui8()
     g = br.read_ui8()
     b = br.read_ui8()
@@ -126,7 +40,7 @@ def _read_rgba(br: _BitReader) -> dict:
     return {'R': r, 'G': g, 'B': b, 'A': a}
 
 
-def _read_matrix(br: _BitReader) -> List[float]:
+def _read_matrix(br: BitReader) -> List[float]:
     """Read MATRIX → [scaleX, rotSkew0, rotSkew1, scaleY, translateX, translateY]."""
     br.align()
     t = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
@@ -144,7 +58,7 @@ def _read_matrix(br: _BitReader) -> List[float]:
     return t
 
 
-def _read_gradient(br: _BitReader, tag_type: int) -> dict:
+def _read_gradient(br: BitReader, tag_type: int) -> dict:
     """Read GRADIENT structure.  Must be called byte-aligned (matches JS byteAlign before gradient)."""
     br.align()
     spread = br.read_ub(2)
@@ -161,14 +75,14 @@ def _read_gradient(br: _BitReader, tag_type: int) -> dict:
     }
 
 
-def _read_focal_gradient(br: _BitReader, tag_type: int) -> dict:
+def _read_focal_gradient(br: BitReader, tag_type: int) -> dict:
     """Read FOCALGRADIENT (DefineShape4)."""
     grad = _read_gradient(br, tag_type)
     grad['FocalPoint'] = br.read_si16() / 256.0
     return grad
 
 
-def _read_fill_style(br: _BitReader, tag_type: int) -> dict:
+def _read_fill_style(br: BitReader, tag_type: int) -> dict:
     """Read a single FILLSTYLE."""
     ft = br.read_ui8()
     style: dict = {'fillStyleType': ft}
@@ -186,14 +100,14 @@ def _read_fill_style(br: _BitReader, tag_type: int) -> dict:
     return style
 
 
-def _read_fill_style_array(br: _BitReader, tag_type: int) -> List[dict]:
+def _read_fill_style_array(br: BitReader, tag_type: int) -> List[dict]:
     count = br.read_ui8()
     if tag_type > 2 and count == 255:
         count = br.read_ui16()
     return [_read_fill_style(br, tag_type) for _ in range(count)]
 
 
-def _read_line_style(br: _BitReader, tag_type: int) -> dict:
+def _read_line_style(br: BitReader, tag_type: int) -> dict:
     """Read LINESTYLE / LINESTYLE2."""
     style: dict = {'fillStyleType': 0}
     if tag_type == 83:  # DefineShape4 → LINESTYLE2
@@ -228,7 +142,7 @@ def _read_line_style(br: _BitReader, tag_type: int) -> dict:
     return style
 
 
-def _read_line_style_array(br: _BitReader, tag_type: int) -> List[dict]:
+def _read_line_style_array(br: BitReader, tag_type: int) -> List[dict]:
     count = br.read_ui8()
     if tag_type > 2 and count == 255:
         count = br.read_ui16()
@@ -260,7 +174,7 @@ def parse_define_shape_to_recodes(
     if swf_bitmap_id_to_n2d_id is None:
         swf_bitmap_id_to_n2d_id = {}
 
-    br = _BitReader(body_after_char_id, 0)
+    br = BitReader(body_after_char_id, 0)
 
     # ── Skip shape bounds RECT ──
     nbits = br.read_ub(5)
@@ -733,7 +647,7 @@ def _spread(g):
 #  MORPH SHAPE PARSER (DefineMorphShape / DefineMorphShape2)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _skip_rect(br: _BitReader):
+def _skip_rect(br: BitReader):
     """Skip a RECT structure (bit-packed)."""
     br.align()
     nbits = br.read_ub(5)
@@ -741,7 +655,7 @@ def _skip_rect(br: _BitReader):
         br.read_sb(nbits)
 
 
-def _read_morph_fill_style_array(br: _BitReader, tag_type: int) -> List[dict]:
+def _read_morph_fill_style_array(br: BitReader, tag_type: int) -> List[dict]:
     """Read MORPHFILLSTYLEARRAY, returning only start-state fills in
     regular DefineShape format (compatible with _emit_fill)."""
     start_fills, _ = _read_morph_fill_style_array_both(br, tag_type)
@@ -749,7 +663,7 @@ def _read_morph_fill_style_array(br: _BitReader, tag_type: int) -> List[dict]:
 
 
 def _read_morph_fill_style_array_both(
-    br: _BitReader, tag_type: int
+    br: BitReader, tag_type: int
 ) -> Tuple[List[dict], List[dict]]:
     """Read MORPHFILLSTYLEARRAY, returning (start_fills, end_fills)."""
     count = br.read_ui8()
@@ -826,7 +740,7 @@ def _read_morph_fill_style_array_both(
     return start_fills, end_fills
 
 
-def _read_morph_line_style_array(br: _BitReader, tag_type: int) -> List[dict]:
+def _read_morph_line_style_array(br: BitReader, tag_type: int) -> List[dict]:
     """Read MORPHLINESTYLEARRAY (tag 46) or MORPHLINESTYLE2ARRAY (tag 84),
     returning only start-state line styles in regular DefineShape format."""
     start_lines, _ = _read_morph_line_style_array_both(br, tag_type)
@@ -834,7 +748,7 @@ def _read_morph_line_style_array(br: _BitReader, tag_type: int) -> List[dict]:
 
 
 def _read_morph_line_style_array_both(
-    br: _BitReader, tag_type: int
+    br: BitReader, tag_type: int
 ) -> Tuple[List[dict], List[dict]]:
     """Read MORPHLINESTYLEARRAY, returning (start_lines, end_lines)."""
     count = br.read_ui8()
@@ -901,7 +815,7 @@ def _read_morph_line_style_array_both(
     return start_lines, end_lines
 
 
-def _read_morph_single_fill_both(br: _BitReader) -> Tuple[dict, dict]:
+def _read_morph_single_fill_both(br: BitReader) -> Tuple[dict, dict]:
     """Read a morph fill style pair for LINESTYLE2 HasFill, return (start, end)."""
     ft = br.read_ui8()
     s_style: dict = {'fillStyleType': ft}
@@ -943,7 +857,7 @@ def _read_morph_single_fill_both(br: _BitReader) -> Tuple[dict, dict]:
 
 
 def _walk_edge_records(
-    br: _BitReader,
+    br: BitReader,
     end_pos: int,
     fill_styles: List[dict],
     line_styles: List[dict],
@@ -1090,7 +1004,7 @@ def parse_define_morph_shape_to_recodes(
     if swf_bitmap_id_to_n2d_id is None:
         swf_bitmap_id_to_n2d_id = {}
 
-    br = _BitReader(body_after_char_id, 0)
+    br = BitReader(body_after_char_id, 0)
 
     # ── StartBounds RECT (skip) ──
     _skip_rect(br)

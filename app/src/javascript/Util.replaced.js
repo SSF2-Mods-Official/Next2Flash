@@ -5,6 +5,7 @@
 let characterId = 0;
 
 const Util = {};
+window.Util = Util;
 
 Util.VERSION                  = 1;
 Util.PREFIX                   = "__next2d-tools__";
@@ -986,7 +987,7 @@ window.addEventListener("resize", () =>
 Util.$rebuildRuler = () =>
 {
     const workSpace = Util.$currentWorkSpace();
-    if (workSpace._$rulerX.length || workSpace._$rulerY.length) {
+    if (workSpace._$uiState.rulerX.length || workSpace._$uiState.rulerY.length) {
         Util.$screenRuler.rebuild();
     }
 };
@@ -1424,6 +1425,52 @@ Util.$decodeURIComponentChunked = function(str)
  * @method
  * @public
  */
+
+/**
+ * @description Pre-validate library entries before loading.
+ *              Logs detailed diagnostics for any entries that would fail.
+ * @param {Array} libraries
+ * @param {string} source - calling context for log messages
+ * @private
+ */
+Util._$validateLibraries = function(libraries, source)
+{
+    if (!Array.isArray(libraries)) {
+        console.error(`[N2F][${source}] libraries is not an array:`, typeof libraries);
+        return;
+    }
+    let badCount = 0;
+    for (let i = 0; i < libraries.length; i++) {
+        const lib = libraries[i];
+        if (!lib) {
+            console.error(`[N2F][${source}] Library[${i}] is null/undefined`);
+            badCount++;
+            continue;
+        }
+        if (typeof lib !== 'object') {
+            console.error(`[N2F][${source}] Library[${i}] is not an object: ${typeof lib}`);
+            badCount++;
+            continue;
+        }
+        if (typeof lib.id === 'undefined' || lib.id === null) {
+            console.error(`[N2F][${source}] Library[${i}] MISSING id! type=${lib.type}, name=${lib.name}, keys=${Object.keys(lib).join(',')}`);
+            // Log raw data (truncated for large entries)
+            const raw = JSON.stringify(lib);
+            console.error(`[N2F][${source}] Library[${i}] raw data (first 500 chars): ${raw.substring(0, 500)}`);
+            badCount++;
+        }
+        if (!lib.type) {
+            console.error(`[N2F][${source}] Library[${i}] MISSING type! id=${lib.id}, name=${lib.name}`);
+            badCount++;
+        }
+    }
+    if (badCount > 0) {
+        console.error(`[N2F][${source}] ${badCount} invalid libraries out of ${libraries.length} total`);
+    } else {
+        console.log(`[N2F][${source}] All ${libraries.length} libraries pre-validated OK`);
+    }
+};
+
 Util.$loadWorkSpaceProgressively = async function(json, name)
 {
     console.time("[N2F] Progressive JSON.parse");
@@ -1435,6 +1482,9 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
         
         console.log(`[N2F] Parsed object with ${object.libraries ? object.libraries.length : 0} libraries`);
         
+        // Pre-validate libraries before loading
+        Util._$validateLibraries(object.libraries, 'Progressive(JSON)');
+
         // Create workspace without libraries
         const workSpaces = new WorkSpace();
         workSpaces.name = name;
@@ -1489,6 +1539,7 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
         console.log(`[N2F] Loading ${libraries.length} libraries in ${totalChunks} chunks (${CHUNK_SIZE} per chunk)...`);
         console.time("[N2F] Load all libraries");
         
+        let loadErrors = 0;
         for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
             const start = chunkIdx * CHUNK_SIZE;
             const end = Math.min(start + CHUNK_SIZE, libraries.length);
@@ -1498,7 +1549,21 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
             
             // Load this chunk of libraries
             for (let idx = start; idx < end; idx++) {
-                workSpaces.addLibrary(libraries[idx]);
+                const libData = libraries[idx];
+                try {
+                    if (!libData || typeof libData.id === 'undefined' || libData.id === null) {
+                        console.error(`[N2F] Library[${idx}] has no id! type=${libData ? libData.type : 'null'}, keys=${libData ? Object.keys(libData).join(',') : 'N/A'}`);
+                        loadErrors++;
+                        continue;
+                    }
+                    workSpaces.addLibrary(libData);
+                } catch (libErr) {
+                    loadErrors++;
+                    console.error(`[N2F] addLibrary FAILED at index ${idx}: ${libErr.message}`);
+                    console.error(`[N2F]   id=${libData ? libData.id : '?'}, type=${libData ? libData.type : '?'}, name=${libData ? libData.name : '?'}`);
+                    console.error(`[N2F]   keys: ${libData ? Object.keys(libData).join(', ') : 'N/A'}`);
+                    try { console.error(`[N2F]   raw:`, JSON.stringify(libData).substring(0, 500)); } catch(e) {}
+                }
             }
             
             // Update progress
@@ -1506,8 +1571,11 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
             console.log(`[N2F] Loaded ${end}/${libraries.length} libraries (${progress}%)`);
         }
         
+        if (loadErrors > 0) {
+            console.warn(`[N2F] ${loadErrors} libraries failed to load (skipped)`);
+        }
         console.timeEnd("[N2F] Load all libraries");
-        console.log("[N2F] Progressive loading complete!");
+        console.log("[N2F] Progressive loading complete!");;
         
         // Re-initialize UI now that libraries are loaded
         console.log("[N2F] Refreshing UI with loaded libraries...");
@@ -1574,6 +1642,9 @@ Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
 {
     console.log(`[N2F] Progressive loading from object with ${object.libraries ? object.libraries.length : 0} libraries`);
     
+    // Pre-validate libraries before loading
+    Util._$validateLibraries(object.libraries, 'Progressive(Object)');
+
     try {
         // Create workspace without libraries
         const workSpaces = new WorkSpace();
@@ -1629,6 +1700,7 @@ Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
         console.log(`[N2F] Loading ${libraries.length} libraries in ${totalChunks} chunks (${CHUNK_SIZE} per chunk)...`);
         console.time("[N2F] Load all libraries");
         
+        let loadErrors = 0;
         for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
             const start = chunkIdx * CHUNK_SIZE;
             const end = Math.min(start + CHUNK_SIZE, libraries.length);
@@ -1638,7 +1710,21 @@ Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
             
             // Load this chunk of libraries
             for (let idx = start; idx < end; idx++) {
-                workSpaces.addLibrary(libraries[idx]);
+                const libData = libraries[idx];
+                try {
+                    if (!libData || typeof libData.id === 'undefined' || libData.id === null) {
+                        console.error(`[N2F] Library[${idx}] has no id! type=${libData ? libData.type : 'null'}, keys=${libData ? Object.keys(libData).join(',') : 'N/A'}`);
+                        loadErrors++;
+                        continue;
+                    }
+                    workSpaces.addLibrary(libData);
+                } catch (libErr) {
+                    loadErrors++;
+                    console.error(`[N2F] addLibrary FAILED at index ${idx}: ${libErr.message}`);
+                    console.error(`[N2F]   id=${libData ? libData.id : '?'}, type=${libData ? libData.type : '?'}, name=${libData ? libData.name : '?'}`);
+                    console.error(`[N2F]   keys: ${libData ? Object.keys(libData).join(', ') : 'N/A'}`);
+                    try { console.error(`[N2F]   raw:`, JSON.stringify(libData).substring(0, 500)); } catch(e) {}
+                }
             }
             
             // Update progress
@@ -1646,6 +1732,9 @@ Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
             console.log(`[N2F] Loaded ${end}/${libraries.length} libraries (${progress}%)`);
         }
         
+        if (loadErrors > 0) {
+            console.warn(`[N2F] ${loadErrors} libraries failed to load (skipped)`);
+        }
         console.timeEnd("[N2F] Load all libraries");
         console.log("[N2F] Progressive loading complete!");
         

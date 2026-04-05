@@ -211,7 +211,7 @@ class MovieClip extends Instance
         if (!this.id) {
 
             const workSpace = Util.$currentWorkSpace();
-            if (workSpace._$ruler) {
+            if (workSpace._$uiState.ruler) {
 
                 // 定規を表示
                 Util.$screenRuler.show();
@@ -219,8 +219,8 @@ class MovieClip extends Instance
             } else {
 
                 // 線があれば線だけ表示
-                const rulerX = workSpace._$rulerX;
-                const rulerY = workSpace._$rulerY;
+                const rulerX = workSpace._$uiState.rulerX;
+                const rulerY = workSpace._$uiState.rulerY;
                 if (rulerX.length || rulerY.length) {
                     Util.$screenRuler.createBorder();
                 }

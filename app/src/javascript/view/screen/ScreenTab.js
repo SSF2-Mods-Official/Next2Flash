@@ -431,12 +431,13 @@ class ScreenTab
             // create tab
             this.createElement(workSpace, 0);
 
-            // start
-            deleteWorkSpace.stop();
-            workSpace.run();
-
+            // start — defer heavy teardown so the UI updates first
             const element = parent.children[0];
             element.setAttribute("class", "tab active");
+            setTimeout(() => {
+                deleteWorkSpace.stop();
+                workSpace.run();
+            }, 0);
 
         } else {
 
@@ -446,11 +447,12 @@ class ScreenTab
                 const element = parent.children[0];
                 element.setAttribute("class", "tab active");
 
-                deleteWorkSpace.stop();
-
                 Util.$activeWorkSpaceId = element.dataset.tabId | 0;
 
-                Util.$currentWorkSpace().run();
+                setTimeout(() => {
+                    deleteWorkSpace.stop();
+                    Util.$currentWorkSpace().run();
+                }, 0);
             }
 
         }

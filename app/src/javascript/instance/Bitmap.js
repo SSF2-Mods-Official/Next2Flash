@@ -140,6 +140,9 @@ class Bitmap extends Instance
             case "object":
                 if (binary.constructor === Uint8Array) {
                     this._$buffer = binary;
+                } else if (Array.isArray(binary)) {
+                    // Handle regular Array from MessagePack (converted via Array.from())
+                    this._$buffer = new Uint8Array(binary);
                 }
                 break;
 
@@ -281,7 +284,15 @@ class Bitmap extends Instance
         shape._$characterId = this.id;
 
         const bitmapData = new BitmapData(width, height, true, 0);
-        bitmapData._$buffer = this._$buffer;
+        if (this._$buffer) {
+            bitmapData._$buffer = this._$buffer;
+        } else {
+            // Lazy stub: create transparent placeholder to avoid drawImage TypeError
+            const c = document.createElement('canvas');
+            c.width = width || 1;
+            c.height = height || 1;
+            bitmapData.canvas = c;
+        }
 
         const graphics = shape.graphics;
 
@@ -304,5 +315,17 @@ class Bitmap extends Instance
         graphics._$buffer = this._$graphicBuffer;
 
         return shape;
+    }
+
+    /**
+     * @override
+     */
+    _applyHydratedData (data)
+    {
+        if (data.buffer) {
+            this.buffer = data.buffer;
+        }
+        // Invalidate cached graphics so next render uses real bitmap data
+        this._$graphicBuffer = null;
     }
 }

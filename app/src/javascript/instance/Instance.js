@@ -19,6 +19,8 @@ class Instance
         this._$type       = object.type;
         this._$symbol     = object.symbol || "";
         this._$folderId   = object.folderId | 0;
+        this._$lazy       = !!object._lazy;
+        this._$hydrating  = null; // Promise if hydration in progress
     }
 
     /**
@@ -138,6 +140,10 @@ class Instance
             let parent = this;
             while (parent._$folderId) {
                 parent = workSpace.getLibrary(parent._$folderId);
+                if (!parent) {
+                    // Folder doesn't exist - stop walking up the tree
+                    break;
+                }
                 path = `${parent._$name}/${path}`;
             }
         }
@@ -847,5 +853,83 @@ class Instance
                 }
             }
         }
+    }
+
+    /**
+     * @description Whether this instance is a lazy stub (heavy data not yet loaded).
+     * @member {boolean}
+     * @public
+     */
+    get lazy ()
+    {
+        return this._$lazy;
+    }
+
+    /**
+     * @description Hydrate this lazy stub with full data from the server.
+     *              Returns a promise that resolves when hydration is complete.
+     *              If already hydrated or not lazy, resolves immediately.
+     *
+     * @return {Promise<Instance>}
+     * @method
+     * @public
+     */
+    async hydrate ()
+    {
+        if (!this._$lazy) {
+            return this;
+        }
+
+        // Deduplicate concurrent hydration requests
+        if (this._$hydrating) {
+            return this._$hydrating;
+        }
+
+        this._$hydrating = this._doHydrate();
+        try {
+            await this._$hydrating;
+        } finally {
+            this._$hydrating = null;
+        }
+        return this;
+    }
+
+    /**
+     * @description Internal hydration implementation.
+     * @return {Promise<void>}
+     * @private
+     */
+    async _doHydrate ()
+    {
+        const url = `/api/lazy/library/${this._$id}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to hydrate library ${this._$id}: ${response.status}`);
+        }
+
+        // Decode msgpack response
+        const buffer = await response.arrayBuffer();
+        const data = MessagePack.decode(new Uint8Array(buffer));
+
+        // Let subclass apply heavy data
+        this._applyHydratedData(data);
+        this._$lazy = false;
+
+        console.log(`[N2F] Hydrated library ${this._$id} (${this._$name})`);
+    }
+
+    /**
+     * @description Apply heavy data from hydration response.
+     *              Subclasses override this to handle type-specific fields.
+     *
+     * @param {object} data - Full library data object
+     * @return {void}
+     * @method
+     * @protected
+     */
+    _applyHydratedData (data)
+    {
+        // Base class: nothing to apply.
+        // Subclasses (Bitmap, Shape, Sound) override this.
     }
 }

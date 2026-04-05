@@ -96,7 +96,7 @@ class BlendController extends BaseController
             character.updateTweenBlend(frame);
         }
 
-        // 再描画ように、キャッシュを削除
+        // 再描画用にキャッシュを削除
         character.dispose();
     }
 }

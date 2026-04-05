@@ -18,68 +18,22 @@ from typing import List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
-
-# ── SWF Tag IDs ──────────────────────────────────────────────────────────
-TAG_END                  = 0
-TAG_SHOW_FRAME           = 1
-TAG_DEFINE_SHAPE         = 2
-TAG_DEFINE_SHAPE2        = 22
-TAG_DEFINE_SHAPE3        = 32
-TAG_DEFINE_SHAPE4        = 83
-TAG_PLACE_OBJECT         = 4
-TAG_PLACE_OBJECT2        = 26
-TAG_PLACE_OBJECT3        = 70
-TAG_REMOVE_OBJECT2       = 28
-TAG_DEFINE_SPRITE        = 39
-TAG_DEFINE_EDIT_TEXT      = 37
-TAG_FRAME_LABEL          = 43
-TAG_DO_ACTION            = 12
-TAG_DO_INIT_ACTION       = 59
-TAG_SET_BACKGROUND_COLOR = 9
-TAG_FILE_ATTRIBUTES      = 69
-TAG_DEFINE_BITS_LOSSLESS  = 20
-TAG_DEFINE_BITS_LOSSLESS2 = 36
-TAG_DEFINE_FONT3         = 75
-TAG_DEFINE_TEXT2          = 33
-TAG_SYMBOL_CLASS         = 76
-TAG_DO_ABC               = 82
-TAG_EXPORT_ASSETS        = 56
-TAG_DEFINE_MORPH_SHAPE   = 46
-
-# ── Blend-mode codes (SWF spec) ─────────────────────────────────────────
-SWF_BLEND_NORMAL     = 1
-SWF_BLEND_LAYER      = 2
-SWF_BLEND_MULTIPLY   = 3
-SWF_BLEND_SCREEN     = 4
-SWF_BLEND_LIGHTEN    = 5
-SWF_BLEND_DARKEN     = 6
-SWF_BLEND_DIFFERENCE = 7
-SWF_BLEND_ADD        = 8
-SWF_BLEND_SUBTRACT   = 9
-SWF_BLEND_INVERT     = 10
-SWF_BLEND_ALPHA      = 11
-SWF_BLEND_ERASE      = 12
-SWF_BLEND_OVERLAY    = 13
-SWF_BLEND_HARDLIGHT  = 14
-
-
-NEXT2D_BLEND_MAP = {
-    "normal":     SWF_BLEND_NORMAL,
-    "layer":      SWF_BLEND_LAYER,
-    "multiply":   SWF_BLEND_MULTIPLY,
-    "screen":     SWF_BLEND_SCREEN,
-    "lighten":    SWF_BLEND_LIGHTEN,
-    "darken":     SWF_BLEND_DARKEN,
-    "difference": SWF_BLEND_DIFFERENCE,
-    "add":        SWF_BLEND_ADD,
-    "subtract":   SWF_BLEND_SUBTRACT,
-    "invert":     SWF_BLEND_INVERT,
-    "alpha":      SWF_BLEND_ALPHA,
-    "erase":      SWF_BLEND_ERASE,
-    "overlay":    SWF_BLEND_OVERLAY,
-    "hardlight":  SWF_BLEND_HARDLIGHT,
-    "copy":       SWF_BLEND_NORMAL,
-}
+from swf_binary_io import BitWriter
+from swf_constants import (
+    SWFTag, BlendMode,
+    TAG_END, TAG_SHOW_FRAME, TAG_DEFINE_SHAPE, TAG_DEFINE_SHAPE2, TAG_DEFINE_SHAPE3,
+    TAG_DEFINE_SHAPE4, TAG_PLACE_OBJECT, TAG_PLACE_OBJECT2, TAG_PLACE_OBJECT3,
+    TAG_REMOVE_OBJECT2, TAG_DEFINE_SPRITE, TAG_DEFINE_EDIT_TEXT, TAG_FRAME_LABEL,
+    TAG_DO_ACTION, TAG_DO_INIT_ACTION, TAG_SET_BACKGROUND_COLOR, TAG_FILE_ATTRIBUTES,
+    TAG_DEFINE_BITS_LOSSLESS, TAG_DEFINE_BITS_LOSSLESS2, TAG_DEFINE_FONT3,
+    TAG_DEFINE_TEXT2, TAG_SYMBOL_CLASS, TAG_DO_ABC, TAG_EXPORT_ASSETS, TAG_DEFINE_MORPH_SHAPE,
+    # Blend mode mappings
+    SWF_BLEND_NORMAL, SWF_BLEND_LAYER, SWF_BLEND_MULTIPLY, SWF_BLEND_SCREEN,
+    SWF_BLEND_LIGHTEN, SWF_BLEND_DARKEN, SWF_BLEND_DIFFERENCE, SWF_BLEND_ADD,
+    SWF_BLEND_SUBTRACT, SWF_BLEND_INVERT, SWF_BLEND_ALPHA, SWF_BLEND_ERASE,
+    SWF_BLEND_OVERLAY, SWF_BLEND_HARDLIGHT,
+    NEXT2D_BLEND_MAP
+)
 
 
 # ── Filter IDs (SWF spec) ───────────────────────────────────────────────
@@ -91,54 +45,6 @@ SWF_FILTER_GRADIENT_GLOW   = 4
 SWF_FILTER_CONVOLUTION     = 5
 SWF_FILTER_COLORMATRIX     = 6
 SWF_FILTER_GRADIENT_BEVEL  = 7
-
-
-# ── Bit Writer ───────────────────────────────────────────────────────────
-
-class BitWriter:
-    """Write individual bits to a byte stream, MSB-first."""
-
-    def __init__(self) -> None:
-        self._buf = bytearray()
-        self._current_byte = 0
-        self._bit_pos = 0  # bits written in the current byte (0..7)
-
-    def write_ub(self, n_bits: int, value: int) -> None:
-        """Write *n_bits* unsigned bits."""
-        if n_bits == 0:
-            return
-        value &= (1 << n_bits) - 1
-        for i in range(n_bits - 1, -1, -1):
-            bit = (value >> i) & 1
-            self._current_byte = (self._current_byte << 1) | bit
-            self._bit_pos += 1
-            if self._bit_pos == 8:
-                self._buf.append(self._current_byte)
-                self._current_byte = 0
-                self._bit_pos = 0
-
-    def write_sb(self, n_bits: int, value: int) -> None:
-        """Write *n_bits* signed bits (two's complement)."""
-        if value < 0:
-            value = value + (1 << n_bits)
-        self.write_ub(n_bits, value)
-
-    def write_fb(self, n_bits: int, value: float) -> None:
-        """Write *n_bits* signed fixed-point 16.16 bits."""
-        fixed = int(round(value * 65536))
-        self.write_sb(n_bits, fixed)
-
-    def flush(self) -> None:
-        """Pad current byte to boundary and commit."""
-        if self._bit_pos > 0:
-            self._current_byte <<= (8 - self._bit_pos)
-            self._buf.append(self._current_byte)
-            self._current_byte = 0
-            self._bit_pos = 0
-
-    def get_bytes(self) -> bytes:
-        self.flush()
-        return bytes(self._buf)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────

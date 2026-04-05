@@ -15,11 +15,14 @@ from typing import List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
+from swf_binary_io import BitWriter
+from swf_constants import (
+    ShapeCommand, CMD_MOVE_TO, CMD_CURVE_TO, CMD_LINE_TO, CMD_CUBIC, CMD_ARC,
+    CMD_FILL_STYLE, CMD_STROKE_STYLE, CMD_END_FILL, CMD_END_STROKE, CMD_BEGIN_PATH,
+    CMD_GRADIENT_FILL, CMD_GRADIENT_STROKE, CMD_CLOSE_PATH, CMD_BITMAP_FILL, CMD_BITMAP_STROKE,
+    TAG_DEFINE_SHAPE3, TAG_DEFINE_SHAPE4, TAG_DEFINE_MORPH_SHAPE
+)
 from swf_writer import (
-    BitWriter,
-    TAG_DEFINE_SHAPE3,
-    TAG_DEFINE_SHAPE4,
-    TAG_DEFINE_MORPH_SHAPE,
     build_tag,
     twips,
     write_rect,
@@ -28,37 +31,23 @@ from swf_writer import (
     _nbits_unsigned,
 )
 
-# ── Next2D Shape Command Codes ──────────────────────────────────────────
-CMD_MOVE_TO         = 0
-CMD_CURVE_TO        = 1
-CMD_LINE_TO         = 2
-CMD_CUBIC           = 3
-CMD_ARC             = 4
-CMD_FILL_STYLE      = 5
-CMD_STROKE_STYLE    = 6
-CMD_END_FILL        = 7
-CMD_END_STROKE      = 8
-CMD_BEGIN_PATH      = 9
-CMD_GRADIENT_FILL   = 10
-CMD_GRADIENT_STROKE = 11
-CMD_CLOSE_PATH      = 12
-CMD_BITMAP_FILL     = 13
-CMD_BITMAP_STROKE   = 14
-
 
 # ── Intermediate representation ─────────────────────────────────────────
 
 class SolidFill:
+    __slots__ = ('r', 'g', 'b', 'a')
     def __init__(self, r: int, g: int, b: int, a: int):
         self.r, self.g, self.b, self.a = r, g, b, a
 
 
 class GradientStop:
+    __slots__ = ('ratio', 'r', 'g', 'b', 'a')
     def __init__(self, ratio: int, r: int, g: int, b: int, a: int):
         self.ratio, self.r, self.g, self.b, self.a = ratio, r, g, b, a
 
 
 class GradientFill:
+    __slots__ = ('grad_type', 'stops', 'matrix', 'spread', 'interpolation', 'focal')
     def __init__(self, grad_type: int, stops: List[GradientStop],
                  matrix: List[float], spread: int, interpolation: int,
                  focal: float):
@@ -71,6 +60,7 @@ class GradientFill:
 
 
 class BitmapFill:
+    __slots__ = ('width', 'height', 'pixel_data', 'matrix', 'repeat', 'smooth', 'bitmap_char_id')
     def __init__(self, width: int, height: int, pixel_data: bytes,
                  matrix: List[float], repeat: bool, smooth: bool,
                  bitmap_char_id: int = 0):
@@ -84,6 +74,7 @@ class BitmapFill:
 
 
 class LineStyle:
+    __slots__ = ('thickness', 'r', 'g', 'b', 'a', 'cap', 'join', 'miter_limit')
     def __init__(self, thickness: float, r: int, g: int, b: int, a: int,
                  cap: int = 1, join: int = 1, miter_limit: float = 3.0):
         self.thickness = thickness
@@ -94,6 +85,7 @@ class LineStyle:
 
 
 class GradientLineStyle:
+    __slots__ = ('thickness', 'cap', 'join', 'miter_limit', 'grad_fill')
     def __init__(self, thickness: float, cap: int, join: int, miter_limit: float,
                  grad_fill: GradientFill):
         self.thickness = thickness
@@ -107,16 +99,19 @@ class EdgeRecord:
 
 
 class MoveToEdge(EdgeRecord):
+    __slots__ = ('x', 'y')
     def __init__(self, x: float, y: float):
         self.x, self.y = x, y
 
 
 class LineToEdge(EdgeRecord):
+    __slots__ = ('x', 'y')
     def __init__(self, x: float, y: float):
         self.x, self.y = x, y
 
 
 class CurveToEdge(EdgeRecord):
+    __slots__ = ('cx', 'cy', 'ax', 'ay')
     def __init__(self, cx: float, cy: float, ax: float, ay: float):
         self.cx, self.cy, self.ax, self.ay = cx, cy, ax, ay
 
@@ -125,6 +120,7 @@ class SubPath:
     """
     A sequence of edges sharing the same fill/stroke style.
     """
+    __slots__ = ('fill_style_idx', 'line_style_idx', 'edges', 'start_x', 'start_y')
     def __init__(self):
         self.fill_style_idx: int = 0    # 1-based index (0 = none)
         self.line_style_idx: int = 0    # 1-based index (0 = none)

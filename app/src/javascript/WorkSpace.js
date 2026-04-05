@@ -12,42 +12,298 @@ class WorkSpace
      */
     constructor (json = "")
     {
-        this._$name            = "";
-        this._$scene           = null;
-        this._$stage           = null;
-        this._$libraries       = new Map();
-        this._$nameMap         = new Map();
-        this._$plugins         = new Map();
-        this._$position        = 0;
-        this._$ruler           = false;
-        this._$rulerX          = [];
-        this._$rulerY          = [];
-        this._$characterId     = 0;
-        this._$revision        = [];
-        this._$currentData     = null;
-        this._$currentFrame    = 0;
-        this._$timelineHeight  = TimelineAdjustment.TIMELINE_DEFAULT_SIZE;
-        this._$controllerWidth = ControllerAdjustment.DEFAULT_SIZE;
+        // Phase 2.1: Composition over inheritance - split God object
+        this._$project      = new ProjectData();
+        this._$timeline     = new TimelineState();
+        this._$uiState      = new UIState();
+
+        // Snapshot-based undo (legacy - use command mode if possible)
+        this._$revision     = [];
+        this._$currentData  = null;
+        this._$position     = 0;
+
+        // Command Pattern Undo/Redo (M6 refactoring)
+        // Use this for efficient command-based undo instead of snapshot-based
+        this._$undoManager  = new UndoManager(100);
+        this._$commandMode  = false;  // Enable with enableCommandMode()
 
         if (json) {
             this.load(json);
         }
+    }
 
-        if (!this._$libraries.has(0)) {
+    /**
+     * @description Backward compatibility: Access repository as _$libraries
+     * @return {LibraryRepository}
+     * @deprecated Use _$project.repository instead
+     * @public
+     */
+    get _$libraries ()
+    {
+        return this._$project.repository;
+    }
 
-            const root = new MovieClip({
-                "id": 0,
-                "type": InstanceType.MOVIE_CLIP,
-                "name": "main",
-                "symbol": ""
-            });
+    /**
+     * @description Backward compatibility: Access ruler properties
+     * @return {Array}
+     * @deprecated Use _$uiState.rulerX instead
+     * @public
+     */
+    get _$rulerX ()
+    {
+        return this._$uiState.rulerX;
+    }
 
-            this._$libraries.set(0, root);
-        }
+    /**
+     * @description Backward compatibility: Set ruler X positions
+     * @param {Array} value
+     * @deprecated Use _$uiState.rulerX instead
+     * @public
+     */
+    set _$rulerX (value)
+    {
+        this._$uiState.rulerX = value;
+    }
 
-        if (!this._$stage) {
-            this._$stage = new Stage();
-        }
+    /**
+     * @description Backward compatibility: Access ruler properties
+     * @return {Array}
+     * @deprecated Use _$uiState.rulerY instead
+     * @public
+     */
+    get _$rulerY ()
+    {
+        return this._$uiState.rulerY;
+    }
+
+    /**
+     * @description Backward compatibility: Set ruler Y positions
+     * @param {Array} value
+     * @deprecated Use _$uiState.rulerY instead
+     * @public
+     */
+    set _$rulerY (value)
+    {
+        this._$uiState.rulerY = value;
+    }
+
+    /**
+     * @description Backward compatibility: Access ruler visibility
+     * @return {boolean}
+     * @deprecated Use _$uiState.ruler instead
+     * @public
+     */
+    get _$ruler ()
+    {
+        return this._$uiState.ruler;
+    }
+
+    /**
+     * @description Backward compatibility: Set ruler visibility
+     * @param {boolean} value
+     * @deprecated Use _$uiState.ruler instead
+     * @public
+     */
+    set _$ruler (value)
+    {
+        this._$uiState.ruler = value;
+    }
+
+    /**
+     * @description Backward compatibility: Access controller width
+     * @return {number}
+     * @deprecated Use _$uiState.controllerWidth instead
+     * @public
+     */
+    get _$controllerWidth ()
+    {
+        return this._$uiState.controllerWidth;
+    }
+
+    /**
+     * @description Backward compatibility: Set controller width
+     * @param {number} value
+     * @deprecated Use _$uiState.controllerWidth instead
+     * @public
+     */
+    set _$controllerWidth (value)
+    {
+        this._$uiState.controllerWidth = value;
+    }
+
+    /**
+     * @description Backward compatibility: Access timeline height
+     * @return {number}
+     * @deprecated Use _$uiState.timelineHeight instead
+     * @public
+     */
+    get _$timelineHeight ()
+    {
+        return this._$uiState.timelineHeight;
+    }
+
+    /**
+     * @description Backward compatibility: Set timeline height
+     * @param {number} value
+     * @deprecated Use _$uiState.timelineHeight instead
+     * @public
+     */
+    set _$timelineHeight (value)
+    {
+        this._$uiState.timelineHeight = value;
+    }
+
+    /**
+     * @description Backward compatibility: Access name→id index
+     * @return {Map}
+     * @deprecated LibraryRepository manages its own name index now
+     * @public
+     */
+    get _$nameMap ()
+    {
+        // Return a proxy Map that delegates to repository's name index
+        // Since repository's nameIndex is private, we create a wrapper
+        return {
+            clear: () => {
+                // Name index is part of repository state
+                // Clearing it would require clearing the whole repository
+                // For now, just log a warning
+                console.warn('WorkSpace._$nameMap.clear() is deprecated. Use repository methods instead.');
+            },
+            get: (name) => this._$project.repository.findByName(name),
+            has: (name) => this._$project.repository.findByName(name) !== undefined,
+            set: (name, instance) => {
+                // This is handled automatically by repository.add()
+                console.warn('WorkSpace._$nameMap.set() is deprecated. Repository manages name index automatically.');
+            },
+            delete: (name) => {
+                const library = this._$project.repository.findByName(name);
+                if (library) {
+                    this._$project.repository.delete(library.id);
+                }
+            }
+        };
+    }
+
+    /**
+     * @description Backward compatibility: Get current scene
+     * @return {MovieClip}
+     * @deprecated Direct access - consider using a proper scene manager
+     * @public
+     */
+    get _$scene ()
+    {
+        return this._$timeline.scene;
+    }
+
+    /**
+     * @description Backward compatibility: Set current scene
+     * @param {MovieClip} scene
+     * @deprecated Direct access - consider using a proper scene manager
+     * @public
+     */
+    set _$scene (scene)
+    {
+        this._$timeline.scene = scene;
+    }
+
+    /**
+     * @description Backward compatibility: Get character ID counter
+     * @return {number}
+     * @deprecated Use _$project.characterId instead
+     * @public
+     */
+    get _$characterId ()
+    {
+        return this._$project._$characterId;
+    }
+
+    /**
+     * @description Backward compatibility: Set character ID counter
+     * @param {number} value
+     * @deprecated Use _$project.characterId instead
+     * @public
+     */
+    set _$characterId (value)
+    {
+        this._$project._$characterId = value;
+    }
+
+    /**
+     * @description Backward compatibility: Get project name
+     * @return {string}
+     * @deprecated Use _$project.name instead
+     * @public
+     */
+    get _$name ()
+    {
+        return this._$project.name;
+    }
+
+    /**
+     * @description Backward compatibility: Set project name
+     * @param {string} value
+     * @deprecated Use _$project.name instead
+     * @public
+     */
+    set _$name (value)
+    {
+        this._$project._$name = value;
+    }
+
+    /**
+     * @description Backward compatibility: Get stage configuration
+     * @return {Stage}
+     * @deprecated Use _$project.stage instead
+     * @public
+     */
+    get _$stage ()
+    {
+        return this._$project._$stage;
+    }
+
+    /**
+     * @description Backward compatibility: Set stage configuration
+     * @param {Stage} value
+     * @deprecated Use _$project.stage instead
+     * @public
+     */
+    set _$stage (value)
+    {
+        this._$project._$stage = value;
+    }
+
+    /**
+     * @description Backward compatibility: Get plugins map
+     * @return {Map}
+     * @deprecated Use _$project.plugins instead
+     * @public
+     */
+    get _$plugins ()
+    {
+        return this._$project._$plugins;
+    }
+
+    /**
+     * @description Backward compatibility: Get current frame
+     * @return {number}
+     * @deprecated Use _$timeline.currentFrame instead
+     * @public
+     */
+    get _$currentFrame ()
+    {
+        return this._$timeline.currentFrame;
+    }
+
+    /**
+     * @description Backward compatibility: Set current frame
+     * @param {number} value
+     * @deprecated Use _$timeline.currentFrame instead
+     * @public
+     */
+    set _$currentFrame (value)
+    {
+        this._$timeline.currentFrame = value;
     }
 
     /**
@@ -59,7 +315,7 @@ class WorkSpace
      */
     get root ()
     {
-        return this._$libraries.get(0);
+        return this._$project.root;
     }
 
     /**
@@ -71,7 +327,7 @@ class WorkSpace
      */
     get stage ()
     {
-        return this._$stage;
+        return this._$project.stage;
     }
 
     /**
@@ -82,7 +338,7 @@ class WorkSpace
      */
     get name ()
     {
-        return this._$name;
+        return this._$project.name;
     }
 
     /**
@@ -94,7 +350,7 @@ class WorkSpace
      */
     set name (name)
     {
-        this._$name = `${name}`;
+        this._$project.name = name;
     }
 
     /**
@@ -105,7 +361,7 @@ class WorkSpace
      */
     get scene ()
     {
-        return this._$scene;
+        return this._$timeline.scene;
     }
 
     /**
@@ -117,12 +373,7 @@ class WorkSpace
      */
     set scene (scene)
     {
-        if (this._$scene) {
-            this._$scene.stop();
-        }
-
-        this._$scene = scene;
-        scene.initialize();
+        this._$timeline.scene = scene;
     }
 
     /**
@@ -134,11 +385,7 @@ class WorkSpace
      */
     setScene (scene)
     {
-        if (this._$scene) {
-            this._$scene.stop();
-        }
-
-        this._$scene = scene;
+        this._$timeline.scene = scene;
         return scene.initialize();
     }
 
@@ -151,22 +398,7 @@ class WorkSpace
      */
     get nextLibraryId ()
     {
-        const keys = Array.from(this._$libraries.keys());
-        keys.sort(function (a, b)
-        {
-            if (a > b) {
-                return 1;
-            }
-
-            if (a < b) {
-                return -1;
-            }
-
-            return 0;
-        });
-
-        const lastLibraryId = this._$libraries.get(keys.pop() | 0).id | 0;
-        return lastLibraryId + 1;
+        return this._$project.nextLibraryId;
     }
 
     /**
@@ -186,7 +418,7 @@ class WorkSpace
 
         // ライブラリを初期化
         Util.$libraryController.reload(
-            Array.from(this._$libraries.values())
+            this._$project.repository.getAll()
         );
 
         // 内部スクリプトを初期化
@@ -194,7 +426,7 @@ class WorkSpace
 
         // プラグインを初期化
         Util.$pluginController.reload(
-            Array.from(this._$plugins.values())
+            Array.from(this._$project.plugins.values())
         );
 
         // スクリーンの表示をrootに変更
@@ -210,21 +442,8 @@ class WorkSpace
      */
     run ()
     {
-        document
-            .documentElement
-            .style
-            .setProperty(
-                "--timeline-height",
-                `${this._$timelineHeight}px`
-            );
-
-        document
-            .documentElement
-            .style
-            .setProperty(
-                "--controller-width",
-                `${this._$controllerWidth}px`
-            );
+        // Update CSS variables from UI state
+        this._$uiState.updateCSSVariables();
 
         // ステージをセット
         this.stage.initialize();
@@ -242,10 +461,7 @@ class WorkSpace
      */
     stop ()
     {
-        if (this._$scene) {
-            this._$scene.stop();
-            this._$scene = null;
-        }
+        this._$timeline.reset();
 
         // 定規を初期化
         Util.$screenRuler.clear();
@@ -281,38 +497,12 @@ class WorkSpace
      */
     loadFromObject (object)
     {
-        // copy
-        this._$characterId = object.characterId | 0;
-        this._$name        = object.name;
-        this._$stage       = new Stage(object.stage);
+        // Load project data
+        this._$project.loadFromObject(object);
 
-        if (this._$plugins.size) {
-            this._$plugins.clear();
-        }
-
-        if (object.plugins) {
-            for (let idx = 0; idx < object.plugins.length; ++idx) {
-                const plugin = object.plugins[idx];
-                this._$plugins.set(plugin.name, plugin);
-            }
-        }
-
-        if (this._$libraries.size) {
-            this._$libraries.clear();
-        }
-
-        const libraries = object.libraries;
-        for (let idx = 0; idx < libraries.length; ++idx) {
-            this.addLibrary(libraries[idx]);
-        }
-
-        // settings
+        // Load UI settings
         if (object.setting) {
-            this._$timelineHeight  = object.setting.timelineHeight;
-            this._$controllerWidth = object.setting.controllerWidth;
-            this._$ruler           = !!object.setting.ruler;
-            this._$rulerX          = object.setting.rulerX || [];
-            this._$rulerY          = object.setting.rulerY || [];
+            this._$uiState.loadFromObject(object.setting);
         }
     }
 
@@ -325,26 +515,12 @@ class WorkSpace
      */
     toJSON ()
     {
-        // ライブラリデータ
-        const libraries = [];
-        for (const value of this._$libraries.values()) {
-            libraries.push(value.toObject());
-        }
+        const projectData = this._$project.toObject();
+        const uiData = this._$uiState.toObject();
 
         return JSON.stringify({
-            "version": Util.VERSION,
-            "name": this.name,
-            "characterId": this._$characterId,
-            "stage": this.stage.toObject(),
-            "libraries": libraries,
-            "plugins": Array.from(this._$plugins.values()),
-            "setting": {
-                "timelineHeight":  this._$timelineHeight,
-                "controllerWidth": this._$controllerWidth,
-                "ruler": this._$ruler,
-                "rulerX": this._$rulerX.slice(0),
-                "rulerY": this._$rulerY.slice(0)
-            }
+            ...projectData,
+            "setting": uiData
         });
     }
 
@@ -366,8 +542,29 @@ class WorkSpace
             this._$revision.length = this._$position;
         }
 
-        this._$revision.push(this.toJSON());
+        // Deferred snapshot: push a lazy thunk to avoid blocking the UI.
+        // The expensive toJSON() runs during idle time; undo forces it
+        // synchronously only if the user actually undoes before idle fires.
+        const self = this;
+        const idx  = this._$revision.length;
+        let resolved = false;
+        const thunk = {
+            _resolve () {
+                if (resolved) return;
+                resolved = true;
+                const json = self.toJSON();
+                self._$revision[idx] = json;
+                return json;
+            },
+            toString () { return this._resolve(); }
+        };
+        this._$revision.push(thunk);
         this._$position++;
+
+        // Resolve in idle time (or within 2s as fallback)
+        const cb = typeof requestIdleCallback === 'function'
+            ? requestIdleCallback : (fn) => setTimeout(fn, 100);
+        cb(() => { thunk._resolve(); });
 
         // remove old data
         if (this._$revision.length > Util.REVISION_LIMIT) {
@@ -395,9 +592,14 @@ class WorkSpace
             this._$currentData = this.toJSON();
         }
 
-        this._$currentFrame = Util.$timelineFrame.currentFrame;
-        this.reloadData(this._$revision[--this._$position]);
-        this._$currentFrame = 0;
+        const currentFrame = Util.$timelineFrame.currentFrame;
+        // Force-resolve lazy thunks before using them
+        let data = this._$revision[--this._$position];
+        if (data && typeof data === 'object' && data._resolve) {
+            data = data._resolve();
+        }
+        this.reloadData(data);
+        Util.$timelineFrame.currentFrame = 0;
     }
 
     /**
@@ -433,13 +635,18 @@ class WorkSpace
 
         }
 
+        // Force-resolve lazy thunks
+        if (data && typeof data === 'object' && data._resolve) {
+            data = data._resolve();
+        }
+
         if (!data) {
             return ;
         }
 
-        this._$currentFrame = Util.$timelineFrame.currentFrame;
+        const currentFrame = Util.$timelineFrame.currentFrame;
         this.reloadData(data);
-        this._$currentFrame = 0;
+        Util.$timelineFrame.currentFrame = 0;
     }
 
     /**
@@ -474,8 +681,7 @@ class WorkSpace
         const currentSceneId = this._$scene.id;
 
         // シーンを初期化
-        this._$scene.stop();
-        this._$scene = null;
+        this._$timeline.reset();
 
         // 再読み込み
         this.load(data);
@@ -525,42 +731,7 @@ class WorkSpace
      */
     addLibrary (library)
     {
-        let instance;
-        switch (library.type) {
-
-            case InstanceType.MOVIE_CLIP:
-                instance = new MovieClip(library);
-                break;
-
-            case InstanceType.BITMAP:
-                instance = new Bitmap(library);
-                break;
-
-            case InstanceType.TEXT:
-                instance = new TextField(library);
-                break;
-
-            case InstanceType.SOUND:
-                instance = new Sound(library);
-                break;
-
-            case InstanceType.VIDEO:
-                instance = new Video(library);
-                break;
-
-            case InstanceType.SHAPE:
-                instance = new Shape(library);
-                break;
-
-            case InstanceType.FOLDER:
-                instance = new Folder(library);
-                break;
-
-        }
-
-        this._$libraries.set(instance.id, instance);
-
-        return instance;
+        return this._$project.addLibrary(library);
     }
 
     /**
@@ -573,7 +744,7 @@ class WorkSpace
      */
     getLibrary (id)
     {
-        return this._$libraries.get(id | 0);
+        return this._$project.repository.get(id | 0);
     }
 
     /**
@@ -586,6 +757,172 @@ class WorkSpace
      */
     removeLibrary (id)
     {
-        this._$libraries.delete(id | 0);
+        this._$project.repository.delete(id | 0);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    //                  COMMAND PATTERN UNDO/REDO (M6)
+    // ══════════════════════════════════════════════════════════════════
+
+    /**
+     * @description Enable command-based undo/redo (replaces snapshot-based).
+     *
+     * When enabled, mutations should use executeCommand() instead of
+     * addRevision() for efficient memory usage.
+     *
+     * @return {void}
+     * @method
+     * @public
+     */
+    enableCommandMode ()
+    {
+        this._$commandMode = true;
+        console.log("WorkSpace: Command-based undo/redo enabled");
+    }
+
+    /**
+     * @description Disable command mode (revert to snapshot-based undo).
+     *
+     * @return {void}
+     * @method
+     * @public
+     */
+    disableCommandMode ()
+    {
+        this._$commandMode = false;
+    }
+
+    /**
+     * @description Check if command mode is enabled.
+     *
+     * @return {boolean}
+     * @method
+     * @public
+     */
+    isCommandModeEnabled ()
+    {
+        return this._$commandMode;
+    }
+
+    /**
+     * @description Execute a command through the undo manager.
+     *
+     * Use this for all mutations when command mode is enabled.
+     *
+     * Example:
+     *   workspace.executeCommand(new UpdatePlaceCommand(obj, {x: 100, y: 50}));
+     *
+     * @param  {Command} command - Command to execute
+     * @return {void}
+     * @method
+     * @public
+     */
+    executeCommand (command)
+    {
+        this._$undoManager.execute(command);
+    }
+
+    /**
+     * @description Undo last command (command mode only).
+     *
+     * @return {boolean} - True if undo succeeded
+     * @method
+     * @public
+     */
+    undoCommand ()
+    {
+        return this._$undoManager.undo();
+    }
+
+    /**
+     * @description Redo next command (command mode only).
+     *
+     * @return {boolean} - True if redo succeeded
+     * @method
+     * @public
+     */
+    redoCommand ()
+    {
+        return this._$undoManager.redo();
+    }
+
+    /**
+     * @description Check if undo is available (command mode).
+     *
+     * @return {boolean}
+     * @method
+     * @public
+     */
+    canUndoCommand ()
+    {
+        return this._$undoManager.canUndo();
+    }
+
+    /**
+     * @description Check if redo is available (command mode).
+     *
+     * @return {boolean}
+     * @method
+     * @public
+     */
+    canRedoCommand ()
+    {
+        return this._$undoManager.canRedo();
+    }
+
+    /**
+     * @description Get the undo manager instance.
+     *
+     * @return {UndoManager}
+     * @method
+     * @public
+     */
+    getUndoManager ()
+    {
+        return this._$undoManager;
+    }
+
+    /**
+     * @description Begin a transaction (batch multiple commands).
+     *
+     * Example:
+     *   workspace.beginTransaction("Paste");
+     *   workspace.executeCommand(new AddLibraryCommand(...));
+     *   workspace.executeCommand(new AddLayerCommand(...));
+     *   workspace.commitTransaction();
+     *
+     * @param  {string} [description] - Transaction description
+     * @return {void}
+     * @method
+     * @public
+     */
+    beginTransaction (description)
+    {
+        this._$undoManager.beginTransaction(description);
+    }
+
+    /**
+     * @description Commit the current transaction.
+     *
+     * @return {void}
+     * @method
+     * @public
+     */
+    commitTransaction ()
+    {
+        this._$undoManager.commitTransaction();
+    }
+
+    /**
+     * @description Cancel the current transaction.
+     *
+     * @return {void}
+     * @method
+     * @public
+     */
+    cancelTransaction ()
+    {
+        this._$undoManager.cancelTransaction();
     }
 }
+

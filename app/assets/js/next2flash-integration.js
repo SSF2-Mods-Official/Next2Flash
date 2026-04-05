@@ -148,6 +148,14 @@
     document.getElementById('n2f-export-swf').addEventListener('click', onExportSWF);
     document.getElementById('n2f-swf-input').addEventListener('change', onSWFFileSelected);
     document.getElementById('n2f-n2d-input').addEventListener('change', onN2DFileSelected);
+
+    // Wire Electron menu events
+    if (window.n2fElectron) {
+      window.n2fElectron.onMenuSave(onSaveProject);
+      window.n2fElectron.onMenuExportSWF(onExportSWF);
+      window.n2fElectron.onImportSWF(function (swfPath) { _importSWFByPath(swfPath); });
+      _log.info('Electron bridge detected — native menu/dialogs active');
+    }
   }
 
   /* ================================================================== */
@@ -155,24 +163,34 @@
   /* ================================================================== */
   function onImportSWF() {
     _log.debug('Import SWF button clicked');
+    // Electron: use native file dialog + path-based import (no upload)
+    if (window.n2fElectron) {
+      window.n2fElectron.showOpenSWFDialog().then(function (swfPath) {
+        if (!swfPath) return;
+        _importSWFByPath(swfPath);
+      });
+      return;
+    }
     document.getElementById('n2f-swf-input').click();
   }
 
-  function onSWFFileSelected(e) {
-    var file = e.target.files[0];
-    if (!file) return;
-    _log.info('SWF file selected:', file.name, formatBytes(file.size));
-    e.target.value = '';  // reset for re-selecting same file
+  /**
+   * Electron fast path: import SWF by filesystem path — no HTTP upload.
+   * Server reads the file directly from disk.
+   */
+  function _importSWFByPath(swfPath) {
+    var fileName = swfPath.split(/[\\/]/).pop();
+    _log.info('Importing SWF by path:', swfPath);
+    showProgress('Importing SWF...\n' + fileName);
 
-    showProgress('Importing SWF...\n' + file.name + ' (' + formatBytes(file.size) + ')');
-
-    var form = new FormData();
-    form.append('file', file);
-
-    fetch(API_BASE + '/api/swf-to-project', { method: 'POST', body: form })
+    fetch(API_BASE + '/api/import-swf-path', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ swfPath: swfPath, lazy: true }),
+    })
       .then(function (r) {
         if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
-        var name = r.headers.get('X-N2D-Name') || file.name.replace('.swf', '');
+        var name = r.headers.get('X-N2D-Name') || fileName.replace(/\.\w+$/, '');
         var libs = r.headers.get('X-N2D-Libraries') || '?';
         var scripts = r.headers.get('X-N2D-Scripts') || '0';
         var projDir = r.headers.get('X-Project-Dir') || '';
@@ -195,9 +213,170 @@
         _feedN2DToTool(result.blob, result.name);
 
         toast('Project created: ' + result.name + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)\nFolder: ' + _currentProjectDir);
+
+        // Start background hydration of lazy libraries
+        _startBackgroundHydration(result.libs);
       })
       .catch(function (err) {
         hideProgress();
+        _log.error('SWF import failed:', err.message);
+        toast('Import failed: ' + err.message, true);
+      });
+  }
+
+  /**
+   * Start background hydration of lazy library stubs.
+   * After the skeleton project is loaded, this streams full data from the server.
+   */
+  var _activeHydrator = null;
+  function _startBackgroundHydration(libCount) {
+    // Wait a bit for the tool to finish setting up workspace
+    setTimeout(function() {
+      try {
+        // Access the tool's Util and repository
+        var Util = window.Util;
+        if (!Util || !Util.$workSpaces || Util.$workSpaces.length === 0) {
+          _log.info('[Lazy] No workspace found yet, retrying in 2s...');
+          setTimeout(function() { _startBackgroundHydration(libCount); }, 2000);
+          return;
+        }
+
+        var ws = Util.$workSpaces[Util.$workSpaces.length - 1];
+        var repo = ws._$project && ws._$project.repository;
+        if (!repo) {
+          _log.info('[Lazy] No repository found, retrying in 2s...');
+          setTimeout(function() { _startBackgroundHydration(libCount); }, 2000);
+          return;
+        }
+
+        // Create hydrator with bulk fetch
+        _activeHydrator = new BackgroundHydrator('/api/lazy');
+
+        _log.info('[Lazy] Starting bulk background hydration...');
+        _activeHydrator.hydrate(repo, function(hydrated, total) {
+          if (hydrated % 200 === 0 || hydrated === total) {
+            _log.info('[Lazy] Hydrated ' + hydrated + '/' + total + ' libraries');
+          }
+        }).then(function(count) {
+          _log.info('[Lazy] Background hydration complete: ' + count + ' libraries');
+          _activeHydrator = null;
+
+          // Trigger canvas re-render now that all data is loaded
+          try {
+            _log.info('[Lazy] Triggering canvas re-render...');
+            // Clear cached graphic buffers so they re-generate with real data
+            for (var lib of repo.getAll()) {
+              if (lib._$graphicBuffer) {
+                lib._$graphicBuffer = null;
+              }
+              // Also clear any cached canvas elements on individual characters
+              if (lib._$cacheCanvas) {
+                lib._$cacheCanvas = null;
+              }
+              if (lib._$bitmapCanvas) {
+                lib._$bitmapCanvas = null;
+              }
+            }
+            // Flush the WebGL texture cache so stale black textures are discarded
+            try {
+              var player = window.next2d && window.next2d.player;
+              if (player && player.cacheStore) {
+                player.cacheStore.reset();
+                _log.info('[Lazy] WebGL cacheStore reset');
+              }
+            } catch (cacheErr) {
+              _log.warn('[Lazy] cacheStore reset failed:', cacheErr.message);
+            }
+            // Re-initialize the workspace scene to force full re-render
+            if (ws._$scene) {
+              ws.initialize(ws._$scene);
+              // Force the actual canvas repaint so bitmaps appear
+              if (window.Util && window.Util.$baseController) {
+                window.Util.$baseController.reloadScreen();
+              }
+              _log.info('[Lazy] Canvas re-render triggered');
+            }
+          } catch (renderErr) {
+            _log.warn('[Lazy] Canvas re-render failed (non-fatal):', renderErr.message);
+          }
+        }).catch(function(err) {
+          _log.error('[Lazy] Background hydration failed:', err);
+          _activeHydrator = null;
+        });
+      } catch (e) {
+        _log.error('[Lazy] Failed to start background hydration:', e);
+      }
+    }, 1000);
+  }
+
+  function onSWFFileSelected(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    _log.info('SWF file selected:', file.name, formatBytes(file.size));
+    e.target.value = '';  // reset for re-selecting same file
+
+    if (window.N2FProfiler) {
+      window.N2FProfiler.startSession('swf-import-client');
+      window.N2FProfiler.size('swf_file', file.size);
+      window.N2FProfiler.note('file: ' + file.name);
+      window.N2FProfiler.startTimer('server_convert');
+    }
+
+    showProgress('Importing SWF...\n' + file.name + ' (' + formatBytes(file.size) + ')');
+
+    var form = new FormData();
+    form.append('file', file);
+
+    fetch(API_BASE + '/api/swf-to-project', { method: 'POST', body: form })
+      .then(function (r) {
+        if (window.N2FProfiler) window.N2FProfiler.stopTimer();
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
+        var name = r.headers.get('X-N2D-Name') || file.name.replace('.swf', '');
+        var libs = r.headers.get('X-N2D-Libraries') || '?';
+        var scripts = r.headers.get('X-N2D-Scripts') || '0';
+        var projDir = r.headers.get('X-Project-Dir') || '';
+        if (window.N2FProfiler) {
+          window.N2FProfiler.count('libraries', parseInt(libs) || 0);
+          window.N2FProfiler.count('scripts', parseInt(scripts) || 0);
+          window.N2FProfiler.startTimer('read_blob');
+        }
+        return r.blob().then(function (blob) {
+          if (window.N2FProfiler) {
+            window.N2FProfiler.stopTimer();
+            window.N2FProfiler.size('n2d_blob', blob.size);
+          }
+          return { blob: blob, name: name, libs: libs, scripts: scripts, projDir: projDir };
+        });
+      })
+      .then(function (result) {
+        hideProgress();
+        _currentProjectDir = result.projDir;
+        _log.info('Project created at:', _currentProjectDir);
+
+        var refreshBtn = document.getElementById('n2f-refresh-assets');
+        if (refreshBtn) refreshBtn.disabled = false;
+        var saveBtn = document.getElementById('n2f-save-project');
+        if (saveBtn) saveBtn.disabled = false;
+
+        _importedN2DBlob = result.blob.slice(0);
+        _saveImportedBlobToIDB(_importedN2DBlob);
+
+        if (window.N2FProfiler) window.N2FProfiler.startTimer('load_into_tool');
+        _feedN2DToTool(result.blob, result.name);
+
+        // End session after a delay to capture loading time
+        if (window.N2FProfiler) {
+          setTimeout(function() {
+            window.N2FProfiler.stopTimer();
+            window.N2FProfiler.endSession('swf-import-client');
+          }, 8000);
+        }
+
+        toast('Project created: ' + result.name + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)\nFolder: ' + _currentProjectDir);
+      })
+      .catch(function (err) {
+        hideProgress();
+        if (window.N2FProfiler) window.N2FProfiler.endSession('swf-import-client');
         _log.error('SWF import failed:', err.message);
         toast('Import failed: ' + err.message, true);
       });
@@ -420,51 +599,96 @@
     _log.info('Export SWF requested');
     showProgress('Preparing project for SWF export...');
 
+    if (window.N2FProfiler) {
+      window.N2FProfiler.startSession('swf-export-client');
+      window.N2FProfiler.startTimer('prepare_export');
+    }
+
     var name = getProjectName() || 'output';
 
     // When a project folder is active, capture the current editor state first
     // (so timeline edits like position/filter changes are included), save it
     // to the project folder, then compile from there.
     if (_currentProjectDir) {
-      _log.info('Project folder active — saving editor state then compiling');
+
+      // ── ELECTRON FAST PATH: compile from disk, save via native dialog ──
+      if (window.n2fElectron) {
+        _log.info('Electron — compile from disk, native save dialog');
+        window.n2fElectron.showSaveSWFDialog(name + '.swf').then(function (outputPath) {
+          if (!outputPath) { hideProgress(); return; }
+          updateProgress('Compiling SWF...');
+          return fetch(API_BASE + '/api/compile-disk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projectDir: _currentProjectDir, outputPath: outputPath }),
+          })
+            .then(function (r) {
+              if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Compilation failed'); });
+              return r.json();
+            })
+            .then(function (result) {
+              hideProgress();
+              _log.info('SWF compiled to:', result.swfPath, formatBytes(result.size));
+              toast('Exported: ' + outputPath.split(/[\\/]/).pop() + ' (' + formatBytes(result.size) + ')');
+            });
+        }).catch(function (err) {
+          hideProgress();
+          _log.error('SWF export failed:', err.message);
+          toast('Export failed: ' + err.message, true);
+        });
+        return;
+      }
+
+      // ── BROWSER PATH: use HTTP blob transfer ──
+      _log.info('Project folder active — fast export via server-side merge');
       updateProgress('Capturing editor state...');
 
-      saveProjectAsN2D()
-        .then(function (n2dBlob) {
-          updateProgress('Saving project before compile...');
-          var saveForm = new FormData();
-          saveForm.append('n2d', n2dBlob, 'project.n2d');
-          return fetch(API_BASE + '/api/save-project', { method: 'POST', body: saveForm });
-        })
-        .then(function (r) {
-          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Save failed'); });
-          return r.json();
-        })
-        .then(function () {
-          updateProgress('Compiling SWF from project folder...');
-          var form = new FormData();
-          form.append('fromProject', 'true');
-          return fetch(API_BASE + '/api/n2d-to-swf', { method: 'POST', body: form });
-        })
-        .then(function (r) {
-          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Compilation failed'); });
-          return r.blob();
-        })
-        .then(function (blob) {
-          hideProgress();
-          var url = URL.createObjectURL(blob);
-          var a = document.createElement('a');
-          a.href = url;
-          a.download = name + '.swf';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
-          _log.info('SWF export succeeded:', name + '.swf', formatBytes(blob.size));
-          toast('Exported: ' + name + '.swf (' + formatBytes(blob.size) + ')');
+      // Fast path: try to capture the tool blob, but if the tool's
+      // internal JSON.stringify crashes (RangeError for huge projects),
+      // fall back to compiling directly from disk data.
+      function _sendCompileRequest(rawBlob) {
+        updateProgress('Compiling SWF...');
+        var form = new FormData();
+        if (rawBlob) {
+          form.append('editorBlob', rawBlob, 'editor.bin');
+        } else {
+          // Disk-only: tell server to compile from existing project.n2d
+          form.append('diskOnly', '1');
+        }
+        return fetch(API_BASE + '/api/save-and-compile', { method: 'POST', body: form })
+          .then(function (r) {
+            if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Compilation failed'); });
+            return r.blob();
+          })
+          .then(function (blob) {
+            hideProgress();
+            if (window.N2FProfiler) {
+              window.N2FProfiler.stopTimer();
+              window.N2FProfiler.size('output_swf', blob.size);
+              window.N2FProfiler.endSession('swf-export-client');
+            }
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = name + '.swf';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+            _log.info('SWF export succeeded:', name + '.swf', formatBytes(blob.size));
+            toast('Exported: ' + name + '.swf (' + formatBytes(blob.size) + ')');
+          });
+      }
+
+      _captureToolBlob()
+        .then(function (rawBlob) { return _sendCompileRequest(rawBlob); })
+        .catch(function (err) {
+          _log.warn('Tool save failed (' + err.message + '), compiling from disk');
+          return _sendCompileRequest(null);
         })
         .catch(function (err) {
           hideProgress();
+          if (window.N2FProfiler) window.N2FProfiler.endSession('swf-export-client');
           _log.error('SWF export failed:', err.message);
           toast('Export failed: ' + err.message, true);
         });
@@ -498,14 +722,58 @@
         document.body.removeChild(a);
         setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
 
+        if (window.N2FProfiler) {
+          window.N2FProfiler.stopTimer();
+          window.N2FProfiler.size('output_swf', result.blob.size);
+          window.N2FProfiler.endSession('swf-export-client');
+        }
         _log.info('SWF export succeeded:', result.name + '.swf', formatBytes(result.blob.size));
         toast('Exported: ' + result.name + '.swf (' + formatBytes(result.blob.size) + ')');
       })
       .catch(function (err) {
         hideProgress();
+        if (window.N2FProfiler) window.N2FProfiler.endSession('swf-export-client');
         _log.error('SWF export failed:', err.message);
         toast('Export failed: ' + err.message, true);
       });
+  }
+
+  /**
+   * Capture the raw tool save blob without any processing.
+   * Returns the zlib-compressed blob straight from the tool's save pipeline.
+   * This is fast because it avoids decompress/parse/merge/stringify/recompress.
+   */
+  function _captureToolBlob() {
+    return new Promise(function (resolve, reject) {
+      var anchor = document.getElementById('save-anchor');
+      if (!anchor) return reject(new Error('save-anchor not found'));
+
+      var origClick = anchor.click;
+      anchor.click = function () {
+        var blobUrl = this.href;
+        anchor.click = origClick;
+
+        if (!blobUrl || !blobUrl.startsWith('blob:')) {
+          return reject(new Error('No blob URL available'));
+        }
+
+        fetch(blobUrl)
+          .then(function (r) { return r.blob(); })
+          .then(function (blob) {
+            _log.info('[PERF] captured tool blob: ' + (blob.size / 1048576).toFixed(1) + 'MB');
+            resolve(blob);
+          })
+          .catch(reject);
+      };
+
+      var saveBtn = document.getElementById('tools-save');
+      if (saveBtn) {
+        saveBtn.click();
+      } else {
+        anchor.click = origClick;
+        reject(new Error('tools-save button not found'));
+      }
+    });
   }
 
   /**
@@ -527,6 +795,8 @@
       anchor.click = function () {
         // Intercept: grab the blob URL the tool just set
         var blobUrl = this.href;
+        var _t0 = performance.now();
+        _log.info('[PERF] tool internal save: ' + (_t0 - _tSave).toFixed(0) + 'ms');
         if (!blobUrl || !blobUrl.startsWith('blob:')) {
           anchor.click = origClick;
           return reject(new Error('No blob URL available'));
@@ -538,30 +808,40 @@
         fetch(blobUrl)
           .then(function (r) { return r.arrayBuffer(); })
           .then(function (buf) {
+            _log.info('[PERF] fetch blob: ' + (performance.now() - _t0).toFixed(0) + 'ms, size=' + (buf.byteLength / 1048576).toFixed(1) + 'MB');
+            var _t1 = performance.now();
             // Decompress the zlib-compressed N2D data
             var ds = new DecompressionStream('deflate');
             var writer = ds.writable.getWriter();
             writer.write(new Uint8Array(buf));
             writer.close();
-            return new Response(ds.readable).text();
+            return new Response(ds.readable).text().then(function (text) {
+              _log.info('[PERF] decompress: ' + (performance.now() - _t1).toFixed(0) + 'ms, size=' + (text.length / 1048576).toFixed(1) + 'MB');
+              return text;
+            });
           })
           .then(function (text) {
+            var _t2 = performance.now();
             var json;
             try { json = JSON.parse(decodeURIComponent(text)); }
             catch (ex) { json = JSON.parse(text); }
+            _log.info('[PERF] parse JSON: ' + (performance.now() - _t2).toFixed(0) + 'ms');
 
             // Inject roundtrip data (rawTagBody, rawGlobalTags, scripts, etc.)
+            var _t3 = performance.now();
             var panel = window.__n2d_as_panel;
             if (panel && typeof panel.injectRoundtripFields === 'function') {
               panel.injectRoundtripFields(json);
             } else {
               _log.warn('AS panel not available — export without roundtrip data');
             }
+            _log.info('[PERF] injectRoundtripFields: ' + (performance.now() - _t3).toFixed(0) + 'ms');
 
             // Fallback: if critical fields still missing, re-parse stored N2D blob
             var blobSource = _importedN2DBlob
               ? Promise.resolve(_importedN2DBlob)
               : _loadImportedBlobFromIDB();
+            var _t4 = performance.now();
             var needsFallback = !json.rootTimelineDefIds
               || !json.scripts || json.scripts.length === 0
               || !json.rawGlobalTags || json.rawGlobalTags.length === 0;
@@ -572,6 +852,7 @@
               : Promise.resolve(null);
 
             return fallback.then(function (origJson) {
+              _log.info('[PERF] fallback parse: ' + (performance.now() - _t4).toFixed(0) + 'ms, needed=' + needsFallback);
               if (origJson) {
                 if (!json.rootTimelineDefIds && origJson.rootTimelineDefIds) {
                   json.rootTimelineDefIds = origJson.rootTimelineDefIds;
@@ -646,15 +927,23 @@
                 'scriptsModified=' + !!json.scriptsModified);
 
               // Re-encode and recompress
-              var encoded = encodeURIComponent(JSON.stringify(json));
-              var arr = new Uint8Array(encoded.length);
-              for (var i = 0; i < encoded.length; i++) arr[i] = encoded.charCodeAt(i);
+              var _t5 = performance.now();
+              var jsonStr = JSON.stringify(json);
+              _log.info('[PERF] JSON.stringify: ' + (performance.now() - _t5).toFixed(0) + 'ms, size=' + (jsonStr.length / 1048576).toFixed(1) + 'MB');
+              var _t6 = performance.now();
+              var arr = new TextEncoder().encode(jsonStr);
+              _log.info('[PERF] TextEncoder: ' + (performance.now() - _t6).toFixed(0) + 'ms');
 
+              var _t7 = performance.now();
               var cs = new CompressionStream('deflate');
               var cw = cs.writable.getWriter();
               cw.write(arr);
               cw.close();
-              return new Response(cs.readable).arrayBuffer();
+              return new Response(cs.readable).arrayBuffer().then(function (buf) {
+                _log.info('[PERF] compress: ' + (performance.now() - _t7).toFixed(0) + 'ms, size=' + (buf.byteLength / 1048576).toFixed(1) + 'MB');
+                _log.info('[PERF] saveProjectAsN2D total: ' + (performance.now() - _t0).toFixed(0) + 'ms');
+                return buf;
+              });
             });
           })
           .then(function (compressed) {
@@ -666,6 +955,7 @@
 
       // Trigger the tool's save mechanism
       // The tool binds Ctrl+Shift+S to the tools-save element
+      var _tSave = performance.now();
       var saveBtn = document.getElementById('tools-save');
       if (saveBtn) {
         saveBtn.click();
