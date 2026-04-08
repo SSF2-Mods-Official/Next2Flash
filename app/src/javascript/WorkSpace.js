@@ -513,9 +513,9 @@ class WorkSpace
      * @method
      * @public
      */
-    toJSON ()
+    toJSON (light)
     {
-        const projectData = this._$project.toObject();
+        const projectData = this._$project.toObject(light);
         const uiData = this._$uiState.toObject();
 
         return JSON.stringify({
@@ -534,6 +534,7 @@ class WorkSpace
     temporarilySaved ()
     {
         Util.$updated = true;
+
         if (this._$currentData) {
             this._$currentData = null;
         }
@@ -552,7 +553,7 @@ class WorkSpace
             _resolve () {
                 if (resolved) return;
                 resolved = true;
-                const json = self.toJSON();
+                const json = self.toJSON(true);
                 self._$revision[idx] = json;
                 return json;
             },
@@ -589,7 +590,7 @@ class WorkSpace
         }
 
         if (!this._$currentData) {
-            this._$currentData = this.toJSON();
+            this._$currentData = this.toJSON(true);
         }
 
         const currentFrame = Util.$timelineFrame.currentFrame;

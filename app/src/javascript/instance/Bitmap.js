@@ -27,6 +27,7 @@ class Bitmap extends Instance
         }
 
         this._$graphicBuffer = null;
+        this._$bufferVersion = -1;
         this._$binary        = "";
     }
 
@@ -117,9 +118,16 @@ class Bitmap extends Instance
         if (!this._$binary) {
 
             if (!this._$buffer) {
+                if (!this._$width || !this._$height) {
+                    return "";
+                }
                 this._$buffer = new Uint8Array(
                     this._$width * this._$height * 4
                 );
+            }
+
+            if (!this._$buffer) {
+                return "";
             }
 
             const length = this._$buffer.length;
@@ -134,6 +142,8 @@ class Bitmap extends Instance
     }
     set buffer (binary)
     {
+        // Always invalidate cached binary when applying new buffer data.
+        this._$binary = "";
 
         switch (typeof binary) {
 
@@ -147,27 +157,25 @@ class Bitmap extends Instance
                 break;
 
             case "string":
-                if (!this._$binary) {
-                    if (binary.startsWith("b64:")) {
-                        // Base64-encoded RGBA from the N2D import pipeline.
-                        // Faster to transfer than latin-1 through URL-encoding.
-                        // _$binary stays "" so get buffer() computes it lazily.
-                        const decoded = atob(binary.slice(4));
-                        const length  = decoded.length;
-                        this._$buffer = new Uint8Array(length);
-                        for (let idx = 0; idx < length; ++idx) {
-                            this._$buffer[idx] = decoded.charCodeAt(idx);
-                        }
-                    } else {
-                        let length = binary.length;
-
-                        this._$buffer = new Uint8Array(length);
-                        for (let idx = 0; idx < length; ++idx) {
-                            this._$buffer[idx] = binary.charCodeAt(idx) & 0xff;
-                        }
-
-                        this._$binary = binary;
+                if (binary.startsWith("b64:")) {
+                    // Base64-encoded RGBA from the N2D import pipeline.
+                    // Faster to transfer than latin-1 through URL-encoding.
+                    // _$binary stays "" so get buffer() computes it lazily.
+                    const decoded = atob(binary.slice(4));
+                    const length  = decoded.length;
+                    this._$buffer = new Uint8Array(length);
+                    for (let idx = 0; idx < length; ++idx) {
+                        this._$buffer[idx] = decoded.charCodeAt(idx);
                     }
+                } else {
+                    let length = binary.length;
+
+                    this._$buffer = new Uint8Array(length);
+                    for (let idx = 0; idx < length; ++idx) {
+                        this._$buffer[idx] = binary.charCodeAt(idx) & 0xff;
+                    }
+
+                    this._$binary = binary;
                 }
                 break;
 
@@ -244,7 +252,28 @@ class Bitmap extends Instance
             "width":     this.width,
             "height":    this.height,
             "imageType": this.imageType,
-            "buffer":    this.buffer
+            "buffer":    this._$buffer || this.buffer
+        };
+    }
+
+    /**
+     * @description Return a lightweight object for undo snapshots (no buffer).
+     *
+     * @return {object}
+     * @method
+     * @public
+     */
+    toLightObject ()
+    {
+        return {
+            "id":        this.id,
+            "name":      this.name,
+            "type":      this.type,
+            "symbol":    this.symbol,
+            "folderId":  this.folderId,
+            "width":     this.width,
+            "height":    this.height,
+            "imageType": this.imageType
         };
     }
 
@@ -261,7 +290,7 @@ class Bitmap extends Instance
         return {
             "symbol":  this.symbol,
             "extends": this.defaultSymbol,
-            "buffer":  Array.from(this._$buffer),
+            "buffer":  this._$buffer ? Array.from(this._$buffer) : [],
             "bounds":  this.getBounds()
         };
     }
@@ -309,8 +338,14 @@ class Bitmap extends Instance
         graphics._$yMin     = 0;
         graphics._$yMax     = this.height;
 
+        const hydrationVersion = Util.$hydrationVersion | 0;
+        if (this._$bufferVersion !== hydrationVersion) {
+            this._$graphicBuffer = null;
+        }
+
         if (!this._$graphicBuffer) {
             this._$graphicBuffer = graphics._$getRecodes();
+            this._$bufferVersion = hydrationVersion;
         }
         graphics._$buffer = this._$graphicBuffer;
 

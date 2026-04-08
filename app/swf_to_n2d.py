@@ -1967,20 +1967,16 @@ class N2DBuilder:
         bitmap_count = 0
         decode_ok = 0
 
-        for cid in all_char_ids:
-            if self.char_types[cid] != 'bitmap':
-                continue
-            lid = self.swf_to_n2d[cid]
-            sym_name = self.symbol_names.get(cid, '')
-            display_name = sym_name.split('.')[-1] if sym_name else f"Bitmap_{cid}"
+        # Collect bitmap cids for parallel decode
+        bitmap_cids = [cid for cid in all_char_ids if self.char_types[cid] == 'bitmap']
 
+        def _decode_one_bitmap(cid):
+            """Decode a single bitmap's RGBA — safe for ThreadPoolExecutor."""
             width, height = self.bitmap_dims.get(cid, (0, 0))
-
-            # Decode RGBA from raw SWF tag data (once — cached in buffer_str)
             buffer_str = ''
+            rgba = b''
             if cid in self.raw_tag_data:
                 tag_type, body = self.raw_tag_data[cid]
-                rgba = b''
                 if tag_type in (TAG_DEFINE_BITS_LOSSLESS, TAG_DEFINE_BITS_LOSSLESS2):
                     dw, dh, rgba = decode_lossless_to_rgba(tag_type, body)
                     if dw and dh:
@@ -1991,9 +1987,6 @@ class N2DBuilder:
                     if dw and dh:
                         width, height = dw, dh
                 if rgba:
-                    # Scale down if either dimension exceeds the WebGL max texture size.
-                    # Most GPUs guarantee at least 4096; exceeding it causes
-                    # GL_INVALID_VALUE in glTexStorage2D.
                     _MAX_TEX = 4096
                     if width > _MAX_TEX or height > _MAX_TEX:
                         from PIL import Image as _PilImage
@@ -2004,10 +1997,25 @@ class N2DBuilder:
                         img = img.resize((new_w, new_h), _PilImage.LANCZOS)
                         rgba = img.tobytes()
                         width, height = new_w, new_h
-                        print(f"  [BITMAP] scaled cid={cid} → {new_w}x{new_h} (was {dw}x{dh})", flush=True)
-                    # Store as "b64:<base64>" — JS setter handles the prefix
                     buffer_str = 'b64:' + base64.b64encode(rgba).decode('ascii')
-                    decode_ok += 1
+            return cid, width, height, buffer_str
+
+        # Parallel bitmap decode (zlib decompress + pixel conversion are CPU-bound
+        # but release the GIL, so threads help)
+        from concurrent.futures import ThreadPoolExecutor
+        decoded_bitmaps = {}
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(bitmap_cids)))) as executor:
+            for cid, w, h, buf_str in executor.map(_decode_one_bitmap, bitmap_cids):
+                decoded_bitmaps[cid] = (w, h, buf_str)
+
+        for cid in bitmap_cids:
+            lid = self.swf_to_n2d[cid]
+            sym_name = self.symbol_names.get(cid, '')
+            display_name = sym_name.split('.')[-1] if sym_name else f"Bitmap_{cid}"
+
+            width, height, buffer_str = decoded_bitmaps[cid]
+            if buffer_str:
+                decode_ok += 1
 
             entry = {
                 'id': lid,
@@ -2957,7 +2965,7 @@ class N2DBuilder:
                 else:
                     rgba_bytes = buf.encode('latin-1')
                 bitmap_map[lid] = {
-                    'buffer': list(rgba_bytes),
+                    'buffer': rgba_bytes,
                     'width': w,
                     'height': h,
                 }
@@ -2985,7 +2993,7 @@ class N2DBuilder:
 
             if rgba:
                 bitmap_map[lid] = {
-                    'buffer': list(rgba),
+                    'buffer': bytes(rgba),
                     'width': w,
                     'height': h,
                 }

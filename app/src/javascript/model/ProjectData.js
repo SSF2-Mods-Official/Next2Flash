@@ -147,6 +147,19 @@ class ProjectData
      */
     loadFromObject (object)
     {
+        // Preserve binary buffer data from existing instances before clearing.
+        // Undo snapshots use light mode (no buffers) to save memory.
+        const savedBuffers = new Map();
+        if (this._$repository.count() > 0) {
+            for (const lib of this._$repository.getAll()) {
+                if (lib._$buffer) {
+                    savedBuffers.set(lib.id, lib._$buffer);
+                } else if (lib.buffer && typeof lib.buffer !== "string" || (typeof lib.buffer === "string" && lib.buffer.length > 0)) {
+                    savedBuffers.set(lib.id, lib.buffer);
+                }
+            }
+        }
+
         this._$characterId = object.characterId | 0;
         this._$name        = object.name;
         this._$stage       = new Stage(object.stage);
@@ -168,8 +181,17 @@ class ProjectData
         }
         const libraries = object.libraries;
         for (let idx = 0; idx < libraries.length; ++idx) {
-            this.addLibrary(libraries[idx]);
+            const libData = libraries[idx];
+            const instance = this.addLibrary(libData);
+            // Restore buffer if it was stripped from the light snapshot
+            if (instance && !instance._$buffer && savedBuffers.has(instance.id)) {
+                const buf = savedBuffers.get(instance.id);
+                if (typeof instance.buffer !== "undefined") {
+                    instance.buffer = buf;
+                }
+            }
         }
+        savedBuffers.clear();
     }
 
     /**
@@ -252,11 +274,15 @@ class ProjectData
      * @return {object}
      * @public
      */
-    toObject ()
+    toObject (light)
     {
         const libraries = [];
         for (const value of this._$repository.getAll()) {
-            libraries.push(value.toObject());
+            libraries.push(
+                light && typeof value.toLightObject === "function"
+                    ? value.toLightObject()
+                    : value.toObject()
+            );
         }
 
         return {

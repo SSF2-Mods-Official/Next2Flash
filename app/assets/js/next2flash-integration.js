@@ -230,72 +230,258 @@
    */
   var _activeHydrator = null;
   function _startBackgroundHydration(libCount) {
-    // Wait a bit for the tool to finish setting up workspace
-    setTimeout(function() {
+    var expectedLibs = parseInt(libCount) || 0;
+    var POLL_INTERVAL = 250;
+    var MAX_WAIT = 30000;
+    var waited = 0;
+    var wsCountBefore = (window.Util && window.Util.$workSpaces) ? window.Util.$workSpaces.length : 0;
+
+    _log.info('[Lazy] Starting hydration poll: expectedLibs=' + expectedLibs + ' wsCountBefore=' + wsCountBefore);
+
+    function waitForRepo() {
+      var Util = window.Util;
+      if (!Util || !Util.$workSpaces || Util.$workSpaces.length === 0) {
+        if (waited < MAX_WAIT) {
+          waited += POLL_INTERVAL;
+          return setTimeout(waitForRepo, POLL_INTERVAL);
+        }
+        _log.warn('[Lazy] No workspace found after ' + MAX_WAIT + 'ms');
+        return;
+      }
+
+      // Wait for a NEW workspace to appear (the one loading our N2D file)
+      if (Util.$workSpaces.length <= wsCountBefore && waited < MAX_WAIT) {
+        if (waited % 2000 < POLL_INTERVAL) {
+          _log.info('[Lazy] Waiting for new workspace: ' + Util.$workSpaces.length + ' workspaces (' + waited + 'ms)');
+        }
+        waited += POLL_INTERVAL;
+        return setTimeout(waitForRepo, POLL_INTERVAL);
+      }
+
+      var ws = Util.$currentWorkSpace && Util.$currentWorkSpace();
+      if (!ws && Util.$workSpaces.length) {
+        ws = Util.$workSpaces[Util.$workSpaces.length - 1];
+      }
+      var repo = ws && ws._$project && ws._$project.repository;
+      if (!repo) {
+        if (waited < MAX_WAIT) {
+          waited += POLL_INTERVAL;
+          return setTimeout(waitForRepo, POLL_INTERVAL);
+        }
+        _log.warn('[Lazy] No repository found after ' + MAX_WAIT + 'ms');
+        return;
+      }
+
+      // Wait until the tool finishes populating all libraries from the skeleton N2D
+      var currentCount = 0;
+      try { currentCount = repo.getAll().length; } catch(e) {}
+      if (expectedLibs > 0 && currentCount < expectedLibs && waited < MAX_WAIT) {
+        if (waited % 2000 < POLL_INTERVAL) {
+          _log.info('[Lazy] Waiting for repo: ' + currentCount + '/' + expectedLibs + ' libs (' + waited + 'ms)');
+        }
+        waited += POLL_INTERVAL;
+        return setTimeout(waitForRepo, POLL_INTERVAL);
+      }
+
+      _log.info('[Lazy] Repo ready: ' + currentCount + '/' + expectedLibs + ' libs after ' + waited + 'ms');
+      _serverLog('INFO', '[Lazy] Repo ready: ' + currentCount + '/' + expectedLibs + ' libs after ' + waited + 'ms');
+      beginHydration(repo);
+    }
+
+    function beginHydration(repo) {
       try {
-        // Access the tool's Util and repository
-        var Util = window.Util;
-        if (!Util || !Util.$workSpaces || Util.$workSpaces.length === 0) {
-          _log.info('[Lazy] No workspace found yet, retrying in 2s...');
-          setTimeout(function() { _startBackgroundHydration(libCount); }, 2000);
-          return;
-        }
-
-        var ws = Util.$workSpaces[Util.$workSpaces.length - 1];
-        var repo = ws._$project && ws._$project.repository;
-        if (!repo) {
-          _log.info('[Lazy] No repository found, retrying in 2s...');
-          setTimeout(function() { _startBackgroundHydration(libCount); }, 2000);
-          return;
-        }
-
         // Create hydrator with bulk fetch
+        if (_activeHydrator) {
+          _activeHydrator.abort();
+          _log.info('[Lazy] Aborted previous hydrator');
+        }
         _activeHydrator = new BackgroundHydrator('/api/lazy');
+
+        function logHydrationSnapshot(tag) {
+          try {
+            var libs = Array.from(repo.getAll());
+            var lazyCount = 0;
+            var bitmapCount = 0;
+            var bitmapMissingBuffer = 0;
+            var lazyTypeCounts = {};
+            for (var li = 0; li < libs.length; li++) {
+              var lib = libs[li];
+              if (!lib) continue;
+              var isBitmapLike = !!lib.imageType || (typeof lib.width === 'number' && typeof lib.height === 'number' && lib.type === 4);
+              if (lib._$lazy) {
+                lazyCount++;
+                var typeKey = String(lib.type != null ? lib.type : 'unknown');
+                lazyTypeCounts[typeKey] = (lazyTypeCounts[typeKey] || 0) + 1;
+              }
+              if (isBitmapLike) {
+                bitmapCount++;
+                if (!lib._$buffer || !lib._$buffer.length) {
+                  bitmapMissingBuffer++;
+                }
+              }
+            }
+
+            var stageArea = document.getElementById('stage-area');
+            var displayObjects = stageArea ? stageArea.querySelectorAll('.display-object').length : -1;
+            var canvases = stageArea ? stageArea.querySelectorAll('canvas').length : -1;
+
+            var msg = '[LazyDiag] ' + tag
+              + ' libs=' + libs.length
+              + ' lazy=' + lazyCount
+              + ' bitmaps=' + bitmapCount
+              + ' missingBitmapBuffers=' + bitmapMissingBuffer
+              + ' lazyTypeCounts=' + JSON.stringify(lazyTypeCounts)
+              + ' stageDisplayObjects=' + displayObjects
+              + ' stageCanvases=' + canvases;
+            _log.info(msg);
+            _serverLog('INFO', msg);
+          } catch (diagErr) {
+            _serverLog('WARN', '[LazyDiag] snapshot failed: ' + (diagErr.message || diagErr));
+          }
+        }
 
         _log.info('[Lazy] Starting bulk background hydration...');
         _activeHydrator.hydrate(repo, function(hydrated, total) {
           if (hydrated % 200 === 0 || hydrated === total) {
             _log.info('[Lazy] Hydrated ' + hydrated + '/' + total + ' libraries');
           }
-        }).then(function(count) {
-          _log.info('[Lazy] Background hydration complete: ' + count + ' libraries');
+        }).then(function(result) {
+          var hydrated = result && typeof result === 'object' ? result.hydrated : result;
+          var unresolved = result && typeof result === 'object' ? result.unresolved : 0;
+          var errors = result && typeof result === 'object' ? result.errors : 0;
+          var summary = '[Lazy] Background hydration complete: hydrated=' + hydrated + ' unresolved=' + unresolved + ' errors=' + errors;
+          _log.info(summary);
+          _serverLog('INFO', summary);
+          if (window.Util) {
+            window.Util.$hydrationVersion = (window.Util.$hydrationVersion | 0) + 1;
+            _log.info('[Lazy] Hydration version: ' + window.Util.$hydrationVersion);
+            _serverLog('INFO', '[Lazy] Hydration version: ' + window.Util.$hydrationVersion);
+          }
+          logHydrationSnapshot('after-hydrate-before-clear');
           _activeHydrator = null;
 
           // Trigger canvas re-render now that all data is loaded
           try {
             _log.info('[Lazy] Triggering canvas re-render...');
-            // Clear cached graphic buffers so they re-generate with real data
-            for (var lib of repo.getAll()) {
-              if (lib._$graphicBuffer) {
-                lib._$graphicBuffer = null;
+            // Clear cached graphic buffers in chunks via requestIdleCallback
+            // to avoid a 4+ second main-thread freeze on large projects
+            var allLibs = Array.from(repo.getAll());
+            var CHUNK = 200;
+            var idx = 0;
+            function clearChunk(deadline) {
+              while (idx < allLibs.length && (typeof deadline === 'undefined' || deadline.timeRemaining() > 1)) {
+                var lib = allLibs[idx++];
+                if (lib._$graphicBuffer) lib._$graphicBuffer = null;
+                if (lib._$cacheCanvas) lib._$cacheCanvas = null;
+                if (lib._$bitmapCanvas) lib._$bitmapCanvas = null;
               }
-              // Also clear any cached canvas elements on individual characters
-              if (lib._$cacheCanvas) {
-                lib._$cacheCanvas = null;
-              }
-              if (lib._$bitmapCanvas) {
-                lib._$bitmapCanvas = null;
+              if (idx < allLibs.length) {
+                requestIdleCallback(clearChunk, { timeout: 100 });
+              } else {
+                _log.info('[Lazy] Cleared caches for ' + allLibs.length + ' libraries');
+                finishHydrationRender();
               }
             }
-            // Flush the WebGL texture cache so stale black textures are discarded
-            try {
-              var player = window.next2d && window.next2d.player;
-              if (player && player.cacheStore) {
-                player.cacheStore.reset();
-                _log.info('[Lazy] WebGL cacheStore reset');
+            function finishHydrationRender() {
+              // Flush the WebGL texture cache so stale black textures are discarded
+              try {
+                var player = window.next2d && window.next2d.player;
+                if (player && player.cacheStore) {
+                  player.cacheStore.reset();
+                  _log.info('[Lazy] WebGL cacheStore reset');
+                  _serverLog('INFO', '[Lazy] WebGL cacheStore reset');
+                }
+              } catch (cacheErr) {
+                _log.warn('[Lazy] cacheStore reset failed:', cacheErr.message);
               }
-            } catch (cacheErr) {
-              _log.warn('[Lazy] cacheStore reset failed:', cacheErr.message);
-            }
-            // Re-initialize the workspace scene to force full re-render
-            if (ws._$scene) {
-              ws.initialize(ws._$scene);
-              // Force the actual canvas repaint so bitmaps appear
-              if (window.Util && window.Util.$baseController) {
-                window.Util.$baseController.reloadScreen();
+
+              // Force the actual canvas repaint so bitmaps appear.
+              // Hydration can complete before the stage timeline is fully initialized,
+              // so retry redraw briefly until the scene is ready.
+              var maxAttempts = 12;
+              function triggerHydrationRedraw(attempt) {
+                var Util = window.Util;
+                var stageArea = document.getElementById('stage-area');
+                if (!Util || !Util.$currentWorkSpace) {
+                  if (attempt === 1 || attempt === maxAttempts) {
+                    _serverLog('INFO', '[LazyDiag] redraw attempt ' + attempt + ': Util not ready');
+                  }
+                  if (attempt < maxAttempts) {
+                    return setTimeout(function() { triggerHydrationRedraw(attempt + 1); }, 250);
+                  }
+                  _log.warn('[Lazy] Redraw skipped: Util not ready after retries');
+                  _serverLog('WARN', '[Lazy] Redraw skipped: Util not ready after retries');
+                  return;
+                }
+
+                var ws = Util.$currentWorkSpace();
+                var scene = ws && ws.scene;
+                if (!scene || !stageArea) {
+                  if (attempt === 1 || attempt === maxAttempts) {
+                    _serverLog('INFO', '[LazyDiag] redraw attempt ' + attempt + ': scene/stage not ready');
+                  }
+                  if (attempt < maxAttempts) {
+                    return setTimeout(function() { triggerHydrationRedraw(attempt + 1); }, 250);
+                  }
+                  _log.warn('[Lazy] Redraw skipped: scene/stage not ready after retries');
+                  _serverLog('WARN', '[Lazy] Redraw skipped: scene/stage not ready after retries');
+                  return;
+                }
+
+                try {
+                  if (typeof scene.cacheClear === 'function') {
+                    scene.cacheClear();
+                  } else if (scene._$layers) {
+                    scene._$layers.forEach(function(layer) {
+                      var chars = layer._$characters;
+                      if (chars) {
+                        for (var ci = 0; ci < chars.length; ci++) {
+                          chars[ci].dispose();
+                        }
+                      }
+                    });
+                  }
+                } catch (dispErr) {
+                  _log.warn('[Lazy] Character cache clear failed:', dispErr.message);
+                }
+
+                var frame = Util.$timelineFrame && Util.$timelineFrame.currentFrame
+                  ? Util.$timelineFrame.currentFrame
+                  : 1;
+
+                var renderPromise = null;
+                try {
+                  if (typeof scene.changeFrame === 'function') {
+                    renderPromise = scene.changeFrame(frame);
+                  } else if (Util.$baseController && Util.$baseController.reloadScreen) {
+                    Util.$baseController.reloadScreen();
+                  }
+                } catch (renderErr) {
+                  renderPromise = Promise.reject(renderErr);
+                }
+
+                Promise.resolve(renderPromise)
+                  .then(function() {
+                    _log.info('[Lazy] Canvas re-render triggered at frame ' + frame + ' (attempt ' + attempt + ')');
+                    _serverLog('INFO', '[Lazy] Canvas re-render triggered at frame ' + frame + ' (attempt ' + attempt + ')');
+                    logHydrationSnapshot('after-rerender-immediate');
+                    setTimeout(function() {
+                      logHydrationSnapshot('after-rerender-1000ms');
+                    }, 1000);
+                  })
+                  .catch(function(err) {
+                    _log.warn('[Lazy] Re-render attempt failed:', err && err.message ? err.message : err);
+                    if (attempt < maxAttempts) {
+                      setTimeout(function() { triggerHydrationRedraw(attempt + 1); }, 250);
+                    } else {
+                      _serverLog('WARN', '[Lazy] Re-render failed after retries');
+                    }
+                  });
               }
-              _log.info('[Lazy] Canvas re-render triggered');
+
+              triggerHydrationRedraw(1);
             }
+            requestIdleCallback(clearChunk, { timeout: 100 });
           } catch (renderErr) {
             _log.warn('[Lazy] Canvas re-render failed (non-fatal):', renderErr.message);
           }
@@ -306,7 +492,9 @@
       } catch (e) {
         _log.error('[Lazy] Failed to start background hydration:', e);
       }
-    }, 1000);
+    }
+
+    waitForRepo();
   }
 
   function onSWFFileSelected(e) {
@@ -979,55 +1167,87 @@
   /* ================================================================== */
   /*  N2D blob parsing helper (for export fallback)                      */
   /* ================================================================== */
-  function _parseN2DBlob(blob) {
-    return blob.arrayBuffer()
-      .then(function (buf) {
-        var bytes = new Uint8Array(buf);
-        // Detect ZIP-based N2D format (PK magic bytes)
-        if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4B) {
-          return JSZip.loadAsync(buf).then(function (zip) {
-            // Try MessagePack format first (preferred)
-            if (zip.file('project.msgpack')) {
-              _log.info('[N2F] Loading MessagePack format (binary)');
-              return zip.file('project.msgpack').async('uint8array').then(function (msgpackData) {
-                if (typeof MessagePack !== 'undefined' && MessagePack.decode) {
-                  try {
-                    var decoded = MessagePack.decode(msgpackData);
-                   _log.info('[N2F] MessagePack decoded successfully');
-                    return decoded;
-                  } catch (e) {
-                    _log.error('[N2F] MessagePack decode failed:', e);
-                    return null;
-                  }
-                } else {
-                  _log.error('[N2F] MessagePack library not loaded');
-                  return null;
-                }
-              });
+  function _parseN2DBlobWithWorker(blob) {
+    return blob.arrayBuffer().then(function (buf) {
+      return new Promise(function (resolve, reject) {
+        var worker;
+        try {
+          worker = new Worker('./assets/js/workers/swf-parse-worker.js');
+        } catch (e) {
+          _log.warn('[N2F] Parse worker creation failed, using fallback:', e.message);
+          return resolve(_parseN2DBlobFallback(buf));
+        }
+
+        worker.onmessage = function (e) {
+          var msg = e.data;
+          worker.terminate();
+          if (msg.type === 'parsed') {
+            _log.info('[N2F] Parse Worker: decoded ' + msg.format + ' format');
+            resolve(msg.data);
+          } else if (msg.type === 'raw-blob') {
+            // Legacy format — decode on main thread
+            resolve(_parseN2DBlobFallback(msg.buffer));
+          } else if (msg.type === 'error') {
+            _log.warn('[N2F] Parse worker error, using fallback:', msg.message);
+            resolve(_parseN2DBlobFallback(buf));
+          }
+        };
+
+        worker.onerror = function (e) {
+          worker.terminate();
+          _log.warn('[N2F] Parse worker crashed, using fallback');
+          resolve(_parseN2DBlobFallback(buf));
+        };
+
+        worker.postMessage({ type: 'parse', buffer: buf }, [buf]);
+      });
+    });
+  }
+
+  function _parseN2DBlobFallback(buf) {
+    var bytes = new Uint8Array(buf);
+    // Detect ZIP-based N2D format (PK magic bytes)
+    if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4B) {
+      return JSZip.loadAsync(buf).then(function (zip) {
+        if (zip.file('project.msgpack')) {
+          _log.info('[N2F] Loading MessagePack format (binary)');
+          return zip.file('project.msgpack').async('uint8array').then(function (msgpackData) {
+            if (typeof MessagePack !== 'undefined' && MessagePack.decode) {
+              try {
+                var decoded = MessagePack.decode(msgpackData);
+                _log.info('[N2F] MessagePack decoded successfully');
+                return decoded;
+              } catch (e) {
+                _log.error('[N2F] MessagePack decode failed:', e);
+                return null;
+              }
+            } else {
+              _log.error('[N2F] MessagePack library not loaded');
+              return null;
             }
-            // Fall back to JSON format (legacy)
-            _log.info('[N2F] Loading JSON format (legacy)');
-            return zip.file('project.json').async('string');
-          }).then(function (result) {
-            // If result is already an object (from MessagePack), return it
-            if (typeof result === 'object') return result;
-            // Otherwise parse JSON
-            try { return JSON.parse(result); }
-            catch (e) { return null; }
           });
         }
-        // Legacy zlib-compressed format
-        var ds = new DecompressionStream('deflate');
-        var writer = ds.writable.getWriter();
-        writer.write(bytes);
-        writer.close();
-        return new Response(ds.readable).text();
-      })
-      .then(function (result) {
-        if (typeof result === 'object') return result;  // already parsed from ZIP path
-        try { return JSON.parse(decodeURIComponent(result)); }
-        catch (e) { return JSON.parse(result); }
-      })
+        _log.info('[N2F] Loading JSON format (legacy)');
+        return zip.file('project.json').async('string');
+      }).then(function (result) {
+        if (typeof result === 'object') return result;
+        try { return JSON.parse(result); }
+        catch (e) { return null; }
+      });
+    }
+    // Legacy zlib-compressed format
+    var ds = new DecompressionStream('deflate');
+    var writer = ds.writable.getWriter();
+    writer.write(bytes);
+    writer.close();
+    return new Response(ds.readable).text().then(function (text) {
+      try { return JSON.parse(decodeURIComponent(text)); }
+      catch (e) { return JSON.parse(text); }
+    });
+  }
+
+  function _parseN2DBlob(blob) {
+    return _parseN2DBlobWithWorker(blob)
       .catch(function (err) {
         _log.warn('Failed to parse stored N2D blob:', err);
         return null;

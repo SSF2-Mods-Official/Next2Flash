@@ -28,6 +28,7 @@ class Character
         this._$offsetY        = 0;
         this._$name           = "";
         this._$cachePlaces    = [];
+        this._$cacheVersion   = -1;
         this._$referencePoint = { "x": 0, "y": 0 };
 
         if (object) {
@@ -704,6 +705,11 @@ class Character
             }
         }
 
+        const hydrationVersion = Util.$hydrationVersion | 0;
+        if (this._$canvas && this._$cacheVersion !== hydrationVersion) {
+            this.dispose();
+        }
+
         if (this._$canvas) {
             if (canvas instanceof HTMLCanvasElement) {
                 Util.$poolCanvas(canvas);
@@ -817,6 +823,7 @@ class Character
                 this._$offsetX = canvas._$offsetX;
                 this._$offsetY = canvas._$offsetY;
                 this._$canvas  = canvas;
+                this._$cacheVersion = hydrationVersion;
 
                 return Promise.resolve(canvas);
             });
@@ -1621,8 +1628,12 @@ class Character
      */
     dispose ()
     {
-        Util.$sleepCanvases.push(this._$canvas);
+        if (this._$canvas) {
+            Util.$sleepCanvases.push(this._$canvas);
+        }
         this._$canvas = null;
         this._$base64 = null;
+        this._$cacheVersion = -1;
     }
+
 }

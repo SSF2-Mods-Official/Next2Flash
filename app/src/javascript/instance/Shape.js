@@ -44,6 +44,7 @@ class Shape extends Instance
         }
 
         this._$graphicBuffer = null;
+        this._$bufferVersion = -1;
     }
 
     /**
@@ -1730,6 +1731,11 @@ class Shape extends Instance
 
         }
 
+        const hydrationVersion = Util.$hydrationVersion | 0;
+        if (this._$bufferVersion !== hydrationVersion) {
+            this._$graphicBuffer = null;
+        }
+
         if (!this._$graphicBuffer) {
 
             // Resolve numeric bitmap library IDs to BitmapData objects.
@@ -1794,10 +1800,50 @@ class Shape extends Instance
                 }
             }
 
-            Util.$root.stage._$player.removeCache(
-                `${Util.$loaderInfo._$id}@${this.id}`
-            );
+            // Validate _$recode: log any non-BitmapData at BITMAP_FILL positions
+            if (graphics._$recode) {
+                const { BitmapData } = window.next2d.display;
+                const rc = graphics._$recode;
+                for (let vi = 0; vi < rc.length; vi++) {
+                    if (rc[vi] === Graphics.BITMAP_FILL) {
+                        const bd = rc[vi + 1];
+                        if (bd && !(bd instanceof BitmapData)
+                            && typeof bd !== "number"
+                        ) {
+                            console.warn(
+                                `[ShapeDiag] lib=${this.id} BITMAP_FILL@${vi+1}`
+                                + ` is ${typeof bd}`
+                                + (bd && bd.constructor
+                                    ? ` (${bd.constructor.name})`
+                                    : "")
+                                + ` keys=${bd ? Object.keys(bd).join(",") : "null"}`
+                                + ` bitmapId=${this._$bitmapId}`
+                                + ` inBitmap=${this._$inBitmap}`
+                            );
+                        }
+                    }
+                    if (rc[vi] === Graphics.BITMAP_STROKE) {
+                        const bd = rc[vi + 5];
+                        if (bd && !(bd instanceof BitmapData)
+                            && typeof bd !== "number"
+                        ) {
+                            console.warn(
+                                `[ShapeDiag] lib=${this.id} BITMAP_STROKE@${vi+5}`
+                                + ` is ${typeof bd}`
+                                + (bd && bd.constructor
+                                    ? ` (${bd.constructor.name})`
+                                    : "")
+                                + ` keys=${bd ? Object.keys(bd).join(",") : "null"}`
+                                + ` bitmapId=${this._$bitmapId}`
+                                + ` inBitmap=${this._$inBitmap}`
+                            );
+                        }
+                    }
+                }
+            }
+
             this._$graphicBuffer = graphics._$getRecodes();
+            this._$bufferVersion = hydrationVersion;
         }
         graphics._$buffer = this._$graphicBuffer;
 

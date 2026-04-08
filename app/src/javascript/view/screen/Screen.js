@@ -18,6 +18,20 @@ class Screen extends BaseScreen
          * @private
          */
         this._$timerId = -1;
+
+        /**
+         * @description Whether the first playback frame has been rendered
+         * @type {boolean}
+         * @private
+         */
+        this._$playbackStarted = false;
+
+        /**
+         * @description Throttled draw failure diagnostics
+         * @type {Map<string, number>}
+         * @private
+         */
+        this._$drawFailCounts = new Map();
     }
 
     /**
@@ -774,9 +788,32 @@ class Screen extends BaseScreen
         }
 
         return drawPromise
-            .catch(() =>
+            .catch((error) =>
             {
-                // Suppress drawImage errors from stale character data
+                // Suppress drawImage errors from stale character data.
+                // Track sparse diagnostics for bitmap-related misses.
+                try {
+                    const key = `${character.libraryId}:${instance.type}`;
+                    const count = (this._$drawFailCounts.get(key) || 0) + 1;
+                    this._$drawFailCounts.set(key, count);
+
+                    if (count <= 3 || count % 50 === 0) {
+                        const name = instance.name || "";
+                        const lazy = instance._$lazy ? "1" : "0";
+                        const hv = Util.$hydrationVersion | 0;
+                        const msg = `[DrawFail] lib=${character.libraryId} type=${instance.type} name=${name} lazy=${lazy} frame=${frame} hv=${hv} count=${count} err=${error && error.message ? error.message : "unknown"}`;
+                        console.warn(msg);
+                        if (!window.__N2F_DRAW_FAILS__) {
+                            window.__N2F_DRAW_FAILS__ = [];
+                        }
+                        window.__N2F_DRAW_FAILS__.push(msg);
+                        if (window.__N2F_DRAW_FAILS__.length > 200) {
+                            window.__N2F_DRAW_FAILS__.shift();
+                        }
+                    }
+                } catch (diagErr) {
+                    // ignore diagnostic failures
+                }
                 return null;
             })
             .then((canvas) =>
@@ -792,7 +829,7 @@ class Screen extends BaseScreen
                 }
                 div.setAttribute("data-child", "true");
 
-                if (Util.$timelinePlayer.stopFlag) {
+                if (Util.$timelinePlayer.stopFlag && !parent_scene) {
 
                     div.setAttribute("id", `character-${character.id}`);
                     div.setAttribute("data-character-id", `${character.id}`);
@@ -981,7 +1018,7 @@ class Screen extends BaseScreen
                     }
                 }
 
-                if (Util.$timelinePlayer.stopFlag) {
+                if (Util.$timelinePlayer.stopFlag && !parent_scene) {
                     switch (instance._$type) {
 
                         case InstanceType.MOVIE_CLIP:
@@ -1222,6 +1259,17 @@ class Screen extends BaseScreen
      * @method
      * @public
      */
+    /**
+     * @description Reset playback state
+     * @return {void}
+     * @method
+     * @public
+     */
+    clearPlaybackCache ()
+    {
+        this._$playbackStarted = false;
+    }
+
     clearStageArea ()
     {
         const stageArea = document.getElementById("stage-area");

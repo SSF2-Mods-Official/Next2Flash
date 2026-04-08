@@ -81,6 +81,13 @@ class TimelinePlayer extends BaseTimeline
          * @private
          */
         this._$run = null;
+
+        /**
+         * @type {boolean}
+         * @default false
+         * @private
+         */
+        this._$rendering = false;
     }
 
     /**
@@ -150,6 +157,12 @@ class TimelinePlayer extends BaseTimeline
             // eslint-disable-next-line no-loop-func
             element.addEventListener("mousedown", (event) =>
             {
+                console.log('[PlayDbg] Button mousedown:', id,
+                    'display:', element.style.display,
+                    'target:', event.target.id,
+                    'stopFlag:', this._$stopFlag,
+                    'rendering:', this._$rendering);
+
                 // 親のイベント中止
                 event.stopPropagation();
 
@@ -174,6 +187,10 @@ class TimelinePlayer extends BaseTimeline
      */
     executeTimelinePlay ()
     {
+        console.log('[PlayDbg] executeTimelinePlay called — stopFlag:', this._$stopFlag,
+            'rendering:', this._$rendering, 'timerId:', this._$timerId,
+            'frame:', Util.$timelineFrame.currentFrame);
+
         if (this._$stopFlag) {
 
             if ("next2d" in window) {
@@ -190,6 +207,9 @@ class TimelinePlayer extends BaseTimeline
 
                 // サウンド設定を初期化
                 Util.$soundController.clear();
+
+                // Reset rendering flag from any prior stuck state
+                this._$rendering = false;
 
                 this._$stopFlag = false;
 
@@ -243,13 +263,23 @@ class TimelinePlayer extends BaseTimeline
                 this._$baseOffsetHalfWidth = element.offsetWidth / 2;
                 this._$clientWidth = element.clientWidth;
 
+                this._$fps = 1000 / (document.getElementById("stage-fps").value | 0);
+
                 this._$startTime = window.performance.now();
-                this._$fps       = 1000 / (document.getElementById("stage-fps").value | 0);
                 this._$timerId   = window.requestAnimationFrame(this._$run);
+
+                console.log('[PlayDbg] PLAY started — totalFrame:', this._$totalFrame,
+                    'fps interval:', this._$fps.toFixed(1) + 'ms',
+                    'startFrame:', Util.$timelineFrame.currentFrame,
+                    'timerId:', this._$timerId);
+
+            } else {
+                console.log('[PlayDbg] PLAY skipped — totalFrame <= 1:', this._$totalFrame);
             }
 
         } else {
 
+            console.log('[PlayDbg] PLAY toggled to STOP (was playing)');
             this.executeTimelineStop();
 
         }
@@ -297,25 +327,34 @@ class TimelinePlayer extends BaseTimeline
      */
     executeTimelineStop (reload = true)
     {
+        console.log('[PlayDbg] executeTimelineStop called — stopFlag:', this._$stopFlag,
+            'rendering:', this._$rendering, 'timerId:', this._$timerId,
+            'frame:', Util.$timelineFrame.currentFrame, 'reload:', reload);
+
         // タイマーを終了
         window.cancelAnimationFrame(this._$timerId);
 
         // 再生中のサウンドを全て停止する
         this.stopAllSound();
 
+        // Clear playback DOM cache
+        Util.$screen.clearPlaybackCache();
+
         // 変数を初期化
-        this._$stopFlag = true;
-        this._$timerId  = -1;
+        this._$stopFlag  = true;
+        this._$timerId   = -1;
+        this._$rendering = false;
 
         // 再生ボタンを表示
-        document
-            .getElementById("timeline-play")
-            .style.display = "";
+        const playBtn = document.getElementById("timeline-play");
+        const stopBtn = document.getElementById("timeline-stop");
+        playBtn.style.display = "";
+        stopBtn.style.display = "none";
 
-        // 停止ボタンを非表示
-        document
-            .getElementById("timeline-stop")
-            .style.display = "none";
+        console.log('[PlayDbg] STOP done — play btn display:', JSON.stringify(playBtn.style.display),
+            'stop btn display:', JSON.stringify(stopBtn.style.display),
+            'play btn offsetParent:', !!playBtn.offsetParent,
+            'stop btn offsetParent:', !!stopBtn.offsetParent);
 
         // 再生位置で再描画
         if (reload) {
@@ -376,13 +415,53 @@ class TimelinePlayer extends BaseTimeline
             return ;
         }
 
+        // Skip frame if previous render is still in progress
+        if (this._$rendering) {
+            // Track how long we've been stuck waiting
+            if (!this._$renderWaitStart) {
+                this._$renderWaitStart = timestamp;
+            } else if (timestamp - this._$renderWaitStart > 5000) {
+                console.error('[PlayDbg] _$rendering stuck TRUE for 5s! Force-resetting.',
+                    'frame:', Util.$timelineFrame.currentFrame);
+                this._$rendering = false;
+                this._$renderWaitStart = 0;
+            }
+            this._$timerId = window.requestAnimationFrame(this._$run);
+            return;
+        }
+        this._$renderWaitStart = 0;
+
         let delta = timestamp - this._$startTime;
         if (delta > this._$fps) {
+
+            // ── Cache pressure relief: trim oversized cacheStore every 15 frames ──
+            if (!this._$flushCounter) this._$flushCounter = 0;
+            this._$flushCounter++;
+            if (this._$flushCounter >= 15) {
+                this._$flushCounter = 0;
+                try {
+                    var player = window.next2d && window.next2d.player;
+                    if (player && player.cacheStore && player.cacheStore._$store) {
+                        var store = player.cacheStore._$store;
+                        if (store.size > 100) {
+                            var count = 0;
+                            var limit = store.size - 100;
+                            for (var _key of store.keys()) {
+                                if (count >= limit) break;
+                                player.cacheStore.removeCache(_key);
+                                count++;
+                            }
+                        }
+                    }
+                } catch (e) { /* non-fatal */ }
+            }
 
             let frame = Util.$timelineFrame.currentFrame + 1;
             if (frame > this._$totalFrame) {
 
                 if (!this._$repeat) {
+                    console.log('[PlayDbg] Reached end of timeline at frame',
+                        frame - 1, '/', this._$totalFrame, '— stopping');
                     return this.executeTimelineStop();
                 }
 
@@ -419,14 +498,40 @@ class TimelinePlayer extends BaseTimeline
             // 描画した時間を更新
             this._$startTime = timestamp - delta % this._$fps;
 
+            // Log slow frames and periodic status
+            var renderStart = performance.now();
+            if (delta > 500) {
+                console.warn('[PlayDbg] SLOW delta:', delta.toFixed(0) + 'ms',
+                    'at frame', frame, '/', this._$totalFrame);
+            }
+            if (frame % 10 === 0 || frame === 1) {
+                console.log('[PlayDbg] Frame', frame, '/', this._$totalFrame,
+                    'delta:', delta.toFixed(0) + 'ms',
+                    'heap:', (performance.memory ? (performance.memory.usedJSHeapSize / 1048576).toFixed(0) + 'MB' : 'n/a'));
+            }
+
             // 再描画
-            this.reloadScreen();
+            this._$rendering = true;
+            var self = this;
+            Promise.resolve(this.reloadScreen()).then(function() {
+                var renderTime = performance.now() - renderStart;
+                self._$rendering = false;
+                if (renderTime > 100) {
+                    console.warn('[PlayDbg] Slow render:', renderTime.toFixed(0) + 'ms',
+                        'frame', Util.$timelineFrame.currentFrame);
+                }
+            }, function(err) {
+                console.error('[PlayDbg] Render FAILED at frame',
+                    Util.$timelineFrame.currentFrame, err);
+                self._$rendering = false;
+            });
 
         }
 
         // 描画のタイマーをセット
         this._$timerId = window.requestAnimationFrame(this._$run);
     }
+
 }
 
 Util.$timelinePlayer = new TimelinePlayer();

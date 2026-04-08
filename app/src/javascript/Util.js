@@ -53,6 +53,8 @@ Util.$canvases                = [];
 Util.$sleepCanvases           = [];
 Util.$waitFiles               = [];
 Util.$loadingFile             = false;
+// Incremented after lazy hydration completes to invalidate stale draw caches.
+Util.$hydrationVersion        = 0;
 
 const userAgentData = window.navigator.userAgentData;
 if (userAgentData) {
@@ -1058,6 +1060,12 @@ Util.$showPreview = () =>
     const json = Publish.toJSON();
     Util.$useIds.clear();
 
+    if (!window.next2d || !window.next2d.display) {
+        console.error("[Preview] next2d player not loaded");
+        Util.$hidePreview();
+        return;
+    }
+
     const { Loader } = window.next2d.display;
     const { URLRequest } = window.next2d.net;
     const { Event } = window.next2d.events;
@@ -1095,6 +1103,13 @@ Util.$showPreview = () =>
 
             player.cacheStore.reset();
             player.play();
+        });
+
+    loader
+        .contentLoaderInfo
+        .addEventListener("ioError", (event) =>
+        {
+            console.error("[Preview] Loader IO error:", event);
         });
 
     loader.load(new URLRequest(

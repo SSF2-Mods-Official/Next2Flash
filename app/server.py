@@ -1140,6 +1140,30 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                     compressed = open(skeleton_cache, 'rb').read()
                     _tick(f"serving cached skeleton: {len(compressed):,} bytes")
 
+                    # Read lib/script counts from the full N2D cache
+                    _skel_lib_count = 0
+                    _skel_script_count = 0
+                    _full_n2d = os.path.join(project_dir, 'project.n2d')
+                    if os.path.isfile(_full_n2d):
+                        try:
+                            import zipfile as _zipfile
+                            import io as _io
+                            with _zipfile.ZipFile(_full_n2d, 'r') as _zf:
+                                _names = _zf.namelist()
+                                if 'project.msgpack' in _names:
+                                    _raw = _zf.read('project.msgpack')
+                                    _n2d = msgpack.unpackb(_raw, raw=False)
+                                elif 'project.json' in _names:
+                                    _raw = _zf.read('project.json')
+                                    _n2d = json.loads(_raw)
+                                else:
+                                    _n2d = {}
+                                _skel_lib_count = len(_n2d.get('libraries', []))
+                                _skel_script_count = len(_n2d.get('scripts', []))
+                            _tick(f"skeleton lib count from full N2D: {_skel_lib_count}")
+                        except Exception as _e:
+                            _tick(f"could not read lib count from full N2D: {_e}")
+
                     with self._project_lock:
                         Next2FlashHandler._current_project_dir = project_dir
 
@@ -1148,8 +1172,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                     self.send_header('Content-Type', 'application/octet-stream')
                     self.send_header('Content-Disposition', f'attachment; filename="{name}.n2d"')
                     self.send_header('X-N2D-Name', name)
-                    self.send_header('X-N2D-Libraries', '0')
-                    self.send_header('X-N2D-Scripts', '0')
+                    self.send_header('X-N2D-Libraries', str(_skel_lib_count))
+                    self.send_header('X-N2D-Scripts', str(_skel_script_count))
                     self.send_header('X-N2D-Format', 'msgpack')
                     self.send_header('X-Project-Dir', project_dir)
                     self.send_header('Content-Length', str(len(compressed)))

@@ -228,6 +228,26 @@ class Sound extends Instance
     }
 
     /**
+     * @description Return a lightweight object for undo snapshots (no buffer).
+     *
+     * @return {object}
+     * @method
+     * @public
+     */
+    toLightObject ()
+    {
+        return {
+            "id":        this.id,
+            "name":      this.name,
+            "type":      this.type,
+            "symbol":    this.symbol,
+            "folderId":  this.folderId,
+            "volume":    this.volume,
+            "loopCount": this.loopCount
+        };
+    }
+
+    /**
      * @description 書き出し用のObjectを返す
      *              Returns an Object for export
      *

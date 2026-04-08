@@ -511,17 +511,46 @@ class Instance
         canvas._$offsetY = 0 > object.offsetY ? object.offsetY : 0;
 
         // playerで描画を実行
+        // Safety net: bitmapData.draw() is synchronous (worker disabled).
+        // If the player early-returns without calling resolve (e.g. zero-size
+        // BitmapData, null canvas context), resolve with the canvas anyway
+        // so Promise.all() in changeFrame() never hangs.
         return new Promise((resolve) =>
         {
             const { Matrix } = window.next2d.geom;
+            let called = false;
+            const safeResolve = (result) => {
+                if (!called) {
+                    called = true;
+                    resolve(result);
+                }
+            };
+            try {
+                bitmapData.draw(
+                    container,
+                    new Matrix(sacle, 0, 0, sacle, tx, ty),
+                    null,
+                    canvas,
+                    safeResolve
+                );
+            } catch (e) {
+                // swallow — resolve below
+            }
+            if (!called) {
+                resolve(canvas);
+            }
 
-            bitmapData.draw(
-                container,
-                new Matrix(sacle, 0, 0, sacle, tx, ty),
-                null,
-                canvas,
-                resolve
-            );
+            // Release GPU resources immediately — result is already on the 2D canvas.
+            // Setting canvas=null triggers the BitmapData setter which releases
+            // its WebGL texture via frameBuffer.releaseTexture().
+            try {
+                bitmapData.canvas = null;
+            } catch (e) { /* swallow */ }
+
+            // Detach display tree to break refs and allow GC
+            try {
+                container.removeChildren();
+            } catch (e) { /* swallow */ }
         });
     }
 
@@ -659,11 +688,17 @@ class Instance
             ratio *= Util.$zoomScale;
         }
 
-        return new BitmapData(
-            Math.ceil(width  * ratio),
-            Math.ceil(height * ratio),
-            true, 0
-        );
+        // Cap dimensions to prevent OOM on large MovieClips
+        const MAX_DIM = 4096;
+        let w = Math.ceil(width  * ratio);
+        let h = Math.ceil(height * ratio);
+        if (w > MAX_DIM || h > MAX_DIM) {
+            const scale = MAX_DIM / Math.max(w, h);
+            w = Math.ceil(w * scale);
+            h = Math.ceil(h * scale);
+        }
+
+        return new BitmapData(w, h, true, 0);
     }
 
     /**

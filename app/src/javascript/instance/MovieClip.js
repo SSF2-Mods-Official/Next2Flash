@@ -380,7 +380,10 @@ class MovieClip extends Instance
             Util.$sceneChange.offsetY  = offsetY;
         }
 
+        const isPlayback = !Util.$timelinePlayer.stopFlag;
+
         const layers = Array.from(this._$layers.values());
+
         while (layers.length) {
             const layer = layers.pop();
             if (layer.disable || layer.mode === LayerMode.MASK && layer.lock) {
@@ -391,8 +394,7 @@ class MovieClip extends Instance
 
         this._$currentFrame = frame;
 
-        return Promise
-            .all(promises)
+        return Promise.all(promises)
             .then((values) =>
             {
                 // ステージのelementを全て削除
@@ -434,6 +436,14 @@ class MovieClip extends Instance
                         object.div.appendChild(object.canvas);
                         element.appendChild(object.div);
                     }
+                }
+
+                // During playback, skip editor UI updates (pointers, tween, transform)
+                if (isPlayback) {
+                    while (Util.$sleepCanvases.length) {
+                        Util.$poolCanvas(Util.$sleepCanvases.pop());
+                    }
+                    return;
                 }
 
                 // スクリーンエリアの変形Elementの配置を再計算

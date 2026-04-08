@@ -29,6 +29,21 @@ const SERVER_SCRIPT = path.join(APP_DIR, 'server.py');
 const SERVER_PORT = parseInt(process.env.N2F_PORT || '5000', 10);
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 
+// ── Desktop GPU & performance flags (must be set before app.ready) ────────
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
+app.commandLine.appendSwitch('enable-native-gpu-memory-buffers');
+app.commandLine.appendSwitch('canvas-oop-rasterization');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=4096');
+
+// ANGLE backend: use D3D11 for best WebGL2 compat on Windows.
+// Alternatives: 'd3d11', 'd3d9', 'gl', 'vulkan', 'swiftshader', 'metal'
+app.commandLine.appendSwitch('use-angle', 'd3d11');
+// Enable GPU process scheduling priority for smoother frame delivery
+app.commandLine.appendSwitch('enable-features', 'GpuScheduling');
+
 let mainWindow = null;
 let profilerWindow = null;
 let pythonProcess = null;
@@ -114,6 +129,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      backgroundThrottling: false,
     },
     show: false,
   });
@@ -128,6 +144,21 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
+  });
+
+  // Prevent the tool's auto-save from persisting closed projects to IndexedDB.
+  // On close, mark Util.$updated = false so the beforeunload handler skips
+  // auto-save, then delete the IndexedDB store so no stale project loads on restart.
+  mainWindow.on('close', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.executeJavaScript(`
+        try { if (window.Util) window.Util.$updated = false; } catch(e) {}
+        try {
+          var dbName = (window.Util ? window.Util.PREFIX + '@' + window.Util.DATABASE_NAME : null);
+          if (dbName) indexedDB.deleteDatabase(dbName);
+        } catch(e) {}
+      `).catch(() => {});
+    }
   });
 
   mainWindow.on('closed', () => {
@@ -183,11 +214,24 @@ function createProfilerWindow() {
 }
 
 function sendProfilerEvent(event) {
-  // Write to log file (skip heartbeats — too noisy)
-  if (profilerLogStream && event.type !== 'heartbeat') {
+  // Write to log file
+  if (profilerLogStream) {
     const ts = new Date().toISOString();
-    const ms = event.ms !== undefined ? ` [${event.ms.toFixed(1)}ms]` : '';
-    profilerLogStream.write(`${ts}  ${event.type || 'timer'}  ${event.label || event.name || ''}${ms}\n`);
+    if (event.type === 'heartbeat') {
+      // Compact one-liner for heartbeat: FPS, heap, DOM count, avg frame time
+      const fps = event.fps || 0;
+      const heap = event.heapMB || 0;
+      const dom = event.domNodes || 0;
+      const frameMs = event.ms || 0;
+      profilerLogStream.write(`${ts}  heartbeat  FPS:${fps} Heap:${heap}MB DOM:${dom} FrameTime:${frameMs}ms\n`);
+      // Emit frame-drop warning for severe drops (playback stutter)
+      if (fps > 0 && fps < 20) {
+        profilerLogStream.write(`${ts}  warn  Frame drop: ${fps} FPS (target 60)\n`);
+      }
+    } else {
+      const ms = event.ms !== undefined ? ` [${event.ms.toFixed(1)}ms]` : '';
+      profilerLogStream.write(`${ts}  ${event.type || 'timer'}  ${event.label || event.name || ''}${ms}\n`);
+    }
   }
   // Forward to profiler window
   if (profilerWindow && !profilerWindow.isDestroyed()) {

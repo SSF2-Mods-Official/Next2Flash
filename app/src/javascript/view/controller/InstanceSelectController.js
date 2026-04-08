@@ -61,43 +61,59 @@ class InstanceSelectController extends BaseController
             }
         });
 
-        for (const value of workSpace._$libraries.values()) {
-
-            if (!value.id) {
-                continue;
+        // Show only the selected option initially (lazy-load rest on interaction)
+        const selectedOption = document.createElement("option");
+        selectedOption.value = instance.id;
+        let selectedPath = instance.name;
+        if (instance._$folderId) {
+            let parent = instance;
+            while (parent._$folderId) {
+                parent = workSpace.getLibrary(parent._$folderId);
+                selectedPath = `${parent.name}/${selectedPath}`;
             }
-
-            switch (value.type) {
-
-                case InstanceType.FOLDER:
-                case InstanceType.SOUND:
-                    continue;
-
-                default:
-                    break;
-
-            }
-
-            const option = document.createElement("option");
-            option.value = value.id;
-
-            // フォルダの場合はパス名を追加する
-            let path = value.name;
-            if (value._$folderId) {
-                let parent = value;
-                while (parent._$folderId) {
-                    parent = workSpace.getLibrary(parent._$folderId);
-                    path = `${parent.name}/${path}`;
-                }
-            }
-            option.innerHTML = path;
-
-            if (value.id === instance.id) {
-                option.defaultSelected = true;
-            }
-
-            select.appendChild(option);
         }
+        selectedOption.textContent = selectedPath;
+        selectedOption.defaultSelected = true;
+        select.appendChild(selectedOption);
+
+        // Populate all options lazily on first interaction
+        let populated = false;
+        const populateOptions = () => {
+            if (populated) return;
+            populated = true;
+
+            // Remove placeholder
+            select.textContent = "";
+
+            for (const value of workSpace._$libraries.values()) {
+                if (!value.id) continue;
+                switch (value.type) {
+                    case InstanceType.FOLDER:
+                    case InstanceType.SOUND:
+                        continue;
+                    default:
+                        break;
+                }
+
+                const option = document.createElement("option");
+                option.value = value.id;
+                let path = value.name;
+                if (value._$folderId) {
+                    let parent = value;
+                    while (parent._$folderId) {
+                        parent = workSpace.getLibrary(parent._$folderId);
+                        path = `${parent.name}/${path}`;
+                    }
+                }
+                option.textContent = path;
+                if (value.id === instance.id) {
+                    option.defaultSelected = true;
+                }
+                select.appendChild(option);
+            }
+        };
+        select.addEventListener("mousedown", populateOptions, { once: true });
+        select.addEventListener("focus", populateOptions, { once: true });
 
         // DOMに登録
         element.appendChild(select);

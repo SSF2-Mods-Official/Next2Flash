@@ -426,10 +426,11 @@ class BackgroundHydrator
 
     /**
      * @description Hydrate all lazy libraries in a repository via bulk fetch.
+     * Uses a Web Worker for the heavy fetch + MessagePack decode when available.
      *
      * @param {LibraryRepository} repository
      * @param {Function} [onProgress] - Called with (hydrated, total)
-     * @return {Promise<number>} - Number of libraries hydrated
+    * @return {Promise<object>} - Hydration result summary
      * @method
      * @public
      */
@@ -443,28 +444,39 @@ class BackgroundHydrator
         }
 
         if (lazyIds.length === 0) {
-            return 0;
+            return {
+                "hydrated": 0,
+                "errors": 0,
+                "unresolved": 0,
+                "fallbackHydrated": 0,
+                "typeCounts": {}
+            };
         }
 
         console.log(`[N2F] BackgroundHydrator: ${lazyIds.length} lazy libraries — fetching bulk data...`);
-        console.time("[N2F] Background hydration");
+        const timerLabel = `[N2F] Background hydration #${Date.now()}`;
+        console.time(timerLabel);
 
-        // Single bulk fetch for ALL library data
-        const response = await fetch(`${this._$baseUrl}/bulk`);
-        if (!response.ok) {
-            throw new Error(`Bulk fetch failed: ${response.status}`);
+        // Try Worker-based fetch+decode (off main thread)
+        let allLibs;
+        try {
+            allLibs = await this._$fetchAndDecodeWithWorker(lazyIds);
+        } catch (workerErr) {
+            console.warn("[N2F] Worker decode failed, falling back to main thread:", workerErr.message);
+            allLibs = await this._$fetchAndDecodeFallback();
         }
-
-        const buffer = await response.arrayBuffer();
-        console.log(`[N2F] BackgroundHydrator: received ${(buffer.byteLength / 1048576).toFixed(1)}MB bulk data`);
 
         if (this._$aborted) {
             console.log("[N2F] BackgroundHydrator aborted after fetch");
             return 0;
         }
 
-        // Decode the bulk msgpack (dict of id -> lib data)
-        const allLibs = MessagePack.decode(new Uint8Array(buffer));
+        // Offload bitmap buffer decoding (base64/latin-1 → Uint8Array) to worker
+        try {
+            await this._$decodeBitmapBuffersWithWorker(allLibs, repository);
+        } catch (decodeErr) {
+            console.warn("[N2F] Image decode worker failed (non-fatal):", decodeErr.message);
+        }
 
         let hydrated = 0;
         let errors = 0;
@@ -492,6 +504,8 @@ class BackgroundHydrator
                         lib._$lazy = false;
                         hydrated++;
                     }
+                    // Release this entry so GC can reclaim the bulk data incrementally
+                    allLibs[id] = null;
                 } catch (e) {
                     errors++;
                     console.warn(`[N2F] Failed to hydrate library ${id}:`, e.message);
@@ -502,7 +516,7 @@ class BackgroundHydrator
                 onProgress(hydrated, lazyIds.length);
             }
 
-            // Yield to UI thread between chunks using requestIdleCallback when available
+            // Yield to UI thread between chunks
             await new Promise(resolve =>
             {
                 if (typeof requestIdleCallback === "function") {
@@ -513,9 +527,233 @@ class BackgroundHydrator
             });
         }
 
-        console.timeEnd("[N2F] Background hydration");
-        console.log(`[N2F] BackgroundHydrator: ${hydrated} hydrated, ${errors} errors`);
-        return hydrated;
+        // Release the full decoded bulk payload to free ~1GB+ of heap
+        allLibs = null;
+
+        const unresolvedIds = [];
+        const unresolvedTypeCounts = {};
+        for (let i = 0; i < lazyIds.length; i++) {
+            const id = lazyIds[i];
+            const lib = repository.get(id);
+            if (lib && lib._$lazy) {
+                unresolvedIds.push(id);
+                const key = String(lib.type != null ? lib.type : "unknown");
+                unresolvedTypeCounts[key] = (unresolvedTypeCounts[key] || 0) + 1;
+            }
+        }
+
+        let fallbackHydrated = 0;
+        if (unresolvedIds.length) {
+            console.warn(`[N2F] BackgroundHydrator: ${unresolvedIds.length} unresolved lazy libraries after bulk apply. Starting per-library fallback...`);
+            const fallback = await this._$hydrateMissingLibraries(unresolvedIds, repository);
+            fallbackHydrated = fallback.hydrated;
+            errors += fallback.errors;
+        }
+
+        const finalUnresolved = [];
+        for (let i = 0; i < lazyIds.length; i++) {
+            const id = lazyIds[i];
+            const lib = repository.get(id);
+            if (lib && lib._$lazy) {
+                finalUnresolved.push(id);
+            }
+        }
+
+        console.timeEnd(timerLabel);
+        console.log(`[N2F] BackgroundHydrator: hydrated=${hydrated} fallbackHydrated=${fallbackHydrated} unresolved=${finalUnresolved.length} errors=${errors}`);
+        return {
+            "hydrated": hydrated + fallbackHydrated,
+            "errors": errors,
+            "unresolved": finalUnresolved.length,
+            "fallbackHydrated": fallbackHydrated,
+            "typeCounts": unresolvedTypeCounts
+        };
+    }
+
+    /**
+     * @description Fallback hydrate unresolved lazy libraries individually.
+     * @param {number[]} unresolvedIds
+     * @param {LibraryRepository} repository
+     * @return {Promise<object>}
+     * @private
+     */
+    async _$hydrateMissingLibraries (unresolvedIds, repository)
+    {
+        let hydrated = 0;
+        let errors = 0;
+
+        // Keep concurrency conservative to avoid request spikes on large files.
+        const MAX_PARALLEL = 6;
+        let cursor = 0;
+
+        const worker = async () =>
+        {
+            while (cursor < unresolvedIds.length) {
+                const index = cursor++;
+                const id = unresolvedIds[index];
+
+                try {
+                    const response = await fetch(`${this._$baseUrl}/library/${id}`);
+                    if (!response.ok) {
+                        errors++;
+                        continue;
+                    }
+
+                    const buffer = await response.arrayBuffer();
+                    const data = MessagePack.decode(new Uint8Array(buffer));
+                    const lib = repository.get(id);
+                    if (!lib || !lib._$lazy) {
+                        continue;
+                    }
+
+                    lib._applyHydratedData(data);
+                    lib._$lazy = false;
+                    hydrated++;
+                } catch (e) {
+                    errors++;
+                }
+            }
+        };
+
+        const tasks = [];
+        const count = Math.min(MAX_PARALLEL, unresolvedIds.length);
+        for (let i = 0; i < count; i++) {
+            tasks.push(worker());
+        }
+        await Promise.all(tasks);
+
+        return { "hydrated": hydrated, "errors": errors };
+    }
+
+    /**
+     * @description Fetch + decode via Web Worker (off main thread).
+     * @param {number[]} lazyIds
+     * @return {Promise<Object>}
+     * @private
+     */
+    _$fetchAndDecodeWithWorker (lazyIds)
+    {
+        return new Promise((resolve, reject) =>
+        {
+            let worker;
+            try {
+                worker = new Worker("./assets/js/workers/hydration-worker.js");
+            } catch (e) {
+                return reject(new Error("Worker creation failed: " + e.message));
+            }
+
+            worker.onmessage = (e) =>
+            {
+                const msg = e.data;
+                if (msg.type === "fetched") {
+                    worker.terminate();
+                    console.log(`[N2F] Hydration Worker: fetched ${(msg.buffer.byteLength / 1048576).toFixed(1)}MB (off main thread)`);
+                    // Decode on main thread (structured clone can't handle 700MB+ decoded objects)
+                    const allLibs = MessagePack.decode(new Uint8Array(msg.buffer));
+                    resolve(allLibs);
+                } else if (msg.type === "error") {
+                    worker.terminate();
+                    reject(new Error(msg.message));
+                }
+            };
+
+            worker.onerror = (e) =>
+            {
+                worker.terminate();
+                reject(new Error("Worker error: " + (e.message || "unknown")));
+            };
+
+            worker.postMessage({
+                type: "hydrate",
+                url: `${this._$baseUrl}/bulk`
+            });
+        });
+    }
+
+    /**
+     * @description Fallback: fetch + decode on main thread.
+     * @return {Promise<Object>}
+     * @private
+     */
+    async _$fetchAndDecodeFallback ()
+    {
+        const response = await fetch(`${this._$baseUrl}/bulk`);
+        if (!response.ok) {
+            throw new Error(`Bulk fetch failed: ${response.status}`);
+        }
+        const buffer = await response.arrayBuffer();
+        console.log(`[N2F] BackgroundHydrator (fallback): received ${(buffer.byteLength / 1048576).toFixed(1)}MB`);
+        return MessagePack.decode(new Uint8Array(buffer));
+    }
+
+    /**
+     * @description Decode bitmap string buffers (base64/latin-1) to Uint8Array
+     * in a Web Worker. Mutates allLibs[id].buffer in-place with decoded Uint8Arrays.
+     *
+     * @param {Object} allLibs - Dict of {id: libData}
+     * @param {LibraryRepository} repository
+     * @return {Promise<void>}
+     * @private
+     */
+    _$decodeBitmapBuffersWithWorker (allLibs, repository)
+    {
+        // Collect bitmap-like items with string buffers that need decoding.
+        // Constructor names are unreliable in bundled builds, so use data shape.
+        const bitmapItems = [];
+        for (const id in allLibs) {
+            const data = allLibs[id];
+            if (data && data.buffer && typeof data.buffer === "string") {
+                const lib = repository.get(parseInt(id));
+                const isBitmapLike = data.imageType
+                    || (typeof data.width === "number" && typeof data.height === "number" && data.type === 4)
+                    || (lib && lib.imageType);
+                if (isBitmapLike) {
+                    bitmapItems.push({ id: id, buffer: data.buffer });
+                }
+            }
+        }
+
+        if (bitmapItems.length === 0) {
+            return Promise.resolve();
+        }
+
+        console.log(`[N2F] Image Decode Worker: ${bitmapItems.length} bitmap buffers to decode`);
+
+        return new Promise((resolve, reject) =>
+        {
+            let worker;
+            try {
+                worker = new Worker("./assets/js/workers/image-decode-worker.js");
+            } catch (e) {
+                return reject(new Error("Image worker creation failed: " + e.message));
+            }
+
+            worker.onmessage = (e) =>
+            {
+                const msg = e.data;
+                if (msg.type === "batch-done") {
+                    worker.terminate();
+                    for (const result of msg.results) {
+                        if (result.buffer && allLibs[result.id]) {
+                            allLibs[result.id].buffer = result.buffer;
+                        }
+                    }
+                    console.log(`[N2F] Image Decode Worker: ${msg.results.length} buffers decoded`);
+                    resolve();
+                } else if (msg.type === "error") {
+                    worker.terminate();
+                    reject(new Error(msg.message));
+                }
+            };
+
+            worker.onerror = (e) =>
+            {
+                worker.terminate();
+                reject(new Error("Image worker error: " + (e.message || "unknown")));
+            };
+
+            worker.postMessage({ type: "decode-batch", items: bitmapItems });
+        });
     }
 }
 
