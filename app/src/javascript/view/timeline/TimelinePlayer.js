@@ -239,9 +239,6 @@ class TimelinePlayer extends BaseTimeline
 
                     // マーカーを移動
                     Util.$timelineMarker.move();
-
-                    // 再描画
-                    this.reloadScreen();
                 }
 
                 scene.startSound(Util.$timelineFrame.currentFrame);
@@ -265,13 +262,27 @@ class TimelinePlayer extends BaseTimeline
 
                 this._$fps = 1000 / (document.getElementById("stage-fps").value | 0);
 
-                this._$startTime = window.performance.now();
-                this._$timerId   = window.requestAnimationFrame(this._$run);
+                // Pre-warm: render the current frame fully before starting
+                // the rAF loop so frame 1 is cached and renders instantly.
+                this._$rendering = true;
+                var self = this;
+                Promise.resolve(this.reloadScreen()).then(function () {
+                    self._$rendering = false;
+                    if (self._$stopFlag) return; // user stopped during warm-up
+                    self._$startTime = window.performance.now();
+                    self._$timerId   = window.requestAnimationFrame(self._$run);
 
-                console.log('[PlayDbg] PLAY started — totalFrame:', this._$totalFrame,
-                    'fps interval:', this._$fps.toFixed(1) + 'ms',
-                    'startFrame:', Util.$timelineFrame.currentFrame,
-                    'timerId:', this._$timerId);
+                    console.log('[PlayDbg] PLAY started (pre-warmed) — totalFrame:', self._$totalFrame,
+                        'fps interval:', self._$fps.toFixed(1) + 'ms',
+                        'startFrame:', Util.$timelineFrame.currentFrame,
+                        'timerId:', self._$timerId);
+                }, function (err) {
+                    console.error('[PlayDbg] Pre-warm failed:', err);
+                    self._$rendering = false;
+                    if (self._$stopFlag) return;
+                    self._$startTime = window.performance.now();
+                    self._$timerId   = window.requestAnimationFrame(self._$run);
+                });
 
             } else {
                 console.log('[PlayDbg] PLAY skipped — totalFrame <= 1:', this._$totalFrame);
@@ -333,6 +344,8 @@ class TimelinePlayer extends BaseTimeline
 
         // タイマーを終了
         window.cancelAnimationFrame(this._$timerId);
+
+
 
         // 再生中のサウンドを全て停止する
         this.stopAllSound();
@@ -402,6 +415,8 @@ class TimelinePlayer extends BaseTimeline
         this._$repeat = true;
     }
 
+
+
     /**
      * @description 毎フレームの再生処理
      * @param  {number} timestamp
@@ -434,18 +449,18 @@ class TimelinePlayer extends BaseTimeline
         let delta = timestamp - this._$startTime;
         if (delta > this._$fps) {
 
-            // ── Cache pressure relief: trim oversized cacheStore every 15 frames ──
+            // ── Cache pressure relief: trim oversized cacheStore every 30 frames ──
             if (!this._$flushCounter) this._$flushCounter = 0;
             this._$flushCounter++;
-            if (this._$flushCounter >= 15) {
+            if (this._$flushCounter >= 30) {
                 this._$flushCounter = 0;
                 try {
                     var player = window.next2d && window.next2d.player;
                     if (player && player.cacheStore && player.cacheStore._$store) {
                         var store = player.cacheStore._$store;
-                        if (store.size > 100) {
+                        if (store.size > 300) {
                             var count = 0;
-                            var limit = store.size - 100;
+                            var limit = store.size - 300;
                             for (var _key of store.keys()) {
                                 if (count >= limit) break;
                                 player.cacheStore.removeCache(_key);
@@ -484,15 +499,16 @@ class TimelinePlayer extends BaseTimeline
                 Util.$timelineHeader.scrollX = (frame - 1) * timelineWidth;
             }
 
-            // ヘッダーを再構成
-            Util.$timelineHeader.rebuild();
+            // Throttle timeline UI to every 5th frame — saves ~20ms/frame
+            // of DOM work (rebuild + marker + moveTimeLine)
+            if (frame % 5 === 0 || frame === 1) {
+                Util.$timelineHeader.rebuild();
+                Util.$timelineMarker.move();
 
-            // マーカーを移動
-            Util.$timelineMarker.move();
-
-            const moveX = (frame - 1) * (Util.$timelineTool.timelineWidth + 1);
-            if (moveX > this._$baseOffsetHalfWidth) {
-                Util.$timelineLayer.moveTimeLine();
+                const moveX = (frame - 1) * (Util.$timelineTool.timelineWidth + 1);
+                if (moveX > this._$baseOffsetHalfWidth) {
+                    Util.$timelineLayer.moveTimeLine();
+                }
             }
 
             // 描画した時間を更新

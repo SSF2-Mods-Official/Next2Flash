@@ -395,9 +395,15 @@ class MovieClip extends Instance
 
         this._$currentFrame = frame;
 
-        return Promise.all(promises)
-            .then((values) =>
+        return Promise.allSettled(promises)
+            .then((results) =>
             {
+                // Unwrap settled results: extract values, skip rejected
+                const values = [];
+                for (let ri = 0; ri < results.length; ri++) {
+                    values.push(results[ri].status === "fulfilled" ? results[ri].value : null);
+                }
+
                 const _frameT1 = isPlayback ? performance.now() : 0;
 
                 // ステージのelementを全て削除

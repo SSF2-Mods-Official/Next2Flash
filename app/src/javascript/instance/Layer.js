@@ -397,7 +397,13 @@ class Layer
             }
         }
 
-        return Promise.all(promises);
+        return Promise.allSettled(promises).then((results) => {
+            const values = [];
+            for (let ri = 0; ri < results.length; ri++) {
+                values.push(results[ri].status === "fulfilled" ? results[ri].value : null);
+            }
+            return values;
+        });
     }
 
     /**

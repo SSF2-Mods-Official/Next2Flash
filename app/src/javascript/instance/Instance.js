@@ -562,8 +562,13 @@ class Instance
             }
 
             // Release GPU resources immediately — result is already on the 2D canvas.
-            // Setting canvas=null triggers the BitmapData setter which releases
-            // its WebGL texture via frameBuffer.releaseTexture().
+            // dispose() frees the internal WebGL framebuffer/texture, then
+            // canvas=null releases the canvas reference for GC.
+            try {
+                if (typeof bitmapData.dispose === "function") {
+                    bitmapData.dispose();
+                }
+            } catch (e) { /* swallow */ }
             try {
                 bitmapData.canvas = null;
             } catch (e) { /* swallow */ }

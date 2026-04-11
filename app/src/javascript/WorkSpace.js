@@ -543,9 +543,10 @@ class WorkSpace
             this._$revision.length = this._$position;
         }
 
-        // Deferred snapshot: push a lazy thunk to avoid blocking the UI.
-        // The expensive toJSON() runs during idle time; undo forces it
-        // synchronously only if the user actually undoes before idle fires.
+        // Deferred snapshot: push a lazy thunk that only serializes
+        // when undo is actually triggered.  The old requestIdleCallback
+        // eager-resolution caused 29s main-thread freezes on large files
+        // because toJSON(true) is O(N) over every library item / frame.
         const self = this;
         const idx  = this._$revision.length;
         let resolved = false;
@@ -561,11 +562,6 @@ class WorkSpace
         };
         this._$revision.push(thunk);
         this._$position++;
-
-        // Resolve in idle time (or within 2s as fallback)
-        const cb = typeof requestIdleCallback === 'function'
-            ? requestIdleCallback : (fn) => setTimeout(fn, 100);
-        cb(() => { thunk._resolve(); });
 
         // remove old data
         if (this._$revision.length > Util.REVISION_LIMIT) {
