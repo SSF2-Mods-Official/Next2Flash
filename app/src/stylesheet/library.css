@@ -59,6 +59,12 @@
     align-items      : center;
     height           : 150px;
     background-color : #ffffff;
+    overflow         : hidden;
+}
+
+#library-preview-area canvas
+{
+    image-rendering : pixelated;
 }
 
 #library-list-title

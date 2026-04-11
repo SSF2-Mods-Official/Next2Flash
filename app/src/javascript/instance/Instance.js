@@ -753,13 +753,16 @@ class Instance
                     "colorTransform": [1, 1, 1, 1, 0, 0, 0, 0],
                     "blendMode": "normal",
                     "filter": []
-                }
+                },
+                1,
+                true
             )
             .then((canvas) =>
             {
                 const minHeight = Math.min(150, height);
                 canvas.style.width  = `${width * minHeight / height}px`;
                 canvas.style.height = `${minHeight}px`;
+                canvas.style.imageRendering = "pixelated";
 
                 return Promise.resolve(canvas);
             });
