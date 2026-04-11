@@ -41,6 +41,9 @@ contextBridge.exposeInMainWorld('n2fElectron', {
     ipcRenderer.on('file:open-project', (_event, filePath) => callback(filePath));
   },
 
+  // ── Debug logging (renderer → main process stdout) ────────────────────
+  logDebug: (msg) => ipcRenderer.send('debug:log', msg),
+
   // ── Profiler bridge ───────────────────────────────────────────────────
   sendProfilerEvent: (event) => {
     ipcRenderer.send('profiler:send-event', event);

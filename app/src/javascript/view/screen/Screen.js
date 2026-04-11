@@ -1268,6 +1268,20 @@ class Screen extends BaseScreen
     clearPlaybackCache ()
     {
         this._$playbackStarted = false;
+
+        // Free transform-signature caches from all characters
+        const workSpace = Util.$currentWorkSpace();
+        if (workSpace) {
+            const scene = workSpace.scene;
+            if (scene) {
+                for (const layer of scene._$layers.values()) {
+                    const characters = layer._$characters;
+                    for (let idx = 0; idx < characters.length; ++idx) {
+                        characters[idx].disposeAll();
+                    }
+                }
+            }
+        }
     }
 
     clearStageArea ()

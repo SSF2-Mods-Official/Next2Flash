@@ -31,6 +31,11 @@ class Character
         this._$cacheVersion   = -1;
         this._$referencePoint = { "x": 0, "y": 0 };
 
+        // Transform-signature canvas cache for playback
+        // Key: "a,b,c,d,frame,hv" → canvas (reused when only tx/ty change)
+        this._$transformCache    = null;
+        this._$transformCacheKey = "";
+
         if (object) {
             this._$id         = object.id;
             this._$libraryId  = object.libraryId;
@@ -690,6 +695,9 @@ class Character
         const workSpace = Util.$currentWorkSpace();
         const instance  = workSpace.getLibrary(this.libraryId);
 
+        const isPlayback = !Util.$timelinePlayer.stopFlag;
+        const _charT0 = isPlayback ? performance.now() : 0;
+
         let frame = current_frame;
 
         const place = this.getPlace(frame);
@@ -715,6 +723,28 @@ class Character
                 Util.$poolCanvas(canvas);
             }
 
+            if (isPlayback) {
+                const _msg = `[CharDbg] id=${this.libraryId} CANVAS_CACHE_HIT frame=${frame}`;
+                if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.debug(_msg);
+            }
+            return Promise.resolve(this._$canvas);
+        }
+
+        // Transform-signature cache: reuse canvas when only tx/ty changed
+        const m = place.matrix;
+        const ct = place.colorTransform;
+        const effectiveDpr = isPlayback ? 1 : window.devicePixelRatio;
+        const tfKey = `${m[0]},${m[1]},${m[2]},${m[3]},${frame},${hydrationVersion},${Util.$zoomScale},${effectiveDpr},${ct[0]},${ct[1]},${ct[2]},${ct[3]},${ct[4]},${ct[5]},${ct[6]},${ct[7]},${place.blendMode}`;
+        if (this._$transformCache && this._$transformCacheKey === tfKey) {
+            if (canvas instanceof HTMLCanvasElement) {
+                Util.$poolCanvas(canvas);
+            }
+            this._$canvas = this._$transformCache;
+            this._$cacheVersion = hydrationVersion;
+            if (isPlayback) {
+                const _msg = `[CharDbg] id=${this.libraryId} TF_CACHE_HIT frame=${frame}`;
+                if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.debug(_msg);
+            }
             return Promise.resolve(this._$canvas);
         }
 
@@ -784,6 +814,14 @@ class Character
         return promise
             .then((canvas) =>
             {
+                if (isPlayback) {
+                    const _charT1 = performance.now();
+                    const _charTotal = _charT1 - _charT0;
+                    if (_charTotal > 16) {
+                        const _msg = `[CharDbg] id=${this.libraryId} CACHE_MISS type=${instance.type} ${width}x${height} total=${_charTotal.toFixed(1)}ms`;
+                        if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.warn(_msg);
+                    }
+                }
                 // set blend mode
                 if (place.blendMode !== "normal") {
                     switch (place.blendMode) {
@@ -824,6 +862,10 @@ class Character
                 this._$offsetY = canvas._$offsetY;
                 this._$canvas  = canvas;
                 this._$cacheVersion = hydrationVersion;
+
+                // Store in transform-signature cache
+                this._$transformCache    = canvas;
+                this._$transformCacheKey = tfKey;
 
                 return Promise.resolve(canvas);
             });
@@ -1629,11 +1671,33 @@ class Character
     dispose ()
     {
         if (this._$canvas) {
-            Util.$sleepCanvases.push(this._$canvas);
+            // Don't pool the canvas if it's the same one held in transform cache
+            if (this._$canvas !== this._$transformCache) {
+                Util.$sleepCanvases.push(this._$canvas);
+            }
         }
         this._$canvas = null;
         this._$base64 = null;
         this._$cacheVersion = -1;
+    }
+
+    /**
+     * @description Full dispose including transform cache (e.g. hydration change)
+     *
+     * @return {void}
+     * @method
+     * @public
+     */
+    disposeAll ()
+    {
+        if (this._$transformCache
+            && this._$transformCache !== this._$canvas
+        ) {
+            Util.$sleepCanvases.push(this._$transformCache);
+        }
+        this._$transformCache    = null;
+        this._$transformCacheKey = "";
+        this.dispose();
     }
 
 }

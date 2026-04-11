@@ -1608,6 +1608,231 @@ class Shape extends Instance
     }
 
     /**
+     * @description Patch Graphics._$getRecodes to use segment-based
+     *              Float32Array construction with _$buffer-first checks
+     *              for bitmap pixel data.
+     * @static
+     * @private
+     */
+    static _patchFastGetRecodes ()
+    {
+        const G = window.next2d.display.Graphics;
+        if (!G || G.prototype._$n2fFastRecodes) return;
+        G.prototype._$n2fFastRecodes = true;
+
+        /**
+         * Resolve bitmap pixel data, preferring _$buffer over canvas/image.
+         * @param {object} bmd - BitmapData instance
+         * @returns {Uint8Array|Uint8ClampedArray|null}
+         */
+        function _getBitmapPixels (bmd)
+        {
+            // FAST PATH: use raw buffer directly (avoids canvas getImageData)
+            if (bmd._$buffer) return bmd._$buffer;
+            if (null !== bmd.image || null !== bmd.canvas) {
+                const c = document.createElement("canvas");
+                c.width  = bmd.width;
+                c.height = bmd.height;
+                const ctx = c.getContext("2d");
+                if (!ctx) return null;
+                ctx.drawImage(bmd.image || bmd.canvas, 0, 0);
+                return new Uint8Array(
+                    ctx.getImageData(0, 0, bmd.width, bmd.height).data
+                );
+            }
+            return null;
+        }
+
+        G.prototype._$getRecodes = function () {
+            if (this._$doLine) this.endLine();
+            if (this._$doFill) this.endFill();
+            if (!this._$recode) this._$recode = [];
+
+            if (!this._$buffer) {
+                // Segment-based approach: build small Arrays for commands,
+                // store typed-array references for pixel data, then merge
+                // into a single Float32Array using native .set() calls.
+                const segments = [];  // [{data: Array|TypedArray}]
+                let totalLen   = 0;
+                let cur        = [];  // current batch of number values
+                segments.push(cur);
+
+                const e = this._$recode;
+
+                for (let i = 0; i < e.length;) {
+                    const s = e[i++];
+                    cur.push(s);
+
+                    switch (s) {
+                        case G.BEGIN_PATH:
+                        case G.END_FILL:
+                        case G.END_STROKE:
+                        case G.CLOSE_PATH:
+                            break;
+
+                        case G.MOVE_TO:
+                        case G.LINE_TO:
+                            cur.push(e[i++], e[i++]);
+                            break;
+
+                        case G.CURVE_TO:
+                        case G.FILL_STYLE:
+                            cur.push(e[i++], e[i++], e[i++], e[i++]);
+                            break;
+
+                        case G.CUBIC:
+                            cur.push(e[i++], e[i++], e[i++], e[i++], e[i++], e[i++]);
+                            break;
+
+                        case G.STROKE_STYLE: {
+                            cur.push(e[i++]); // lineWidth
+                            const caps = e[i++];
+                            cur.push(caps === "none" ? 0 : caps === "round" ? 1 : 2);
+                            const joints = e[i++];
+                            cur.push(joints === "bevel" ? 0 : joints === "miter" ? 1 : 2);
+                            cur.push(e[i++], e[i++], e[i++], e[i++], e[i++]);
+                            break;
+                        }
+
+                        case G.ARC:
+                            cur.push(e[i++], e[i++], e[i++]);
+                            break;
+
+                        case G.GRADIENT_FILL: {
+                            const type = e[i++];
+                            const stops = e[i++];
+                            const mx = e[i++];
+                            const spread = e[i++];
+                            const interp = e[i++];
+                            const focal = e[i++];
+                            cur.push(type === "linear" ? 0 : 1);
+                            cur.push(stops.length);
+                            for (let j = 0; j < stops.length; ++j) {
+                                cur.push(stops[j].ratio, stops[j].R, stops[j].G, stops[j].B, stops[j].A);
+                            }
+                            cur.push(mx[0], mx[1], mx[2], mx[3], mx[4], mx[5]);
+                            cur.push(spread === "reflect" ? 0 : spread === "repeat" ? 1 : 2);
+                            cur.push(interp === "linearRGB" ? 0 : 1);
+                            cur.push(focal);
+                            break;
+                        }
+
+                        case G.GRADIENT_STROKE: {
+                            cur.push(e[i++]); // lineWidth
+                            const caps2 = e[i++];
+                            cur.push(caps2 === "none" ? 0 : caps2 === "round" ? 1 : 2);
+                            const joints2 = e[i++];
+                            cur.push(joints2 === "bevel" ? 0 : joints2 === "miter" ? 1 : 2);
+                            cur.push(e[i++]); // miterLimit
+                            const type2 = e[i++];
+                            const stops2 = e[i++];
+                            const mx2 = e[i++];
+                            const spread2 = e[i++];
+                            const interp2 = e[i++];
+                            const focal2 = e[i++];
+                            cur.push(type2 === "linear" ? 0 : 1);
+                            cur.push(stops2.length);
+                            for (let j = 0; j < stops2.length; ++j) {
+                                cur.push(stops2[j].ratio, stops2[j].R, stops2[j].G, stops2[j].B, stops2[j].A);
+                            }
+                            cur.push(mx2[0], mx2[1], mx2[2], mx2[3], mx2[4], mx2[5]);
+                            cur.push(spread2 === "reflect" ? 0 : spread2 === "repeat" ? 1 : 2);
+                            cur.push(interp2 === "linearRGB" ? 0 : 1);
+                            cur.push(focal2);
+                            break;
+                        }
+
+                        case G.BITMAP_FILL: {
+                            const bmd = e[i++];
+                            const r = _getBitmapPixels(bmd);
+                            if (!r) { i += 3; break; }
+
+                            cur.push(bmd.width, bmd.height,
+                                this._$xMax - this._$xMin,
+                                this._$yMax - this._$yMin,
+                                r.length);
+
+                            // End current batch, insert typed pixel data, start new batch
+                            totalLen += cur.length;
+                            cur = [];
+                            segments.push(r);
+                            totalLen += r.length;
+                            segments.push(cur);
+
+                            const mx3 = e[i++];
+                            if (mx3) {
+                                cur.push(mx3[0], mx3[1], mx3[2], mx3[3], mx3[4], mx3[5]);
+                            } else {
+                                cur.push(1, 0, 0, 1, 0, 0);
+                            }
+                            cur.push(e[i++] ? 1 : 0); // repeat
+                            cur.push(e[i++] ? 1 : 0); // smooth
+                            break;
+                        }
+
+                        case G.BITMAP_STROKE: {
+                            cur.push(e[i++]); // lineWidth
+                            const caps3 = e[i++];
+                            cur.push(caps3 === "none" ? 0 : caps3 === "round" ? 1 : 2);
+                            const joints3 = e[i++];
+                            cur.push(joints3 === "bevel" ? 0 : joints3 === "miter" ? 1 : 2);
+                            cur.push(e[i++]); // miterLimit
+                            const bmd2 = e[i++];
+                            const r2 = _getBitmapPixels(bmd2);
+                            if (!r2) { i += 3; break; }
+
+                            cur.push(bmd2.width, bmd2.height,
+                                this._$xMax - this._$xMin,
+                                this._$yMax - this._$yMin,
+                                r2.length);
+
+                            // End current batch, insert typed pixel data, start new batch
+                            totalLen += cur.length;
+                            cur = [];
+                            segments.push(r2);
+                            totalLen += r2.length;
+                            segments.push(cur);
+
+                            const mx4 = e[i++];
+                            if (mx4) {
+                                cur.push(mx4[0], mx4[1], mx4[2], mx4[3], mx4[4], mx4[5]);
+                            } else {
+                                cur.push(1, 0, 0, 1, 0, 0);
+                            }
+                            cur.push(e[i++] ? 1 : 0); // repeat
+                            cur.push(e[i++] ? 1 : 0); // smooth
+                            break;
+                        }
+                    }
+                }
+
+                // Account for the last batch
+                totalLen += cur.length;
+
+                // Merge all segments into a single Float32Array
+                const f = new Float32Array(totalLen);
+                let pos = 0;
+                for (let si = 0; si < segments.length; si++) {
+                    const seg = segments[si];
+                    if (seg.length === 0) continue;
+                    if (ArrayBuffer.isView(seg)) {
+                        // Typed array (Uint8Array etc) — native .set()
+                        f.set(seg, pos);
+                    } else {
+                        // Regular JS Array — copy values
+                        for (let k = 0; k < seg.length; k++) f[pos + k] = seg[k];
+                    }
+                    pos += seg.length;
+                }
+
+                this._$buffer = f;
+            }
+
+            return this._$buffer.slice();
+        };
+    }
+
+    /**
      * @description Next2DのDisplayObjectを生成
      *              Generate Next2D DisplayObject
      *
@@ -1617,6 +1842,11 @@ class Shape extends Instance
      */
     createInstance ()
     {
+        this.constructor._patchFastGetRecodes();
+
+        const _siPlayback = !Util.$timelinePlayer._$stopFlag;
+        const _siT0 = _siPlayback ? performance.now() : 0;
+
         const { Shape, Graphics } = window.next2d.display;
 
         const shape = new Shape();
@@ -1846,6 +2076,15 @@ class Shape extends Instance
             this._$bufferVersion = hydrationVersion;
         }
         graphics._$buffer = this._$graphicBuffer;
+
+        if (_siPlayback) {
+            const _siT1 = performance.now();
+            const _siTotal = _siT1 - _siT0;
+            if (_siTotal > 10) {
+                const _msg = `[ShapeInstDbg] shape.id=${this.id} recodes=${this._$recodes.length} bufferCached=${this._$bufferVersion === (Util.$hydrationVersion|0)} total=${_siTotal.toFixed(1)}ms`;
+                if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.warn(_msg);
+            }
+        }
 
         return shape;
     }

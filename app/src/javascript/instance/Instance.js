@@ -452,8 +452,16 @@ class Instance
             return Promise.resolve(canvas);
         }
 
+        // During playback, use 1x DPR to reduce GPU work for large shapes
+        const isPlayback = !Util.$timelinePlayer.stopFlag;
+        const dpr = (isPlayback && !preview) ? 1 : window.devicePixelRatio;
+
+        const _dbgT0 = isPlayback ? performance.now() : 0;
+
         // ライブラリからplayer用のオブジェクトを作成
         const instance = this.createInstance(current_frame, preview);
+
+        const _dbgT1 = isPlayback ? performance.now() : 0;
 
         // place objectの値をセット
         let matrix = place.matrix;
@@ -468,6 +476,8 @@ class Instance
             instance, place, matrix, preview
         );
 
+        const _dbgT2 = isPlayback ? performance.now() : 0;
+
         // フィルターの描画反映を計算してセット
         const object = this.calcFilter(width, height, place);
         if (object.filters.length) {
@@ -476,16 +486,18 @@ class Instance
 
         // BitmapDataオブジェクトを作成
         const bitmapData = this.createBitmapData(
-            object.width, object.height, preview
+            object.width, object.height, preview, dpr
         );
+
+        const _dbgT3 = isPlayback ? performance.now() : 0;
 
         canvas.width  = object.width;
         canvas.height = object.height;
 
-        const sacle = window.devicePixelRatio;
+        const sacle = dpr;
         const ratio = !preview
-            ? window.devicePixelRatio * Util.$zoomScale
-            : window.devicePixelRatio;
+            ? dpr * Util.$zoomScale
+            : dpr;
 
         const drawBounds = container.getBounds(container);
 
@@ -538,6 +550,15 @@ class Instance
             }
             if (!called) {
                 resolve(canvas);
+            }
+
+            if (isPlayback) {
+                const _dbgT4 = performance.now();
+                const _total = _dbgT4 - _dbgT0;
+                if (_total > 16) {
+                    const _msg = `[RenderDbg] id=${this.id} type=${this.type} ${width}x${height} dpr=${dpr} | createInst=${(_dbgT1-_dbgT0).toFixed(1)} createCont=${(_dbgT2-_dbgT1).toFixed(1)} createBmp=${(_dbgT3-_dbgT2).toFixed(1)} bmpDraw=${(_dbgT4-_dbgT3).toFixed(1)} total=${_total.toFixed(1)}ms`;
+                    if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.warn(_msg);
+                }
             }
 
             // Release GPU resources immediately — result is already on the 2D canvas.
@@ -679,11 +700,11 @@ class Instance
      * @method
      * @public
      */
-    createBitmapData (width, height, preview = false)
+    createBitmapData (width, height, preview = false, customDpr = null)
     {
         const { BitmapData } = window.next2d.display;
 
-        let ratio = window.devicePixelRatio;
+        let ratio = customDpr !== null ? customDpr : window.devicePixelRatio;
         if (!preview) {
             ratio *= Util.$zoomScale;
         }

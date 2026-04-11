@@ -391,6 +391,11 @@ ipcMain.handle('fs:exists', async (_event, filePath) => {
   return fs.existsSync(filePath);
 });
 
+// IPC: debug logging from renderer → main process stdout
+ipcMain.on('debug:log', (_event, msg) => {
+  process.stdout.write(msg + '\n');
+});
+
 // IPC: profiler events from renderer → profiler window + log file
 ipcMain.on('profiler:send-event', (_event, data) => {
   sendProfilerEvent(data);

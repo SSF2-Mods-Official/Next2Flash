@@ -381,6 +381,7 @@ class MovieClip extends Instance
         }
 
         const isPlayback = !Util.$timelinePlayer.stopFlag;
+        const _frameT0 = isPlayback ? performance.now() : 0;
 
         const layers = Array.from(this._$layers.values());
 
@@ -397,8 +398,12 @@ class MovieClip extends Instance
         return Promise.all(promises)
             .then((values) =>
             {
+                const _frameT1 = isPlayback ? performance.now() : 0;
+
                 // ステージのelementを全て削除
                 Util.$screen.clearStageArea();
+
+                const _frameT2 = isPlayback ? performance.now() : 0;
 
                 const pointers = [];
                 const children = element.children;
@@ -440,6 +445,17 @@ class MovieClip extends Instance
 
                 // During playback, skip editor UI updates (pointers, tween, transform)
                 if (isPlayback) {
+                    const _frameT3 = performance.now();
+                    const _renderTime = _frameT1 - _frameT0;
+                    const _clearTime = _frameT2 - _frameT1;
+                    const _domTime = _frameT3 - _frameT2;
+                    const _totalFrame = _frameT3 - _frameT0;
+                    let _cacheHits = 0, _cacheMisses = 0;
+                    for (let _vi = 0; _vi < values.length; _vi++) {
+                        if (values[_vi]) _cacheMisses++; else _cacheHits++;
+                    }
+                    const _msg = `[FrameDbg] frame=${frame} chars=${values.length} hits=${_cacheHits} misses=${_cacheMisses} | render=${_renderTime.toFixed(1)} clear=${_clearTime.toFixed(1)} dom=${_domTime.toFixed(1)} total=${_totalFrame.toFixed(1)}ms`;
+                    if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.warn(_msg);
                     while (Util.$sleepCanvases.length) {
                         Util.$poolCanvas(Util.$sleepCanvases.pop());
                     }
@@ -1614,6 +1630,9 @@ class MovieClip extends Instance
         const movieClip = new MovieClip();
         movieClip._$characterId = this.id;
 
+        const _ciPlayback = !Util.$timelinePlayer._$stopFlag;
+        const _ciT0 = _ciPlayback ? performance.now() : 0;
+
         Util.$useIds.clear();
 
         let object = null;
@@ -1743,6 +1762,16 @@ class MovieClip extends Instance
 
             // added
             movieClip.addChild(displayObject);
+        }
+
+        if (_ciPlayback) {
+            const _ciT1 = performance.now();
+            const _ciTotal = _ciT1 - _ciT0;
+            if (_ciTotal > 50) {
+                const _childCount = movieClip.numChildren || 0;
+                const _msg = `[CreateInstDbg] mc.id=${this.id} frame=${frame} dictLen=${controller ? controller.length : 0} addedChildren=${_childCount} totalFrame=${this.totalFrame} total=${_ciTotal.toFixed(1)}ms`;
+                if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.warn(_msg);
+            }
         }
 
         return movieClip;
