@@ -391,9 +391,20 @@ ipcMain.handle('fs:exists', async (_event, filePath) => {
   return fs.existsSync(filePath);
 });
 
-// IPC: debug logging from renderer → main process stdout
+// ── Debug log file ─────────────────────────────────────────────────────────
+const debugLogsDir = path.join(app.getPath('userData'), 'debug-logs');
+if (!fs.existsSync(debugLogsDir)) fs.mkdirSync(debugLogsDir, { recursive: true });
+const debugLogPath = path.join(debugLogsDir, 'n2f-debug.log');
+// Truncate on each launch so the file always reflects the current session
+const debugLogStream = fs.createWriteStream(debugLogPath, { flags: 'w' });
+debugLogStream.write(`=== N2F Debug Log - ${new Date().toISOString()} ===\n`);
+console.log(`[N2F] Debug log: ${debugLogPath}`);
+
+// IPC: debug logging from renderer → main process stdout + log file
 ipcMain.on('debug:log', (_event, msg) => {
-  process.stdout.write(msg + '\n');
+  const line = msg + '\n';
+  process.stdout.write(line);
+  debugLogStream.write(line);
 });
 
 // IPC: profiler events from renderer → profiler window + log file

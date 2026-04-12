@@ -723,10 +723,7 @@ class Character
                 Util.$poolCanvas(canvas);
             }
 
-            if (isPlayback) {
-                const _msg = `[CharDbg] id=${this.libraryId} CANVAS_CACHE_HIT frame=${frame}`;
-                if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.debug(_msg);
-            }
+            console.warn(`[N2F-DBG] Character.draw CANVAS_HIT libId=${this.libraryId} frame=${frame}`);
             return Promise.resolve(this._$canvas);
         }
 
@@ -741,12 +738,10 @@ class Character
             }
             this._$canvas = this._$transformCache;
             this._$cacheVersion = hydrationVersion;
-            if (isPlayback) {
-                const _msg = `[CharDbg] id=${this.libraryId} TF_CACHE_HIT frame=${frame}`;
-                if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.debug(_msg);
-            }
+            console.warn(`[N2F-DBG] Character.draw TF_CACHE_HIT libId=${this.libraryId} frame=${frame} key=${tfKey}`);
             return Promise.resolve(this._$canvas);
         }
+        console.warn(`[N2F-DBG] Character.draw CACHE_MISS libId=${this.libraryId} frame=${frame} hasCanvas=${!!this._$canvas} hasTfCache=${!!this._$transformCache} tfKeyMatch=${this._$transformCacheKey === tfKey}`);
 
         // シーンのフレームを更新
         if (instance.type === InstanceType.MOVIE_CLIP) {

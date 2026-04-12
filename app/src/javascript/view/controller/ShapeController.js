@@ -330,6 +330,12 @@ class ShapeController extends BaseController
             ShapeController.MAX_ALPHA
         );
 
+        // Pre-set the DOM value so changeColor() reads the current
+        // value rather than the stale one from the previous frame.
+        document.getElementById("fill-alpha-value").value = value;
+
+        console.warn(`[N2F-DBG] changeFillAlphaValue value=${value} hitColor=${!!Util.$hitColor} type=${Util.$hitColor ? Util.$hitColor.type : 'none'}`);
+
         if (Util.$hitColor) {
 
             switch (Util.$hitColor.type) {
@@ -371,6 +377,10 @@ class ShapeController extends BaseController
             ShapeController.MIN_STROKE,
             ShapeController.MAX_STROKE
         );
+
+        // Pre-set the DOM value so changeColor() reads the current
+        // value rather than the stale one from the previous frame.
+        document.getElementById("fill-stroke-width-value").value = value;
 
         if (this._$currentValue !== value && Util.$hitColor) {
 

@@ -7,6 +7,20 @@ let characterId = 0;
 const Util = {};
 window.Util = Util;
 
+// Route [N2F-DBG] console.warn to Electron main-process stdout + log file
+(function () {
+    const _origWarn = console.warn;
+    console.warn = function () {
+        _origWarn.apply(console, arguments);
+        if (window.n2fElectron && arguments.length > 0
+            && typeof arguments[0] === 'string'
+            && arguments[0].indexOf('[N2F-DBG]') === 0
+        ) {
+            window.n2fElectron.logDebug(arguments[0]);
+        }
+    };
+})();
+
 Util.VERSION                  = 1;
 Util.PREFIX                   = "__next2d-tools__";
 Util.DATABASE_NAME            = "save-data";
