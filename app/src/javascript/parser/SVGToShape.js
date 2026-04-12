@@ -930,6 +930,7 @@ class SVGToShape
         layer.name  = `Layer_${movie_clip._$layers.size}`;
         if (clip) {
             layer.mode = LayerMode.MASK;
+            layer.lock = true;
         }
 
         movie_clip.setLayer(movie_clip._$layers.size, layer);

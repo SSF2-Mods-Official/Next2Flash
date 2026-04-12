@@ -214,6 +214,7 @@ class ExternalTimeline
 
             case "mask":
                 layer.mode = LayerMode.MASK;
+                layer.lock = true;
                 break;
 
             case "masked":

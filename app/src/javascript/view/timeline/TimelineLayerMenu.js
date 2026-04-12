@@ -173,11 +173,10 @@ class TimelineLayerMenu extends BaseTimeline
         const reload = this.resetLayer(targetLayer);
 
         layer.mode = LayerMode.MASK;
+        layer.lock = true;
         layer.showIcon();
 
-        if (reload || layer.lock) {
-            this.reloadScreen();
-        }
+        this.reloadScreen();
 
         // 初期化
         super.focusOut();

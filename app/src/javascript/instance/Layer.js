@@ -388,6 +388,10 @@ class Layer
             }
 
             const event = this.lock ? "none" : "auto";
+            if (Util.$timelinePlayer.stopFlag && !characters.length) {
+                console.log('[LayDbg] layer=' + this.id + ' mode=' + this.mode +
+                    ' frame=' + frame + ' noChars totalChars=' + this._$characters.length);
+            }
             for (let idx = 0; idx < characters.length; ++idx) {
                 promises.push(
                     Util.$screen.appendCharacter(

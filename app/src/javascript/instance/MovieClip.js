@@ -385,12 +385,25 @@ class MovieClip extends Instance
 
         const layers = Array.from(this._$layers.values());
 
+        let _dbgTotal = 0, _dbgSkipDisable = 0, _dbgSkipMask = 0, _dbgActive = 0;
         while (layers.length) {
             const layer = layers.pop();
-            if (layer.disable || layer.mode === LayerMode.MASK && layer.lock) {
+            _dbgTotal++;
+            if (layer.disable) {
+                _dbgSkipDisable++;
                 continue;
             }
+            if (layer.mode === LayerMode.MASK && layer.lock) {
+                _dbgSkipMask++;
+                continue;
+            }
+            _dbgActive++;
             promises.push(layer.appendCharacter(frame));
+        }
+        if (!isPlayback) {
+            console.log('[MCDbg] changeFrame=' + frame + ' layers=' + _dbgTotal +
+                ' skipDisable=' + _dbgSkipDisable + ' skipMask=' + _dbgSkipMask +
+                ' active=' + _dbgActive + ' promises=' + promises.length);
         }
 
         this._$currentFrame = frame;
@@ -400,8 +413,33 @@ class MovieClip extends Instance
             {
                 // Unwrap settled results: extract values, skip rejected
                 const values = [];
+                let _dbgRejected = 0;
                 for (let ri = 0; ri < results.length; ri++) {
-                    values.push(results[ri].status === "fulfilled" ? results[ri].value : null);
+                    if (results[ri].status === "fulfilled") {
+                        values.push(results[ri].value);
+                    } else {
+                        values.push(null);
+                        _dbgRejected++;
+                    }
+                }
+
+                if (!isPlayback) {
+                    let _dbgNull = 0, _dbgObj = 0, _dbgArr = 0, _dbgArrNull = 0;
+                    for (let _vi = 0; _vi < values.length; _vi++) {
+                        var _v = values[_vi];
+                        if (!_v) { _dbgNull++; }
+                        else if (Array.isArray(_v)) {
+                            _dbgArr++;
+                            for (var _ai = 0; _ai < _v.length; _ai++) {
+                                if (!_v[_ai]) _dbgArrNull++;
+                            }
+                        }
+                        else { _dbgObj++; }
+                    }
+                    console.log('[MCDbg] results frame=' + frame +
+                        ' total=' + values.length + ' rejected=' + _dbgRejected +
+                        ' null=' + _dbgNull + ' obj=' + _dbgObj +
+                        ' arr=' + _dbgArr + ' arrNull=' + _dbgArrNull);
                 }
 
                 const _frameT1 = isPlayback ? performance.now() : 0;

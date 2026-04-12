@@ -2537,6 +2537,7 @@ Util.$parserHandler = function (event)
                                         clipDepth  = depth;
                                         maskId     = index - idx;
                                         layer.mode = LayerMode.MASK;
+                                        layer.lock = true;
                                     }
                                 }
 

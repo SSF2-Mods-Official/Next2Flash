@@ -777,6 +777,19 @@ class Screen extends BaseScreen
             character.dispose();
         }
 
+        if (Util.$timelinePlayer.stopFlag && character._$canvas && !doUpdate) {
+            var _cw = character._$canvas.width;
+            var _ch = character._$canvas.height;
+            console.log('[ScrDbg] CACHED lib=' + character.libraryId +
+                ' layer=' + layer_id +
+                ' frame=' + frame +
+                ' type=' + instance.type +
+                ' name=' + (instance.name || '') +
+                ' canvasSize=' + _cw + 'x' + _ch +
+                ' mode=' + (layer.mode || 0) +
+                ' maskId=' + layer.maskId);
+        }
+
         const matrix = Util.$sceneChange.concatenatedMatrix;
         const bounds = character.getBounds(matrix, parent_scene ? frame : 0);
 
@@ -793,6 +806,11 @@ class Screen extends BaseScreen
                 // Suppress drawImage errors from stale character data.
                 // Track sparse diagnostics for bitmap-related misses.
                 try {
+                    if (Util.$timelinePlayer.stopFlag) {
+                        console.warn('[ScrDbg] DrawFail lib=' + character.libraryId +
+                            ' layer=' + layer_id + ' frame=' + frame +
+                            ' err=' + (error && error.message ? error.message : 'unknown'));
+                    }
                     const key = `${character.libraryId}:${instance.type}`;
                     const count = (this._$drawFailCounts.get(key) || 0) + 1;
                     this._$drawFailCounts.set(key, count);
@@ -820,6 +838,11 @@ class Screen extends BaseScreen
             {
                 // Guard: skip if canvas is invalid (e.g. after tab close/reimport)
                 if (!canvas) {
+                    if (Util.$timelinePlayer.stopFlag) {
+                        console.warn('[ScrDbg] NullCanvas lib=' + character.libraryId +
+                            ' layer=' + layer_id + ' frame=' + frame +
+                            ' type=' + instance.type + ' name=' + (instance.name || ''));
+                    }
                     return null;
                 }
 
