@@ -62,7 +62,8 @@ from swf_constants import (
     TAG_DEFINE_TEXT, TAG_DEFINE_TEXT2, TAG_DEFINE_EDIT_TEXT, TAG_DEFINE_MORPH_SHAPE,
     TAG_DEFINE_MORPH_SHAPE2, TAG_SYMBOL_CLASS, TAG_DO_ABC, TAG_DO_ABC2,
     TAG_FILE_ATTRIBUTES, TAG_SET_BACKGROUND_COLOR, TAG_DEFINE_FONT3,
-    TAG_DEFINE_BUTTON2, TAG_START_SOUND, TAG_START_SOUND2
+    TAG_DEFINE_BUTTON2, TAG_START_SOUND, TAG_START_SOUND2,
+    TAG_DEFINE_SCALING_GRID
 )
 from cycle_detector import validate_swf_sprites
 
@@ -154,16 +155,185 @@ def read_cxform_with_alpha(br: BitReader) -> List[float]:
     return [r_mul, g_mul, b_mul, a_mul, r_add, g_add, b_add, a_add]
 
 
+def _read_rgba_color(br: BitReader) -> Tuple[int, float]:
+    """Read RGBA → (0xRRGGBB, alpha_0to1)."""
+    r = br.read_ui8()
+    g = br.read_ui8()
+    b = br.read_ui8()
+    a = br.read_ui8()
+    return (r << 16 | g << 8 | b), a / 255.0
+
+def _read_fixed16(br: BitReader) -> float:
+    """Read FIXED (16.16) as float."""
+    raw = struct.unpack_from('<i', br.data, br.byte_pos)[0]
+    br.byte_pos += 4
+    return raw / 65536.0
+
+def _read_fixed8(br: BitReader) -> float:
+    """Read FIXED8 (8.8) as float."""
+    raw = struct.unpack_from('<H', br.data, br.byte_pos)[0]
+    br.byte_pos += 2
+    return raw / 256.0
+
+def _read_float32(br: BitReader) -> float:
+    """Read IEEE 754 float32."""
+    val = struct.unpack_from('<f', br.data, br.byte_pos)[0]
+    br.byte_pos += 4
+    return val
+
+def _parse_drop_shadow(br: BitReader) -> dict:
+    color, alpha = _read_rgba_color(br)
+    blur_x = _read_fixed16(br)
+    blur_y = _read_fixed16(br)
+    angle = _read_fixed16(br) * (180.0 / math.pi)
+    distance = _read_fixed16(br)
+    strength = _read_fixed8(br)
+    flags = br.read_ui8()
+    inner = bool(flags & 0x80)
+    knockout = bool(flags & 0x40)
+    # bit 5 is CompositeSource (always 1)
+    hide_object = not bool(flags & 0x20)
+    quality = flags & 0x1F
+    return {
+        'name': 'DropShadowFilter',
+        'blurX': blur_x, 'blurY': blur_y, 'quality': quality, 'state': True,
+        'distance': distance, 'angle': angle, 'color': color, 'alpha': alpha,
+        'strength': strength, 'inner': inner, 'knockout': knockout,
+        'hideObject': hide_object,
+    }
+
+def _parse_blur(br: BitReader) -> dict:
+    blur_x = _read_fixed16(br)
+    blur_y = _read_fixed16(br)
+    flags = br.read_ui8()
+    quality = (flags >> 3) & 0x1F
+    return {
+        'name': 'BlurFilter',
+        'blurX': blur_x, 'blurY': blur_y, 'quality': quality, 'state': True,
+    }
+
+def _parse_glow(br: BitReader) -> dict:
+    color, alpha = _read_rgba_color(br)
+    blur_x = _read_fixed16(br)
+    blur_y = _read_fixed16(br)
+    strength = _read_fixed8(br)
+    flags = br.read_ui8()
+    inner = bool(flags & 0x80)
+    knockout = bool(flags & 0x40)
+    quality = flags & 0x1F
+    return {
+        'name': 'GlowFilter',
+        'blurX': blur_x, 'blurY': blur_y, 'quality': quality, 'state': True,
+        'color': color, 'alpha': alpha, 'strength': strength,
+        'inner': inner, 'knockout': knockout,
+    }
+
+def _parse_bevel(br: BitReader) -> dict:
+    shadow_color, shadow_alpha = _read_rgba_color(br)
+    highlight_color, highlight_alpha = _read_rgba_color(br)
+    blur_x = _read_fixed16(br)
+    blur_y = _read_fixed16(br)
+    angle = _read_fixed16(br) * (180.0 / math.pi)
+    distance = _read_fixed16(br)
+    strength = _read_fixed8(br)
+    flags = br.read_ui8()
+    inner = bool(flags & 0x80)
+    knockout = bool(flags & 0x40)
+    # bit 5 is CompositeSource
+    on_top = bool(flags & 0x10)
+    quality = flags & 0x0F
+    if inner:
+        btype = 'inner'
+    elif on_top:
+        btype = 'full'
+    else:
+        btype = 'outer'
+    return {
+        'name': 'BevelFilter',
+        'blurX': blur_x, 'blurY': blur_y, 'quality': quality, 'state': True,
+        'distance': distance, 'angle': angle,
+        'highlightColor': highlight_color, 'highlightAlpha': highlight_alpha,
+        'shadowColor': shadow_color, 'shadowAlpha': shadow_alpha,
+        'strength': strength, 'type': btype, 'knockout': knockout,
+    }
+
+def _parse_gradient_filter(br: BitReader, name: str) -> dict:
+    """Parse GradientGlowFilter or GradientBevelFilter."""
+    num_colors = br.read_ui8()
+    colors = []
+    alphas = []
+    for _ in range(num_colors):
+        c, a = _read_rgba_color(br)
+        colors.append(c)
+        alphas.append(a * 100)  # editor stores 0-100
+    ratios = []
+    for _ in range(num_colors):
+        ratios.append(br.read_ui8())
+    blur_x = _read_fixed16(br)
+    blur_y = _read_fixed16(br)
+    angle = _read_fixed16(br) * (180.0 / math.pi)
+    distance = _read_fixed16(br)
+    strength = _read_fixed8(br)
+    flags = br.read_ui8()
+    inner = bool(flags & 0x80)
+    knockout = bool(flags & 0x40)
+    on_top = bool(flags & 0x10)
+    quality = flags & 0x0F
+    if inner:
+        ftype = 'inner'
+    elif on_top:
+        ftype = 'full'
+    else:
+        ftype = 'outer'
+    return {
+        'name': name,
+        'blurX': blur_x, 'blurY': blur_y, 'quality': quality, 'state': True,
+        'distance': distance, 'angle': angle,
+        'colors': colors, 'alphas': alphas, 'ratios': ratios,
+        'strength': strength, 'type': ftype, 'knockout': knockout,
+    }
+
+def _parse_color_matrix(br: BitReader) -> None:
+    """Parse ColorMatrixFilter — skip 20 floats (not supported in editor)."""
+    br.byte_pos += 20 * 4
+    return None
+
+def _parse_convolution(br: BitReader) -> None:
+    """Parse ConvolutionFilter — skip (not supported in editor)."""
+    mx = br.read_ui8()
+    my = br.read_ui8()
+    br.byte_pos += 4  # divisor float
+    br.byte_pos += 4  # bias float
+    br.byte_pos += mx * my * 4  # matrix floats
+    br.byte_pos += 4  # default color RGBA
+    br.read_ui8()  # flags
+    return None
+
+_FILTER_PARSERS = {
+    0: _parse_drop_shadow,
+    1: _parse_blur,
+    2: _parse_glow,
+    3: _parse_bevel,
+    4: lambda br: _parse_gradient_filter(br, 'GradientGlowFilter'),
+    5: _parse_convolution,
+    6: _parse_color_matrix,
+    7: lambda br: _parse_gradient_filter(br, 'GradientBevelFilter'),
+}
+
 def read_filter_list(br: BitReader) -> List[dict]:
-    """Parse FILTERLIST (for PlaceObject3). Returns simplified filter list."""
+    """Parse FILTERLIST from PlaceObject3. Returns list of filter dicts
+    matching the editor's filter object format."""
     count = br.read_ui8()
     filters = []
     for _ in range(count):
         filter_id = br.read_ui8()
-        # Skip filter data — we just need to advance the reader past it.
-        # This is complex; for now return empty and skip remaining filters.
-        # TODO: implement full filter parsing if needed
-        break  # bail out — filters are complex to parse
+        parser = _FILTER_PARSERS.get(filter_id)
+        if parser is None:
+            log.warning('read_filter_list: unknown filter id %d, stopping', filter_id)
+            break
+        result = parser(br)
+        if result is not None:
+            filters.append(result)
     return filters
 
 
@@ -442,11 +612,13 @@ def parse_place_object3(tag_data: bytes) -> dict:
             result['clipDepth'] = br.read_ui16()
 
         if has_filter_list:
-            # Skip filter list — too complex to parse generically.
-            # Can't read blend_mode or cache_bitmap after this.
-            pass
-        elif has_blend_mode:
+            result['filters'] = read_filter_list(br)
+
+        if has_blend_mode:
             result['blendMode'] = br.read_ui8()
+
+        if has_cache_bitmap:
+            result['cacheAsBitmap'] = True
     except (IndexError, struct.error):
         # Gracefully handle parse errors — return what we have so far
         pass
@@ -567,6 +739,41 @@ def parse_define_bits_lossless_info(tag_data: bytes) -> Tuple[int, int, int]:
 def parse_define_sound_id(tag_data: bytes) -> int:
     """Get character ID from DefineSound."""
     return struct.unpack_from('<H', tag_data, 0)[0]
+
+
+def parse_define_button2_char_ids(tag_data: bytes) -> List[int]:
+    """Extract referenced character IDs from DefineButton2 records.
+
+    tag_data starts AFTER the 2-byte charId (already stripped in raw_tag_data).
+    Layout:
+      UI8    Flags (bit0=trackAsMenu)
+      UI16   ActionOffset
+      BUTTONRECORD[] (terminated by 0 byte)
+    """
+    char_ids = []
+    if len(tag_data) < 3:
+        return char_ids
+    br = BitReader(tag_data, 3)  # skip flags(1) + actionOffset(2)
+    try:
+        while br.byte_offset < len(tag_data):
+            br.byte_align()
+            first_byte = br.read_ui8()
+            if first_byte == 0:
+                break  # end of button records
+            has_blend = bool(first_byte & 0x20)
+            has_filter = bool(first_byte & 0x10)
+            ref_char_id = br.read_ui16()
+            char_ids.append(ref_char_id)
+            br.read_ui16()  # PlaceDepth
+            read_matrix(br)  # PlaceMatrix (variable-length)
+            read_cxform_with_alpha(br)  # CXFORMWITHALPHA
+            if has_filter:
+                read_filter_list(br)  # skip filters
+            if has_blend:
+                br.read_ui8()  # BlendMode
+    except Exception:
+        pass  # best-effort — return whatever we got
+    return char_ids
 
 
 def parse_define_font3_name(tag_data: bytes) -> Tuple[int, str, bool, bool]:
@@ -1135,7 +1342,7 @@ class FrameAction:
 
 class PlaceAction(FrameAction):
     def __init__(self, depth, char_id, matrix, color_transform, name,
-                 clip_depth, blend_mode, is_move, ratio=None):
+                 clip_depth, blend_mode, is_move, ratio=None, filters=None):
         self.depth = depth
         self.char_id = char_id
         self.matrix = matrix
@@ -1145,6 +1352,7 @@ class PlaceAction(FrameAction):
         self.blend_mode = blend_mode
         self.is_move = is_move
         self.ratio = ratio
+        self.filters = filters or []
 
 class RemoveAction(FrameAction):
     def __init__(self, depth):
@@ -1194,6 +1402,7 @@ def analyze_timeline(nested_tags: List[SWFTag], swf_version: int = 10) -> List[T
                 blend_mode=po['blendMode'],
                 is_move=po['move'],
                 ratio=po['ratio'],
+                filters=po.get('filters', []),
             )
             current_frame.actions.append(action)
 
@@ -1209,6 +1418,7 @@ def analyze_timeline(nested_tags: List[SWFTag], swf_version: int = 10) -> List[T
                 blend_mode=po['blendMode'],
                 is_move=po['move'],
                 ratio=po['ratio'],
+                filters=po.get('filters', []),
             )
             current_frame.actions.append(action)
 
@@ -1758,6 +1968,8 @@ class N2DBuilder:
         self.symbol_names: Dict[int, str] = {}
         # Shape bounds from SWF
         self.shape_bounds: Dict[int, dict] = {}
+        # DefineScalingGrid: swf_char_id → {x, y, w, h} in pixels
+        self.scaling_grids: Dict[int, dict] = {}
         # Bitmap dimensions from SWF
         self.bitmap_dims: Dict[int, Tuple[int, int]] = {}
         # DefineSprite data: swf_char_id → (frame_count, [nested_tags])
@@ -1883,6 +2095,22 @@ class N2DBuilder:
                 sc = parse_symbol_class(tag.data)
                 self.symbol_names.update(sc)
                 past_symbol_class = True
+
+            elif tag.tag_type == TAG_DEFINE_SCALING_GRID:
+                # DefineScalingGrid: UI16 charId + RECT (9-slice grid)
+                if len(tag.data) >= 4:
+                    char_id = struct.unpack_from('<H', tag.data, 0)[0]
+                    br = BitReader(tag.data, 2)
+                    rect = read_rect(br)
+                    # Convert from twips RECT {xMin,xMax,yMin,yMax} to
+                    # editor grid format {x,y,w,h} in pixels
+                    x = rect['xMin'] / 20.0
+                    y = rect['yMin'] / 20.0
+                    w = (rect['xMax'] - rect['xMin']) / 20.0
+                    h = (rect['yMax'] - rect['yMin']) / 20.0
+                    self.scaling_grids[char_id] = {
+                        'x': x, 'y': y, 'w': w, 'h': h
+                    }
 
             # Track definition tags that appear after SymbolClass
             # (i.e., inline definitions in the root timeline section).
@@ -2112,7 +2340,7 @@ class N2DBuilder:
                 'symbol': sym_name,
                 'folderId': self.folder_ids.get('shape', 0),
                 'bitmapId': 0,
-                'grid': None,
+                'grid': self.scaling_grids.get(cid),
                 'inBitmap': has_bitmap_fill,
                 'recodes': recodes,
                 'bounds': bounds,
@@ -2174,7 +2402,7 @@ class N2DBuilder:
                 'symbol': sym_name,
                 'folderId': self.folder_ids.get('morphShape', 0),
                 'bitmapId': 0,
-                'grid': None,
+                'grid': self.scaling_grids.get(cid),
                 'inBitmap': has_bitmap_fill,
                 'recodes': recodes,
                 'bounds': bounds,
@@ -2347,7 +2575,7 @@ class N2DBuilder:
                     'symbol': sym_name,
                     'folderId': self.folder_ids.get('text', 0),
                     'bitmapId': 0,
-                    'grid': None,
+                    'grid': self.scaling_grids.get(cid),
                     'inBitmap': False,
                     'recodes': [],
                     'bounds': {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20},
@@ -2393,7 +2621,7 @@ class N2DBuilder:
                 'symbol': sym_name,
                 'folderId': self.folder_ids.get('font', 0),
                 'bitmapId': 0,
-                'grid': None,
+                'grid': self.scaling_grids.get(cid),
                 'inBitmap': False,
                 'recodes': [],
                 'bounds': {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20},
@@ -2434,10 +2662,10 @@ class N2DBuilder:
                 'symbol': sym_name,
                 'folderId': self.folder_ids.get('button', 0),
                 'bitmapId': 0,
-                'grid': None,
+                'grid': self.scaling_grids.get(cid),
                 'inBitmap': False,
                 'recodes': [],
-                'bounds': {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20},
+                'bounds': self._compute_button_bounds(cid),
             }
             if cid in self.raw_tag_data:
                 tag_type, body = self.raw_tag_data[cid]
@@ -2469,9 +2697,9 @@ class N2DBuilder:
                 tag_type, body = self.raw_tag_data[cid]
                 container['rawTagType'] = tag_type
                 container['rawTagBody'] = base64.b64encode(body).decode('ascii')
-            # Capture SoundStreamHead2 (tag 45) for roundtrip
+            # Capture SoundStreamHead (tag 18) and SoundStreamHead2 (tag 45) for roundtrip
             for ntag in nested_tags:
-                if ntag.tag_type == 45:
+                if ntag.tag_type in (18, 45):
                     container['rawSoundStreamHead'] = base64.b64encode(ntag.data).decode('ascii')
                     break
             self.libraries.append(container)
@@ -2529,6 +2757,8 @@ class N2DBuilder:
                             existing['blend_mode'] = action.blend_mode
                         if action.ratio is not None:
                             existing['ratio'] = action.ratio
+                        if action.filters:
+                            existing['filters'] = action.filters
                         # Record snapshot of current state as event
                         depth_events.setdefault(depth, []).append(
                             (frame_num, dict(existing), False))
@@ -2543,6 +2773,7 @@ class N2DBuilder:
                             'clip_depth': action.clip_depth,
                             'blend_mode': action.blend_mode,
                             'ratio': action.ratio,
+                            'filters': action.filters or [],
                         }
                         display_list[depth] = state
                         depth_events.setdefault(depth, []).append(
@@ -2560,7 +2791,10 @@ class N2DBuilder:
                 sounds_per_frame[frame_num] = list(frame.sounds)
 
         # Convert per-depth events → n2d layers
-        all_depths = sorted(depth_events.keys(), reverse=True)
+        all_depths_asc = sorted(depth_events.keys())
+
+        # Reverse: highest depth first (front-to-back)
+        all_depths = list(reversed(all_depths_asc))
 
         layers = []
         for depth_idx, depth in enumerate(all_depths):
@@ -2568,6 +2802,147 @@ class N2DBuilder:
             layer = self._build_layer_from_events(
                 depth, depth_idx, events, actual_frame_count)
             layers.append(layer)
+
+        # ── Split mixed clip_depth layers ──
+        # A depth may act as a mask (has clip_depth) on some frames and
+        # as normal content on others (SWF reuses depths).  N2D layer
+        # modes are static, so we split into separate MASK and NORMAL
+        # layers.  Character spans already carry _clip_depth metadata.
+        split_layers = []
+        for layer in layers:
+            mask_chars = [c for c in layer['characters'] if c.get('_clip_depth')]
+            normal_chars = [c for c in layer['characters'] if not c.get('_clip_depth')]
+            if mask_chars and normal_chars:
+                # Mixed — create two layers from this depth
+                normal_layer = dict(layer)
+                normal_layer['characters'] = normal_chars
+                normal_layer['emptyCharacters'] = self._compute_empty_ranges(
+                    normal_chars, actual_frame_count)
+                split_layers.append(normal_layer)
+
+                mask_layer = dict(layer)
+                mask_layer['name'] = f"mask_{layer['swfDepth']}"
+                mask_layer['characters'] = mask_chars
+                mask_layer['emptyCharacters'] = self._compute_empty_ranges(
+                    mask_chars, actual_frame_count)
+                mask_layer['_is_mask_split'] = True
+                split_layers.append(mask_layer)
+            else:
+                split_layers.append(layer)
+        layers = split_layers
+
+        # ── Build clip_depth_map from character-level _clip_depth ──
+        # Maps layer index → clip_depth value for layers that contain
+        # mask characters.  Also collects active frame ranges per mask
+        # for frame-aware MASK_IN assignment.
+        clip_depth_map = {}   # layer_idx → clip_depth_value
+        mask_frame_ranges = {}  # layer_idx → [(start, end), ...]
+        for li, layer in enumerate(layers):
+            for ch in layer['characters']:
+                cd = ch.get('_clip_depth', 0)
+                if cd:
+                    clip_depth_map[li] = cd
+                    mask_frame_ranges.setdefault(li, []).append(
+                        (ch['startFrame'], ch['endFrame']))
+
+        # ── Frame-aware mask assignment ──
+        if clip_depth_map:
+            # Helper: check if a character's frame range overlaps any
+            # of a mask's active frame ranges.
+            def _overlaps(char, mask_ranges):
+                cs, ce = char['startFrame'], char['endFrame']
+                return any(cs < me and ms < ce for ms, me in mask_ranges)
+
+            # Process each mask and apply splits immediately so that
+            # subsequent masks see already-modified character lists.
+            # range(len(layers)) is evaluated once, so appended layers
+            # won't be re-iterated.
+            for mi, clip_val in clip_depth_map.items():
+                mask_depth = layers[mi]['swfDepth']
+                layers[mi]['mode'] = 1  # MASK
+                layers[mi]['lock'] = True  # Lock makes mask shape invisible
+                layers[mi]['maskId'] = None
+
+                m_ranges = mask_frame_ranges[mi]
+
+                n_orig = len(layers)
+                for li in range(n_orig):
+                    layer = layers[li]
+                    if li == mi:
+                        continue
+                    # Skip layers already assigned as MASK
+                    if layer['mode'] == 1:
+                        continue
+                    d = layer['swfDepth']
+                    if d > mask_depth and d <= clip_val:
+                        overlapping = [c for c in layer['characters']
+                                       if _overlaps(c, m_ranges)]
+                        non_overlapping = [c for c in layer['characters']
+                                          if not _overlaps(c, m_ranges)]
+
+                        if overlapping and non_overlapping:
+                            # Apply split immediately
+                            layer['characters'] = non_overlapping
+                            layer['emptyCharacters'] = self._compute_empty_ranges(
+                                non_overlapping, actual_frame_count)
+
+                            mi_layer = dict(layer)
+                            mi_layer['name'] = f"maskin_{d}"
+                            mi_layer['characters'] = overlapping
+                            mi_layer['emptyCharacters'] = self._compute_empty_ranges(
+                                overlapping, actual_frame_count)
+                            mi_layer['mode'] = 2  # MASK_IN
+                            mi_layer['maskId'] = mi
+                            layers.append(mi_layer)
+                        elif overlapping:
+                            layer['mode'] = 2
+                            layer['maskId'] = mi
+
+            # ── Reorganize for contiguity ──
+            # toPublish() requires each MASK layer to be immediately
+            # followed by its MASK_IN layers (contiguous group).
+            layer_old_idx = {id(l): i for i, l in enumerate(layers)}
+            mask_in_indices = {i for i, l in enumerate(layers)
+                               if l.get('mode') == 2}
+            visited = set()
+            new_layers = []
+            for i, layer in enumerate(layers):
+                if i in visited:
+                    continue
+                if i in mask_in_indices:
+                    continue  # Will be pulled in by its MASK
+                new_layers.append(layer)
+                visited.add(i)
+                if layer['mode'] == 1:  # MASK
+                    for j, l2 in enumerate(layers):
+                        if (j not in visited
+                                and j in mask_in_indices
+                                and l2.get('maskId') == i):
+                            new_layers.append(l2)
+                            visited.add(j)
+
+            # Orphaned MASK_IN layers
+            for i in sorted(mask_in_indices - visited):
+                new_layers.append(layers[i])
+                visited.add(i)
+
+            # Remap maskId from old → new layer indices
+            old_to_new = {}
+            for new_idx, layer in enumerate(new_layers):
+                old_idx = layer_old_idx[id(layer)]
+                old_to_new[old_idx] = new_idx
+            for layer in new_layers:
+                if layer.get('mode') == 2 and layer.get('maskId') is not None:
+                    layer['maskId'] = old_to_new.get(
+                        layer['maskId'], layer['maskId'])
+
+            layers = new_layers
+
+        # Strip internal metadata from characters
+        for layer in layers:
+            for ch in layer.get('characters', []):
+                ch.pop('_clip_depth', None)
+            layer.pop('_is_mask_split', None)
 
         # If no layers, create one empty layer
         if not layers:
@@ -2679,6 +3054,7 @@ class N2DBuilder:
                     if (entry.get('matrix') != prev_entry.get('matrix') or
                         entry.get('cxform') != prev_entry.get('cxform') or
                         entry.get('blend_mode') != prev_entry.get('blend_mode') or
+                        entry.get('filters') != prev_entry.get('filters') or
                         entry.get('name') != prev_entry.get('name')):
                         span_places.append((frame_num, entry))
             else:
@@ -2730,18 +3106,22 @@ class N2DBuilder:
         span_char_id = None
         span_places = []
         span_reinstated = False
+        span_clip_depth = 0
 
         for frame_num, state, is_reinstated in events:
             if state is None:
                 # Remove event — close current span
                 if span_start is not None:
-                    characters.append(self._build_character_span(
+                    ch = self._build_character_span(
                         span_char_id, span_start, frame_num, span_places,
-                        reinstated=span_reinstated))
+                        reinstated=span_reinstated)
+                    ch['_clip_depth'] = span_clip_depth
+                    characters.append(ch)
                     span_start = None
                     span_char_id = None
                     span_places = []
                     span_reinstated = False
+                    span_clip_depth = 0
             else:
                 # Place or move event — depth is present
                 cur_char_id = state.get('char_id')
@@ -2752,29 +3132,36 @@ class N2DBuilder:
                     span_char_id = cur_char_id
                     span_places = [(frame_num, state)]
                     span_reinstated = is_reinstated
+                    span_clip_depth = state.get('clip_depth', 0) or 0
                 elif cur_char_id != span_char_id or is_reinstated:
                     # Character changed or reinstated — close old, start new
-                    characters.append(self._build_character_span(
+                    ch = self._build_character_span(
                         span_char_id, span_start, frame_num, span_places,
-                        reinstated=span_reinstated))
+                        reinstated=span_reinstated)
+                    ch['_clip_depth'] = span_clip_depth
+                    characters.append(ch)
                     span_start = frame_num
                     span_char_id = cur_char_id
                     span_places = [(frame_num, state)]
                     span_reinstated = is_reinstated
+                    span_clip_depth = state.get('clip_depth', 0) or 0
                 else:
                     # Same character — add keyframe if properties changed
                     _, prev_entry = span_places[-1]
                     if (state.get('matrix') != prev_entry.get('matrix') or
                         state.get('cxform') != prev_entry.get('cxform') or
                         state.get('blend_mode') != prev_entry.get('blend_mode') or
+                        state.get('filters') != prev_entry.get('filters') or
                         state.get('name') != prev_entry.get('name')):
                         span_places.append((frame_num, state))
 
         # Close final span
         if span_start is not None:
-            characters.append(self._build_character_span(
+            ch = self._build_character_span(
                 span_char_id, span_start, total_frames + 1, span_places,
-                reinstated=span_reinstated))
+                reinstated=span_reinstated)
+            ch['_clip_depth'] = span_clip_depth
+            characters.append(ch)
 
         # Build empty character ranges (gaps)
         empty_chars = self._compute_empty_ranges(characters, total_frames)
@@ -2826,11 +3213,17 @@ class N2DBuilder:
                 tx += dx
                 ty += dy
 
+            # Convert parsed SWF filters to n2d filter format
+            raw_filters = entry.get('filters', [])
+            n2d_filters = []
+            for f in raw_filters:
+                n2d_filters.append(f)
+
             place = {
                 'frame': frame_num,
                 'depth': 0,
                 'blendMode': blend_name,
-                'filter': [],
+                'filter': n2d_filters,
                 'matrix': [a, b, c, d, tx, ty],
                 'colorTransform': list(cxform),
             }
@@ -2838,6 +3231,44 @@ class N2DBuilder:
             if entry.get('ratio') is not None:
                 place['ratio'] = entry['ratio']
             places.append(place)
+
+        # --- Motion tween detection ---
+        # Mirrors the native Next2D algorithm (Util.js lines 2642-2706):
+        # Consecutive single-frame keyframes spanning >2 frames → linear tween.
+        # Editor expects [{frame: N, value: {method, curve, custom, startFrame, endFrame}}, ...]
+        tweens = []
+        if len(places) > 2:
+            DEFAULT_EASING = [
+                {"type": "pointer", "fixed": True, "x": 0, "y": 0},
+                {"type": "curve", "x": 0, "y": 0},
+                {"type": "curve", "x": 100, "y": 100},
+                {"type": "pointer", "fixed": True, "x": 100, "y": 100},
+            ]
+            i = 0
+            while i < len(places) - 1:
+                # Find a run of consecutive-frame keyframes
+                run_start = i
+                while (i + 1 < len(places)
+                       and places[i + 1]['frame'] == places[i]['frame'] + 1):
+                    i += 1
+                run_len = i - run_start + 1  # number of keyframes in run
+                if run_len > 2:
+                    sf = places[run_start]['frame']
+                    ef = places[i]['frame']
+                    tweens.append({
+                        "frame": sf,
+                        "value": {
+                            "method": "linear",
+                            "curve": [],
+                            "custom": list(DEFAULT_EASING),
+                            "startFrame": sf,
+                            "endFrame": ef,
+                        }
+                    })
+                    # Mark intermediate places with tweenFrame
+                    for j in range(run_start, i):
+                        places[j]['tweenFrame'] = sf
+                i += 1
 
         self.next_char_id += 1
 
@@ -2847,12 +3278,41 @@ class N2DBuilder:
             'libraryId': lib_id,
             'startFrame': start_frame,
             'endFrame': end_frame,
-            'tween': [],
+            'tween': tweens,
             'places': places,
         }
         if reinstated:
             result['reinstated'] = True
         return result
+
+    def _compute_button_bounds(self, cid: int) -> dict:
+        """Compute bounds for a DefineButton2 by unioning referenced character bounds."""
+        fallback = {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20}
+        if cid not in self.raw_tag_data:
+            return fallback
+        _, body = self.raw_tag_data[cid]
+        try:
+            ref_ids = parse_define_button2_char_ids(body)
+        except Exception:
+            return fallback
+        if not ref_ids:
+            return fallback
+        x_min = float('inf')
+        y_min = float('inf')
+        x_max = float('-inf')
+        y_max = float('-inf')
+        found = False
+        for ref_id in ref_ids:
+            b = self.shape_bounds.get(ref_id)
+            if b:
+                x_min = min(x_min, b['xMin'])
+                y_min = min(y_min, b['yMin'])
+                x_max = max(x_max, b['xMax'])
+                y_max = max(y_max, b['yMax'])
+                found = True
+        if not found:
+            return fallback
+        return {'xMin': x_min, 'xMax': x_max, 'yMin': y_min, 'yMax': y_max}
 
     def _compute_empty_ranges(self, characters: List[dict],
                               total_frames: int) -> List[dict]:

@@ -1057,7 +1057,7 @@ Util.$showPreview = () =>
     stage._$events = new Map();
     player._$broadcastEvents = new Map();
 
-    const json = Publish.toJSON();
+    const blob = Publish.toBlob();
     Util.$useIds.clear();
 
     if (!window.next2d || !window.next2d.display) {
@@ -1113,7 +1113,7 @@ Util.$showPreview = () =>
         });
 
     loader.load(new URLRequest(
-        URL.createObjectURL(new Blob([json], { "type": "application/json" }))
+        URL.createObjectURL(blob)
     ));
 
     // setup clear

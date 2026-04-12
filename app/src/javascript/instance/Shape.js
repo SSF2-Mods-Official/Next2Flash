@@ -1627,9 +1627,10 @@ class Shape extends Instance
          */
         function _getBitmapPixels (bmd)
         {
+            if (!bmd || typeof bmd !== "object") return null;
             // FAST PATH: use raw buffer directly (avoids canvas getImageData)
             if (bmd._$buffer) return bmd._$buffer;
-            if (null !== bmd.image || null !== bmd.canvas) {
+            if (bmd.image || bmd.canvas) {
                 const c = document.createElement("canvas");
                 c.width  = bmd.width;
                 c.height = bmd.height;

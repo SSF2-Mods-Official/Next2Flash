@@ -384,12 +384,19 @@ def _append_buckets(stacks, buckets):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _fill_merge(f0, f1):
-    """Reverse fill0 edges, merge into fill1, then chain segments."""
+    """Reverse fill0 edges, merge into fill1, then chain segments.
+
+    Port of JS fillMerge: fill0 entries are appended AFTER fill1 entries
+    (JS uses fill1[fill1.length] = ..., i.e. next sequential index).
+    """
     _fill_reverse(f0)
     for key, egs in f0.items():
         if key in f1:
-            for eg_key, eg_val in egs.items():
-                f1[key][eg_key] = eg_val
+            # Append fill0's segments after fill1's, using new unique keys
+            next_key = max(f1[key].keys()) + 1 if f1[key] else 0
+            for eg_val in egs.values():
+                f1[key][next_key] = eg_val
+                next_key += 1
         else:
             f1[key] = egs
     return _coordinate_adjustment(f1)
@@ -416,6 +423,7 @@ def _fill_reverse(buckets):
 def _coordinate_adjustment(buckets):
     """Chain edge-group segments into continuous paths per fill style.
 
+    Port of JS coordinateAdjustment() — exact float matching, reverse search.
     Returns {style_idx: {obj, cache: [[cmd_type, coords...], ...]}}.
     """
     result = {}
@@ -423,14 +431,47 @@ def _coordinate_adjustment(buckets):
         egs = buckets[style_idx]
         segments = [egs[k] for k in sorted(egs.keys())]
 
-        # Iteratively chain segments whose end matches another's start
-        paths = _chain_segments(segments)
+        # Chain segments: port of JS coordinateAdjustment inner loop
+        adjustment = []
+        if len(segments) > 1:
+            array = list(segments)
+            while array:
+                fill = array.pop(0)
+                # Already closed? → emit directly
+                if fill['startX'] == fill['endX'] and fill['startY'] == fill['endY']:
+                    adjustment.append(fill)
+                    continue
 
-        # Convert to path command entries
+                # Search backwards for a match (JS: while (length) { --length; })
+                is_match = False
+                j = len(array) - 1
+                while j >= 0:
+                    comp = array[j]
+                    if comp['startX'] == fill['endX'] and comp['startY'] == fill['endY']:
+                        # Merge comp into fill
+                        fill['endX'] = comp['endX']
+                        fill['endY'] = comp['endY']
+                        fill['cache'].extend(comp['cache'])
+                        array.pop(j)
+                        array.insert(0, fill)  # re-queue to try chaining again
+                        is_match = True
+                        break
+                    j -= 1
+
+                if not is_match:
+                    # No match — re-queue at front
+                    array.insert(0, fill)
+                    # Avoid infinite loop: if we cycled back to the same element,
+                    # pop it to adjustment
+                    adjustment.append(array.pop(0))
+        else:
+            adjustment = segments
+
+        # Convert to flat command entries
         cmds = []
         obj = None
-        for seg in paths:
-            if seg['obj'] is not None:
+        for seg in adjustment:
+            if seg.get('obj') is not None:
                 obj = seg['obj']
             cmds.append([0, seg['startX'], seg['startY']])  # moveTo
             for edge in seg['cache']:
@@ -442,44 +483,6 @@ def _coordinate_adjustment(buckets):
 
         result[style_idx] = {'obj': obj, 'cache': cmds}
     return result
-
-
-def _chain_segments(segments):
-    """Try to connect segments head-to-tail into longer paths."""
-    if len(segments) <= 1:
-        return segments
-
-    remaining = list(segments)
-    paths = []
-
-    while remaining:
-        path = remaining.pop(0)
-
-        # Keep trying to extend this path until nothing connects
-        changed = True
-        while changed:
-            changed = False
-            # Already closed?
-            if _approx(path['endX'], path['startX']) and \
-               _approx(path['endY'], path['startY']):
-                break
-            for j in range(len(remaining)):
-                other = remaining[j]
-                if _approx(path['endX'], other['startX']) and \
-                   _approx(path['endY'], other['startY']):
-                    path['cache'].extend(other['cache'])
-                    path['endX'] = other['endX']
-                    path['endY'] = other['endY']
-                    remaining.pop(j)
-                    changed = True
-                    break
-        paths.append(path)
-
-    return paths
-
-
-def _approx(a: float, b: float, eps: float = 0.05) -> bool:
-    return abs(a - b) < eps
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -505,7 +508,7 @@ def _stacks_to_recodes(stacks, bitmap_map):
             if cmd[0] == 0:  # moveTo
                 mx, my = cmd[1], cmd[2]
                 if not is_line or pen_x is None or \
-                   not _approx(pen_x, mx) or not _approx(pen_y, my):
+                   pen_x != mx or pen_y != my:
                     recodes.extend([MOVE_TO, mx, my])
                 pen_x, pen_y = mx, my
             elif cmd[0] == 1:  # curveTo

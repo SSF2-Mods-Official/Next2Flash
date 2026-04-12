@@ -323,6 +323,26 @@ class LibraryRepository
     }
 
     /**
+     * @description Backward compatibility: Make LibraryRepository iterable (like Map)
+     * @return {Iterator<[number, object]>}
+     * @public
+     */
+    [Symbol.iterator] ()
+    {
+        return this._$storage[Symbol.iterator]();
+    }
+
+    /**
+     * @description Backward compatibility: Map.entries() interface
+     * @return {Iterator<[number, object]>}
+     * @public
+     */
+    entries ()
+    {
+        return this._$storage.entries();
+    }
+
+    /**
      * @description Backward compatibility: Map.values() interface
      * @return {Iterator<object>}
      * @deprecated Use getAll() instead

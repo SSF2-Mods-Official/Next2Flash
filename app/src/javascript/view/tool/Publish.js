@@ -104,6 +104,44 @@ class Publish
     }
 
     /**
+     * @description Build a JSON Blob incrementally to avoid
+     *              RangeError: Invalid string length on large projects.
+     *
+     * @return {Blob}
+     * @method
+     * @static
+     */
+    static toBlob ()
+    {
+        if (Util.$symbols.size) {
+            Util.$symbols.clear();
+        }
+
+        const object = Publish.toObject();
+        const symbols = Array.from(Util.$symbols);
+
+        // Build JSON as an array of string parts — each character is
+        // stringified individually so no single string exceeds V8's limit.
+        const parts = [
+            '{"stage":', JSON.stringify(object.stage),
+            ',"characters":['
+        ];
+
+        const chars = object.characters;
+        for (let i = 0; i < chars.length; i++) {
+            if (i > 0) parts.push(',');
+            parts.push(JSON.stringify(chars[i]));
+        }
+
+        parts.push(
+            '],"symbols":', JSON.stringify(symbols),
+            ',"type":"json"}'
+        );
+
+        return new Blob(parts, { "type": "application/json" });
+    }
+
+    /**
      * @return {string}
      * @method
      * @static
