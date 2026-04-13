@@ -1079,6 +1079,7 @@ def parse_define_text(tag_data: bytes, tag_type: int,
         'originBounds': dict(bounds),
         'thickness': 0,
         'thicknessColor': 0,
+        'html': False,
         # Internal: bounds offset to bake into placement matrices
         '_boundsOffset': [bx, by],
     }
@@ -2297,7 +2298,6 @@ class N2DBuilder:
         """Build all library entries from cataloged SWF data.
         
         fast_shapes: if True, skip shape binary parsing (use gray rect placeholders).
-                     SWF export still works 1:1 via rawTagBody passthrough.
         """
         log.info('build_all: building library entries (fast_shapes=%s)', fast_shapes)
         t0 = time.time()
@@ -2421,11 +2421,6 @@ class N2DBuilder:
                 'imageType': 'image/png',
                 'buffer': buffer_str,
             }
-            # Include raw SWF tag body as base64 for 1:1 roundtrip
-            if cid in self.raw_tag_data:
-                tag_type, body = self.raw_tag_data[cid]
-                entry['rawTagType'] = tag_type
-                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
             self.libraries.append(entry)
             bitmap_count += 1
 
@@ -2509,19 +2504,13 @@ class N2DBuilder:
                 'recodes': recodes,
                 'bounds': bounds,
             }
-            # Include raw SWF tag body as base64 for 1:1 roundtrip
-            if cid in self.raw_tag_data:
-                tag_type, body = self.raw_tag_data[cid]
-                entry['rawTagType'] = tag_type
-                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
             self.libraries.append(entry)
             shape_count += 1
 
         step(f"Built {shape_count} shape entries ({shape_parsed} parsed from SWF binary)")
 
-        # Phase 2b: SKIPPED — Bitmap RGBA decode is skipped for speed.
+        # Phase 2b: Bitmap RGBA decode in shape recodes skipped for speed.
         # Shape recodes keep integer bitmap IDs (tool shows blank fills).
-        # rawTagBody passthrough ensures SWF export still works perfectly.
         step("Bitmap embed in shape recodes skipped (speed optimization)")
 
         # Phase 3: Build morph shape entries — parse start-state into visual recodes
@@ -2573,17 +2562,12 @@ class N2DBuilder:
                 'endRecodes': end_recodes,
                 'endBounds': end_bounds,
             }
-            # Include raw SWF tag body as base64 for 1:1 roundtrip
-            if cid in self.raw_tag_data:
-                tag_type, body = self.raw_tag_data[cid]
-                entry['rawTagType'] = tag_type
-                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
             self.libraries.append(entry)
             morph_count += 1
 
         step(f"Built {morph_count} morph shape entries ({morph_parsed} parsed start-state)")
 
-        # Phase 4: Build sound entries with raw tag data for 1:1 roundtrip
+        # Phase 4: Build sound entries
         # Pre-pass: identify Nellymoser sounds and convert in parallel via ffmpeg
         sound_count = 0
         sound_formats = {}
@@ -2632,11 +2616,14 @@ class N2DBuilder:
             display_name = sym_name.split('.')[-1] if sym_name else f"Sound_{cid}"
 
             buffer_str = ''
+            sound_fmt = 'unknown'
             if cid in sound_data_cache:
                 fmt_name, audio_bytes, swf_rate = sound_data_cache[cid]
+                sound_fmt = fmt_name
                 # Use parallel-converted MP3 if available
                 if cid in nelly_results:
                     audio_bytes = nelly_results[cid]
+                    sound_fmt = 'mp3'
                 if audio_bytes:
                     buffer_str = base64.b64encode(audio_bytes if isinstance(audio_bytes, (bytes, bytearray)) else bytes(audio_bytes)).decode('ascii')
 
@@ -2648,14 +2635,10 @@ class N2DBuilder:
                 'symbol': sym_name,
                 'folderId': self.folder_ids.get('sound', 0),
                 'buffer': buffer_str,
+                'soundFormat': sound_fmt,
                 'volume': 100,
                 'loopCount': 0,
             }
-            # Include raw SWF tag body as base64 for 1:1 roundtrip
-            if cid in self.raw_tag_data:
-                tag_type, body = self.raw_tag_data[cid]
-                entry['rawTagType'] = tag_type
-                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
             self.libraries.append(entry)
             sound_count += 1
 
@@ -2724,30 +2707,21 @@ class N2DBuilder:
                     'folderId': self.folder_ids.get('text', 0),
                 }
                 entry.update(parsed_props)
-                # Include raw tag body as base64 for roundtrip
-                if cid in self.raw_tag_data:
-                    tag_type, body = self.raw_tag_data[cid]
-                    entry['rawTagType'] = tag_type
-                    entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
             else:
-                # Fallback: store as shape placeholder
+                # Fallback: store as text with defaults
                 entry = {
                     'id': lid,
                     'swfCharId': cid,
                     'name': display_name,
-                    'type': 'shape',
+                    'type': 'text',
                     'symbol': sym_name,
                     'folderId': self.folder_ids.get('text', 0),
-                    'bitmapId': 0,
-                    'grid': self.scaling_grids.get(cid),
-                    'inBitmap': False,
-                    'recodes': [],
-                    'bounds': {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20},
+                    'text': '',
+                    'font': 'Arial',
+                    'size': 12,
+                    'color': 0,
+                    'bounds': {'xMin': 0, 'xMax': 200, 'yMin': 0, 'yMax': 30},
                 }
-                if cid in self.raw_tag_data:
-                    tag_type, body = self.raw_tag_data[cid]
-                    entry['rawTagType'] = tag_type
-                    entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
 
             self.libraries.append(entry)
             text_count += 1
@@ -2755,14 +2729,10 @@ class N2DBuilder:
         step(f"Built {text_count} text entries ({text_parsed} parsed as editable)")
 
         # Phase 6: Build font entries — store as shapes for tool compatibility
-        # The Next2D tool has no "font" library type; fonts are transient SWF
-        # import data.  We store them as shapes with raw tag passthrough so
-        # compile_n2d.py can reconstruct the DefineFont3 tags.  Font raw data
-        # is also preserved in rawGlobalTags for auxiliary tag ordering.
-        #
-        # We also store fontData (the raw tag body as a latin-1 string) and
+        # The Next2D tool has no "font" library type; fonts are stored as
+        # shapes with fontData field so compile_n2d.py can emit DefineFont3 tags.
         # fontAuxTags (auxiliary tags like DefineFontAlignZones, CSMTextSettings,
-        # DefineFontName) directly on the font entry so the sidecar is not needed.
+        # DefineFontName) are stored directly on the font entry.
         font_count = 0
         # Pre-collect font aux tags keyed by char ID for attachment below
         _font_aux_by_cid: Dict[int, List[Tuple[int, bytes]]] = {}
@@ -2792,9 +2762,7 @@ class N2DBuilder:
             }
             if cid in self.raw_tag_data:
                 tag_type, body = self.raw_tag_data[cid]
-                entry['rawTagType'] = tag_type
-                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
-                # Store font body separately so it survives without sidecar
+                # Store font body as fontData for compilation
                 entry['fontData'] = base64.b64encode(body).decode('ascii')
                 entry['fontTagType'] = tag_type
             # Attach font auxiliary tags (DefineFontAlignZones, CSMTextSettings,
@@ -2809,7 +2777,7 @@ class N2DBuilder:
 
         step(f"Built {font_count} font entries")
 
-        # Phase 7a: Build button entries (DefineButton2) — rawTagBody passthrough
+        # Phase 7a: Build button entries (DefineButton2) — stored as buttonData
         button_count = 0
         for cid in all_char_ids:
             if self.char_types[cid] != 'button':
@@ -2833,8 +2801,7 @@ class N2DBuilder:
             }
             if cid in self.raw_tag_data:
                 tag_type, body = self.raw_tag_data[cid]
-                entry['rawTagType'] = tag_type
-                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
+                entry['buttonData'] = base64.b64encode(body).decode('ascii')
             # Attach button auxiliary tags (DefineButtonSound, DefineButtonCxform)
             if cid in self.button_aux_tags:
                 entry['buttonAuxTags'] = [
@@ -2871,8 +2838,7 @@ class N2DBuilder:
             }
             if cid in self.raw_tag_data:
                 tag_type, body = self.raw_tag_data[cid]
-                entry['rawTagType'] = tag_type
-                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
+                entry['binaryDataBody'] = base64.b64encode(body).decode('ascii')
             self.libraries.append(entry)
             bindata_count += 1
 
@@ -2894,11 +2860,6 @@ class N2DBuilder:
             container = self._build_container(lid, display_name, sym_name,
                                               frame_count, frames)
             container['swfCharId'] = cid
-            # Include raw DefineSprite body as base64 for 1:1 roundtrip
-            if cid in self.raw_tag_data:
-                tag_type, body = self.raw_tag_data[cid]
-                container['rawTagType'] = tag_type
-                container['rawTagBody'] = base64.b64encode(body).decode('ascii')
             # Capture SoundStreamHead (tag 18) and SoundStreamHead2 (tag 45) for roundtrip
             for ntag in nested_tags:
                 if ntag.tag_type in (18, 45):
@@ -3575,8 +3536,8 @@ class N2DBuilder:
         objects ({buffer, width, height}).  The tool's Shape class expects actual
         pixel data at the BITMAP_FILL / BITMAP_STROKE positions, not library IDs.
 
-        Decodes bitmap RGBA from rawTagBody (base64-encoded SWF tag data) on
-        demand — only bitmaps actually referenced in shape fills are decoded.
+        Decodes bitmap RGBA from the buffer field on demand — only bitmaps
+        actually referenced in shape fills are decoded.
         """
         BITMAP_FILL = 13
         BITMAP_STROKE = 14
@@ -3632,33 +3593,6 @@ class N2DBuilder:
                     'height': h,
                 }
                 continue
-
-            # Decode from rawTagBody (base64 of SWF tag body, charId stripped)
-            raw_b64 = lib.get('rawTagBody', '')
-            raw_tag_type = lib.get('rawTagType', 0)
-            if not raw_b64 or not raw_tag_type:
-                continue
-
-            try:
-                raw_bytes = base64.b64decode(raw_b64)
-            except Exception:
-                continue
-
-            rgba = b''
-            if raw_tag_type in (TAG_DEFINE_BITS_LOSSLESS, TAG_DEFINE_BITS_LOSSLESS2):
-                # decode_lossless expects body after charId — matches our storage
-                _, _, rgba = decode_lossless_to_rgba(raw_tag_type, raw_bytes)
-            elif raw_tag_type in (TAG_DEFINE_BITS, TAG_DEFINE_BITS_JPEG2,
-                                  TAG_DEFINE_BITS_JPEG3, TAG_DEFINE_BITS_JPEG4):
-                # decode_jpeg expects full body including charId — prepend dummy
-                _, _, rgba = decode_jpeg_to_rgba(raw_tag_type, b'\x00\x00' + raw_bytes)
-
-            if rgba:
-                bitmap_map[lid] = {
-                    'buffer': bytes(rgba),
-                    'width': w,
-                    'height': h,
-                }
 
         if not bitmap_map:
             print(f"  Warning: {len(referenced_ids)} bitmap fills but 0 decoded")
@@ -3768,13 +3702,12 @@ def save_n2d(data: dict, output_path: str, bitmap_buffers: dict = None, use_msgp
       - Handles unlimited file sizes (bypasses JavaScript string length limit)
       - Faster parsing
 
-    Bitmap data is stored inline in each library entry's rawTagBody field
-    (base64-encoded original SWF tag data). No separate bitmap files are
-    written — this keeps memory usage minimal and avoids the 500 MB+ RAM
-    spike from decoding all bitmaps to raw RGBA.
+    Bitmap data is stored inline in each library entry's buffer field
+    (base64-encoded RGBA pixel data). No separate bitmap files are
+    written — this keeps memory usage minimal.
 
     bitmap_buffers parameter is accepted for backwards compatibility but
-    is no longer used (ignored). All bitmap data comes from rawTagBody.
+    is no longer used (ignored). All bitmap data comes from the buffer field.
     """
     log.info('save_n2d: writing to %s (format: %s)', output_path, 'MessagePack' if use_msgpack else 'JSON')
     import zipfile
@@ -3786,7 +3719,7 @@ def save_n2d(data: dict, output_path: str, bitmap_buffers: dict = None, use_msgp
         msgpack_data = msgpack.packb(data, use_bin_type=True)
         step(f"MessagePack: {len(msgpack_data):,} bytes")
 
-        step("Writing ZIP (project.msgpack — bitmaps stored as rawTagBody)...")
+        step("Writing ZIP (project.msgpack)...")
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
             zf.writestr('project.msgpack', msgpack_data)
     else:
@@ -3824,9 +3757,8 @@ def save_project_folder(data: dict, folder_path: str):
         scripts/              — .as ActionScript source files
 
     Libraries gain an ``externalFile`` field pointing to their asset.
-    The rawTagBody is still preserved in project.n2d for lossless
-    roundtrip, but the human-readable files can be edited and will be
-    preferred during compilation when they are newer.
+    The human-readable files can be edited and will be preferred during
+    compilation when they are newer.
     """
     log.info('save_project_folder: writing to %s', folder_path)
     t0 = time.time()
@@ -3852,56 +3784,22 @@ def save_project_folder(data: dict, folder_path: str):
         """
         cid = lib.get('swfCharId', lib.get('id', 0))
         name = _safe_filename(lib.get('name', f'bitmap_{cid}'))
-        raw_b64 = lib.get('rawTagBody', '')
-        tag_type = lib.get('rawTagType', 36)
 
-        if not raw_b64:
-            return 0
-
-        raw_body = base64.b64decode(raw_b64)
-
-        # JPEG2 → write raw JPEG bytes directly (already efficient, no decode)
-        if tag_type == TAG_DEFINE_BITS_JPEG2:
-            img_data = raw_body
-            if len(img_data) >= 4 and img_data[:4] == b'\xff\xd9\xff\xd8':
-                img_data = img_data[4:]
-            fname = f"{cid}_{name}.jpg"
-            with open(os.path.join(bitmaps_dir, fname), 'wb') as f:
-                f.write(img_data)
-            lib['externalFile'] = f'bitmaps/{fname}'
-            return 1
-
-        # All other types → save as PNG
-        fname = f"{cid}_{name}.png"
-        fpath = os.path.join(bitmaps_dir, fname)
-
-        # Fast path: reuse pre-decoded RGBA from build_all() — avoids third decode
+        # Decode from pre-decoded RGBA buffer
         buf = lib.get('buffer', '')
         w = lib.get('width', 0)
         h = lib.get('height', 0)
-        if buf and w and h:
-            if buf.startswith('b64:'):
-                rgba = base64.b64decode(buf[4:])
-            else:
-                rgba = buf.encode('latin-1')
-            if rgba and len(rgba) == w * h * 4:
-                try:
-                    from PIL import Image
-                    Image.frombytes('RGBA', (w, h), rgba).save(fpath)
-                    lib['externalFile'] = f'bitmaps/{fname}'
-                    return 1
-                except ImportError:
-                    pass  # fall through to raw-decode path
+        if not buf or not w or not h:
+            return 0
 
-        # Fallback: decode from raw SWF tag body
-        rgba = w = h = b''
-        if tag_type in (TAG_DEFINE_BITS_LOSSLESS, TAG_DEFINE_BITS_LOSSLESS2):
-            w, h, rgba = decode_lossless_to_rgba(tag_type, raw_body)
-        elif tag_type in (TAG_DEFINE_BITS, TAG_DEFINE_BITS_JPEG3, TAG_DEFINE_BITS_JPEG4):
-            full_tag_data = struct.pack('<H', cid) + raw_body
-            w, h, rgba = decode_jpeg_to_rgba(tag_type, full_tag_data)
+        fname = f"{cid}_{name}.png"
+        fpath = os.path.join(bitmaps_dir, fname)
 
-        if w and h and rgba:
+        if buf.startswith('b64:'):
+            rgba = base64.b64decode(buf[4:])
+        else:
+            rgba = buf.encode('latin-1')
+        if rgba and len(rgba) == w * h * 4:
             try:
                 from PIL import Image
                 img = Image.frombytes('RGBA', (w, h), rgba)
@@ -3942,27 +3840,11 @@ def save_project_folder(data: dict, folder_path: str):
         cid = lib.get('swfCharId', lib.get('id', 0))
         name = _safe_filename(lib.get('name', f'sound_{cid}'))
 
-        # Fast path: reuse pre-decoded/pre-converted buffer from build_all()
         buf = lib.get('buffer', '')
-        if buf:
-            audio_bytes = base64.b64decode(buf)
-            ext = _detect_audio_ext(audio_bytes)
-            fname = f"{cid}_{name}.{ext}"
-            fpath = os.path.join(sounds_dir, fname)
-            with open(fpath, 'wb') as f:
-                f.write(audio_bytes)
-            lib['externalFile'] = f'sounds/{fname}'
-            return 1
-
-        # Fallback: decode from raw SWF tag body
-        raw_b64 = lib.get('rawTagBody', '')
-        if not raw_b64:
+        if not buf:
             return 0
-        raw_body = base64.b64decode(raw_b64)
-        fmt_name, audio_bytes, _rate = extract_sound_buffer(raw_body)
-        if not audio_bytes:
-            return 0
-        ext = 'mp3' if fmt_name == 'mp3' else 'wav' if fmt_name == 'wav' else 'bin'
+        audio_bytes = base64.b64decode(buf)
+        ext = _detect_audio_ext(audio_bytes)
         fname = f"{cid}_{name}.{ext}"
         fpath = os.path.join(sounds_dir, fname)
         with open(fpath, 'wb') as f:

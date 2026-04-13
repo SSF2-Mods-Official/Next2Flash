@@ -81,76 +81,16 @@ def _get_compile_n2d():
     return _compile_n2d
 
 
-def _lib_has_editable_changes(elib: dict, dlib: dict) -> bool:
-    """Detect whether the editor version of a library entry has meaningful
-    property changes that should override the rawTagBody passthrough.
-
-    Returns True if rawTagBody should be cleared so the rebuild path is used.
-    """
-    ltype = elib.get('type') or dlib.get('type', '')
-
-    if ltype == 'text':
-        # Text properties that, if changed, mean the raw binary is stale
-        text_keys = ('text', 'font', 'size', 'color', 'align', 'leading',
-                     'letterSpacing', 'leftMargin', 'rightMargin',
-                     'multiline', 'wordWrap', 'border', 'fontType',
-                     'html', 'autoSize', 'inputType')
-        for k in text_keys:
-            ev = elib.get(k)
-            dv = dlib.get(k)
-            if ev is not None and dv is not None and ev != dv:
-                return True
-        return False
-
-    if ltype == 'shape':
-        # Font/button shapes use rawTagBody exclusively — never clear
-        if dlib.get('isFont') or dlib.get('isButton'):
-            return False
-        # MorphShape: check start/end recodes
-        if dlib.get('isMorphShape') or dlib.get('rawTagType') in (46, 84):
-            for k in ('recodes', 'startRecodes', 'endRecodes'):
-                ev = elib.get(k)
-                dv = dlib.get(k)
-                if ev is not None and dv is not None and ev != dv:
-                    return True
-            return False
-        # Regular shape: check recodes
-        ev = elib.get('recodes')
-        dv = dlib.get('recodes')
-        if ev is not None and dv is not None and ev != dv:
-            return True
-        return False
-
-    if ltype == 'bitmap':
-        # If editor provides a buffer or externalFile changed, rebuild
-        if elib.get('buffer') and elib.get('buffer') != dlib.get('buffer'):
-            return True
-        if elib.get('externalFile') and elib.get('externalFile') != dlib.get('externalFile'):
-            return True
-        return False
-
-    if ltype == 'sound':
-        if elib.get('buffer') and elib.get('buffer') != dlib.get('buffer'):
-            return True
-        if elib.get('externalFile') and elib.get('externalFile') != dlib.get('externalFile'):
-            return True
-        return False
-
-    return False
-
-
 def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
     """Merge lightweight editor state into full disk project data.
 
     The editor blob (from the Next2D tool save) contains updated timeline,
-    positions, filters, names etc. but lacks rawTagBody, scripts,
-    rawGlobalTags, rootTimelineDefIds.  The disk data has all of those.
+    positions, filters, names etc. but lacks scripts, rawGlobalTags,
+    rootTimelineDefIds.  The disk data has all of those.
 
     Strategy: For each library, take editor's non-roundtrip fields
     (placeObjects, timeline changes, etc.) and overlay them onto disk,
-    keeping disk's rawTagBody and other roundtrip data intact.
-    When editable properties have changed, clear rawTagBody so the
-    rebuild path produces fresh SWF binary from the edited properties.
+    keeping disk's asset data fields intact.
     Also update top-level stage/root properties from editor.
     """
     # Update top-level properties that the editor may change
@@ -178,14 +118,13 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
             disk_libs.append(elib)
             continue
 
-        # Detect editable property changes BEFORE we overwrite dlib
-        should_clear_raw = _lib_has_editable_changes(elib, dlib)
-
-        # Preserve roundtrip fields from disk
-        roundtrip_keys = ('rawTagBody', 'rawTagType', 'swfCharId',
+        # Preserve asset/roundtrip fields from disk that the editor doesn't carry
+        roundtrip_keys = ('swfCharId',
                           'fontAuxTags', 'externalFile', 'buttonAuxTags',
                           'fontData', 'fontTagType',
-                          'isBinaryData', 'isFont', 'isButton', 'isMorphShape')
+                          'buttonData', 'binaryDataBody', 'soundFormat',
+                          'isBinaryData', 'isFont', 'isButton', 'isMorphShape',
+                          'html')
         saved = {}
         for k in roundtrip_keys:
             if k in dlib:
@@ -200,15 +139,140 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
             if k not in dlib or not dlib[k]:
                 dlib[k] = v
 
-        # If editable properties changed, clear rawTagBody so the
-        # rebuild path in compile_n2d.py produces fresh SWF binary
-        if should_clear_raw:
-            dlib.pop('rawTagBody', None)
-            dlib.pop('rawTagType', None)
 
-    # Ensure critical roundtrip top-level fields stay from disk
-    # (editor blob won't have these)
-    # They're already in disk, we just don't overwrite them
+def _apply_text_patches_to_n2d(n2d_path: str, text_patches: list,
+                                project_dir: str) -> 'str | None':
+    """Apply lightweight text-field patches from the editor to a disk N2D.
+
+    Loads the project.n2d ZIP, parses it, overlays the editor's text fields
+    onto the matching library entries (by id), re-packs as a temp ZIP, and
+    returns the path to the patched temp file.  The caller is responsible
+    for cleaning up the temp file.
+
+    The text_patches list contains objects from TextField.toObject() in the
+    editor, each with at least {id, text, font, ...}.  Only text-related
+    fields are overlaid; roundtrip keys (fontData, swfCharId etc.) are
+    preserved from disk.
+    """
+    import zipfile as _zipfile
+    import io as _io
+
+    if not text_patches:
+        return None
+
+    # Build lookup: id → patch
+    patch_map = {}
+    for p in text_patches:
+        pid = p.get('id')
+        if pid is not None:
+            patch_map[pid] = p
+
+    if not patch_map:
+        return None
+
+    # Load existing n2d
+    with open(n2d_path, 'rb') as f:
+        raw = f.read()
+
+    is_msgpack = False
+    with _zipfile.ZipFile(_io.BytesIO(raw)) as zf:
+        if 'project.msgpack' in zf.namelist():
+            is_msgpack = True
+            data = msgpack.unpackb(zf.read('project.msgpack'), raw=False)
+        else:
+            data = json.loads(zf.read('project.json'))
+
+    # Apply patches
+    roundtrip_keys = frozenset((
+        'swfCharId', 'fontAuxTags', 'externalFile', 'buttonAuxTags',
+        'fontData', 'fontTagType', 'buttonData', 'binaryDataBody',
+        'soundFormat', 'isBinaryData', 'isFont', 'isButton',
+        'isMorphShape', 'html',
+    ))
+    patched = 0
+    for lib in data.get('libraries', []):
+        if not lib:
+            continue
+        lib_id = lib.get('id')
+        patch = patch_map.get(lib_id)
+        if not patch:
+            continue
+        # Only patch if the disk entry is a text type
+        if lib.get('type') != 'text':
+            continue
+        # Save roundtrip fields from disk
+        saved = {k: lib[k] for k in roundtrip_keys if k in lib}
+        # Overlay editor text fields onto disk entry
+        for key, val in patch.items():
+            if key not in roundtrip_keys:
+                lib[key] = val
+        # Restore roundtrip fields
+        for k, v in saved.items():
+            lib[k] = v
+        patched += 1
+        log.info('_apply_text_patches: patched lib id=%s text="%s"',
+                 lib_id, patch.get('text', '')[:50])
+
+    if patched == 0:
+        log.info('_apply_text_patches: no matching text libs to patch')
+        return None
+
+    log.info('_apply_text_patches: patched %d/%d text fields',
+             patched, len(patch_map))
+
+    # Write patched data to temp ZIP
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, 'w', _zipfile.ZIP_DEFLATED) as zf:
+        if is_msgpack:
+            zf.writestr('project.msgpack', msgpack.packb(data, use_bin_type=True))
+        else:
+            zf.writestr('project.json', json.dumps(data))
+    temp_path = n2d_path + '.patched.n2d'
+    with open(temp_path, 'wb') as f:
+        f.write(buf.getvalue())
+
+    return temp_path
+
+
+def _apply_text_patches_inline(data: dict, text_patches: list) -> int:
+    """Apply text-field patches to an already-loaded N2D dict (in-place).
+
+    Same logic as _apply_text_patches_to_n2d but operates on the dict
+    directly (used by save-and-compile's disk-only path where we already
+    have the parsed data in memory).  Returns number of patches applied.
+    """
+    if not text_patches:
+        return 0
+
+    patch_map = {p['id']: p for p in text_patches if 'id' in p}
+    if not patch_map:
+        return 0
+
+    roundtrip_keys = frozenset((
+        'swfCharId', 'fontAuxTags', 'externalFile', 'buttonAuxTags',
+        'fontData', 'fontTagType', 'buttonData', 'binaryDataBody',
+        'soundFormat', 'isBinaryData', 'isFont', 'isButton',
+        'isMorphShape', 'html',
+    ))
+    patched = 0
+    for lib in data.get('libraries', []):
+        if not lib or lib.get('type') != 'text':
+            continue
+        patch = patch_map.get(lib.get('id'))
+        if not patch:
+            continue
+        saved = {k: lib[k] for k in roundtrip_keys if k in lib}
+        for key, val in patch.items():
+            if key not in roundtrip_keys:
+                lib[key] = val
+        for k, v in saved.items():
+            lib[k] = v
+        patched += 1
+        log.info('_apply_text_patches_inline: lib id=%s text="%s"',
+                 lib.get('id'), patch.get('text', '')[:50])
+
+    log.info('_apply_text_patches_inline: patched %d/%d', patched, len(patch_map))
+    return patched
 
 
 def _read_scripts_from_disk(n2d_json: dict, project_dir: str) -> int:
@@ -235,7 +299,7 @@ def _read_scripts_from_disk(n2d_json: dict, project_dir: str) -> int:
 
 def _overlay_external_bitmaps(n2d_json: dict, project_dir: str) -> None:
     """Read external PNG/JPG bitmap files and update:
-    1. The bitmap library entry (buffer, width, height, rawTagBody).
+    1. The bitmap library entry (buffer, width, height).
     2. Any embedded {buffer, width, height} dicts baked into shape recodes,
        matched back to the correct bitmap via the original buffer contents.
     """
@@ -293,21 +357,6 @@ def _overlay_external_bitmaps(n2d_json: dict, project_dir: str) -> None:
             lib["buffer"] = new_list
             lib["width"]  = img.width
             lib["height"] = img.height
-
-            # Rebuild rawTagBody (ARGB premultiplied, zlib-compressed)
-            argb = bytearray()
-            for idx in range(0, len(rgba), 4):
-                r, g, b, a = rgba[idx], rgba[idx+1], rgba[idx+2], rgba[idx+3]
-                if a == 0:
-                    argb.extend([0, 0, 0, 0])
-                elif a == 255:
-                    argb.extend([a, r, g, b])
-                else:
-                    argb.extend([a, (r*a+127)//255, (g*a+127)//255, (b*a+127)//255])
-            compressed = zlib.compress(bytes(argb), 9)
-            raw_body = struct.pack('<BHH', 5, img.width, img.height) + compressed
-            lib["rawTagBody"] = base64.b64encode(raw_body).decode("ascii")
-            lib["rawTagType"] = 36  # DefineBitsLossless2
 
             payload = (new_list, img.width, img.height)
             if fp:
@@ -938,8 +987,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
     def _handle_save_and_compile(self):
         """POST /api/save-and-compile — Merge editor state + compile to SWF.
 
-        Fast path: receives 'editorBlob' (raw zlib tool save, no rawTagBody).
-        Server loads existing project.n2d (which has rawTagBody, scripts, etc.),
+        Fast path: receives 'editorBlob' (raw zlib tool save, lightweight).
+        Server loads existing project.n2d (which has scripts, etc.),
         overlays editor timeline/position changes, saves, and compiles.
         This avoids the huge JS-side decompress→parse→merge→stringify→recompress.
 
@@ -972,7 +1021,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 # === FAST PATH: merge editor blob with on-disk project ===
                 _t2 = _time.perf_counter()
 
-                # Parse the lightweight editor blob (no rawTagBody)
+                # Parse the lightweight editor blob
                 editor_decompressed = zlib.decompress(editor_blob)
                 try:
                     import orjson as _orjson
@@ -989,7 +1038,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 _t2a = _time.perf_counter()
                 print(f"[PERF] parse editor blob: {(_t2a-_t2)*1000:.0f}ms")
 
-                # Load existing project.n2d from disk (has rawTagBody, scripts, etc.)
+                # Load existing project.n2d from disk (has scripts, etc.)
                 if not os.path.isfile(n2d_path):
                     return self._error_response(400, 'No project.n2d on disk')
 
@@ -1009,7 +1058,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
 
                 # Merge: overlay editor changes onto disk data
                 # The editor blob has updated timeline/position data but lacks
-                # rawTagBody, rawGlobalTags, scripts, rootTimelineDefIds.
+                # rawGlobalTags, scripts, rootTimelineDefIds.
                 # Keep those from disk, take everything else from editor.
                 _merge_editor_into_disk(editor_json, disk_json)
                 n2d_json = disk_json
@@ -1033,6 +1082,15 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                         return self._error_response(400, 'Invalid project.n2d format')
                 _t2a = _time.perf_counter()
                 print(f"[PERF] disk-only load: {(_t2a-_t2)*1000:.0f}ms")
+
+                # Apply text patches if provided (editor text edits)
+                text_patches_raw = self._extract_form_field(body, 'textPatches')
+                if text_patches_raw:
+                    try:
+                        text_patches = json.loads(text_patches_raw)
+                        _apply_text_patches_inline(n2d_json, text_patches)
+                    except Exception as e:
+                        log.warning('Failed to apply text patches: %s', e)
 
             elif n2d_data:
                 # === LEGACY PATH: full N2D blob ===
@@ -1102,10 +1160,16 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
     def _handle_compile_disk(self):
         """POST /api/compile-disk — Compile SWF directly from on-disk project.
 
-        Expects JSON body: {"projectDir": "...", "outputPath": "..."}
+        Expects JSON body: {"projectDir": "...", "outputPath": "...",
+                            "textPatches": [...]}
         No file upload — reads project.n2d from disk, compiles, writes SWF to
         outputPath (or returns bytes if no outputPath given). This is the
         Electron fast path that completely bypasses HTTP file transfer.
+
+        If textPatches is provided, the patches (text-field objects from the
+        editor) are applied to the in-memory N2D data before compiling, so
+        that editor text edits appear in the exported SWF without needing to
+        serialise the full 225 MB+ workspace.
         """
         import time as _time
         try:
@@ -1114,6 +1178,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             req = json.loads(body)
             project_dir = req.get('projectDir', '')
             output_path = req.get('outputPath', '')
+            text_patches = req.get('textPatches', [])
 
             if not project_dir:
                 with self._project_lock:
@@ -1133,19 +1198,38 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 shared_dir = tempfile.mkdtemp()
 
             if output_path:
-                # Write directly to the requested path (Electron native save)
                 swf_path = output_path
             else:
                 swf_path = os.path.join(tempfile.mkdtemp(), f'{name}.swf')
 
-            compiler = mod_compile.N2DCompiler(
-                n2d_path=n2d_path,
-                shared_dir=shared_dir,
-                output_path=swf_path,
-            )
-            compiler.compile()
+            # ── Apply text patches if provided ─────────────────────────
+            compile_n2d_path = n2d_path
+            temp_n2d_path = None
+            if text_patches:
+                temp_n2d_path = _apply_text_patches_to_n2d(
+                    n2d_path, text_patches, project_dir
+                )
+                if temp_n2d_path:
+                    compile_n2d_path = temp_n2d_path
+
+            try:
+                compiler = mod_compile.N2DCompiler(
+                    n2d_path=compile_n2d_path,
+                    shared_dir=shared_dir,
+                    output_path=swf_path,
+                )
+                compiler.compile()
+            finally:
+                # Clean up temp patched n2d
+                if temp_n2d_path and os.path.isfile(temp_n2d_path):
+                    try:
+                        os.unlink(temp_n2d_path)
+                    except OSError:
+                        pass
+
             _t2 = _time.perf_counter()
-            print(f"[PERF] compile-disk: compile={(_t2-_t1)*1000:.0f}ms total={(_t2-_t0)*1000:.0f}ms")
+            patched_msg = f' ({len(text_patches)} text patches applied)' if text_patches else ''
+            print(f"[PERF] compile-disk: compile={(_t2-_t1)*1000:.0f}ms total={(_t2-_t0)*1000:.0f}ms{patched_msg}")
 
             if output_path:
                 # SWF written to disk — just return success + path
@@ -1306,7 +1390,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 Next2FlashHandler._current_project_dir = project_dir
 
             # Heavy fields to strip for skeleton mode
-            _HEAVY_FIELDS = ('buffer', 'recodes', 'rawTagBody')
+            _HEAVY_FIELDS = ('buffer', 'recodes')
 
             if lazy:
                 # Build skeleton (first time — no cached skeleton existed)
@@ -1635,7 +1719,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 and os.path.isfile(os.path.join(project_dir, lib["externalFile"]))
             )
 
-            # Re-read external sound files (MP3/WAV) → update rawTagBody
+            # Re-read external sound files (MP3/WAV) → update buffer
             sounds_refreshed = 0
             for lib in n2d_json.get("libraries", []):
                 if not lib or lib.get("type") != "sound":
@@ -1649,21 +1733,14 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 try:
                     with open(fpath, "rb") as af:
                         audio_bytes = af.read()
+                    buf_b64 = base64.b64encode(audio_bytes).decode("ascii")
+                    lib["buffer"] = buf_b64
                     ext_lower = ext_file.lower()
                     if ext_lower.endswith(".mp3"):
-                        compile_mod = _get_compile_n2d()
-                        raw_body = compile_mod._build_mp3_sound_body(audio_bytes)
-                        if raw_body:
-                            lib["rawTagBody"] = base64.b64encode(raw_body).decode("ascii")
-                            lib["rawTagType"] = 14  # DefineSound
-                            sounds_refreshed += 1
+                        lib["soundFormat"] = "mp3"
                     elif ext_lower.endswith(".wav"):
-                        compile_mod = _get_compile_n2d()
-                        raw_body = compile_mod._build_wav_sound_body(audio_bytes)
-                        if raw_body:
-                            lib["rawTagBody"] = base64.b64encode(raw_body).decode("ascii")
-                            lib["rawTagType"] = 14  # DefineSound
-                            sounds_refreshed += 1
+                        lib["soundFormat"] = "wav"
+                    sounds_refreshed += 1
                 except Exception as se:
                     print(f"[Refresh] WARN: could not refresh sound {ext_file}: {se}")
 
@@ -1979,8 +2056,10 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
     def _build_sidecar(self, n2d_json):
         """Build sidecar metadata dictionary."""
         sidecar = {}
-        rt_fields = ("rawTagBody", "rawTagType", "swfCharId",
-                      "inBitmap", "grid", "bitmapId")
+        rt_fields = ("swfCharId", "inBitmap", "grid", "bitmapId",
+                      "fontData", "fontTagType", "fontAuxTags",
+                      "buttonData", "binaryDataBody", "soundFormat",
+                      "buttonAuxTags")
         lib_meta = {}
         for lib in n2d_json.get("libraries", []):
             meta = {}

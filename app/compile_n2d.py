@@ -964,7 +964,7 @@ def _build_mp3_sound_body(mp3_bytes: bytes) -> Optional[bytes]:
     """Build a DefineSound body (without charId) from raw MP3 data.
 
     Returns the flags + sampleCount + seekSamples + mp3Data bytes,
-    suitable for storing as rawTagBody.
+    suitable for embedding in a DefineSound tag.
     """
     if len(mp3_bytes) < 4:
         return None
@@ -1017,7 +1017,7 @@ def _build_wav_sound_body(wav_bytes: bytes) -> Optional[bytes]:
     """Build a DefineSound body (without charId) from WAV data.
 
     Returns the flags + sampleCount + pcmData bytes,
-    suitable for storing as rawTagBody.
+    suitable for embedding in a DefineSound tag.
     """
     if len(wav_bytes) < 44:
         return None
@@ -1130,7 +1130,7 @@ def to_publish(container: dict, lib_to_char_idx: Dict[int, int],
     morph_lib_ids: Set[int] = set()
     if id_to_lib:
         for lid, lib in id_to_lib.items():
-            if lib.get("isMorphShape") or lib.get("rawTagType") in (46, 84):
+            if lib.get("isMorphShape"):
                 morph_lib_ids.add(lid)
     layers = container.get("layers", [])
     dictionary: List[dict] = []
@@ -2567,7 +2567,7 @@ class N2DCompiler:
                 self._char_idx_to_swf_id[ci] = swf_id
 
         # ── 5. Build original swfCharId → new swf_id mapping ──
-        #    Used to remap charID references inside rawTagBody blobs.
+        #    Used to remap charID references inside button data and font aux tags.
         self._orig_to_new_id: Dict[int, int] = {}
         for lib in self.libs:
             orig_cid = lib.get("swfCharId")
@@ -2596,7 +2596,7 @@ class N2DCompiler:
             if swf_id is None:
                 continue
             # Try to extract font name from fontData (raw DefineFont3 body)
-            font_data_b64 = lib.get('fontData') or lib.get('rawTagBody')
+            font_data_b64 = lib.get('fontData')
             if font_data_b64:
                 try:
                     raw = _decode_raw_body(font_data_b64)
@@ -2633,21 +2633,17 @@ class N2DCompiler:
         if lib_id not in self._lib_to_swf_id:
             return f"Library entry id={lib_id} '{name}' has no SWF charID mapping"
 
-        # All types: rawTagBody is always sufficient
-        if lib.get("rawTagBody"):
-            return None
-
         if ltype == "bitmap":
             if not (lib.get("buffer") or
                     (self._project_dir and lib.get("externalFile"))):
-                return (f"Bitmap '{name}' (id={lib_id}) has no rawTagBody,"
-                        " buffer, or externalFile -- skipping")
+                return (f"Bitmap '{name}' (id={lib_id}) has no"
+                        " buffer or externalFile -- skipping")
 
         elif ltype == "sound":
             if not (lib.get("buffer") or
                     (self._project_dir and lib.get("externalFile"))):
-                return (f"Sound '{name}' (id={lib_id}) has no rawTagBody,"
-                        " buffer, or externalFile -- skipping")
+                return (f"Sound '{name}' (id={lib_id}) has no"
+                        " buffer or externalFile -- skipping")
 
         elif ltype == "text":
             # Rebuild path needs at least a text or font field
@@ -2656,8 +2652,16 @@ class N2DCompiler:
         elif ltype == "shape":
             # Font shapes need fontData
             if lib.get("isFont") and not lib.get("fontData"):
-                return (f"Font '{name}' (id={lib_id}) has no rawTagBody"
-                        " or fontData -- skipping")
+                return (f"Font '{name}' (id={lib_id}) has no"
+                        " fontData -- skipping")
+            # Button shapes need buttonData
+            if lib.get("isButton") and not lib.get("buttonData"):
+                return (f"Button '{name}' (id={lib_id}) has no"
+                        " buttonData -- skipping")
+            # Binary data shapes need binaryDataBody
+            if lib.get("isBinaryData") and not lib.get("binaryDataBody"):
+                return (f"BinaryData '{name}' (id={lib_id}) has no"
+                        " binaryDataBody -- skipping")
 
         elif ltype == "container":
             # Containers always rebuild from layers; no hard requirement
@@ -2725,13 +2729,6 @@ class N2DCompiler:
     def _emit_bitmap(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_bitmap: lib_id=%d, swf_id=%d', lib['id'], swf_id)
-        # Raw tag passthrough for 1:1 roundtrip (fastest path)
-        if lib.get("rawTagBody"):
-            raw_body = _decode_raw_body(lib["rawTagBody"])
-            tag_type = lib.get("rawTagType", 36)  # DefineBitsLossless2
-            tag_data = struct.pack('<H', swf_id) + raw_body
-            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
-            return
         # Try external file (project folder mode)
         if self._project_dir and lib.get("externalFile"):
             tag_bytes = _load_external_bitmap(self._project_dir, lib, swf_id)
@@ -2747,34 +2744,27 @@ class N2DCompiler:
 
     def _emit_shape(self, lib: dict):
         # If this is a morph shape, dispatch to morph emitter
-        if lib.get("isMorphShape") or lib.get("rawTagType") in (46, 84):
+        if lib.get("isMorphShape"):
             self._emit_morph_shape(lib)
             return
         # If this is a button (DefineButton2), dispatch to button emitter
-        if lib.get("isButton") or lib.get("rawTagType") == 34:
+        if lib.get("isButton"):
             self._emit_button(lib)
             return
         # If this is binary data (DefineBinaryData), dispatch to binary emitter
-        if lib.get("isBinaryData") or lib.get("rawTagType") == 87:
+        if lib.get("isBinaryData"):
             self._emit_binary_data(lib)
             return
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_shape: lib_id=%d, swf_id=%d, name=%s', lib['id'], swf_id, lib.get('name', '?'))
-        # Font data passthrough: use fontData when rawTagBody is absent
+        # Font data: emit DefineFont tag from fontData
         if lib.get("isFont") and lib.get("fontData"):
             raw_body = _decode_raw_body(lib["fontData"])
             tag_type = lib.get("fontTagType", 75)  # DefineFont3
             tag_data = struct.pack('<H', swf_id) + raw_body
             self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
             return
-        # Raw tag passthrough for 1:1 roundtrip
-        if lib.get("rawTagBody"):
-            raw_body = _decode_raw_body(lib["rawTagBody"])
-            tag_type = lib.get("rawTagType", 32)  # DefineShape3
-            raw_body = _remap_shape_raw_body(raw_body, tag_type, self._orig_to_new_id)
-            tag_data = struct.pack('<H', swf_id) + raw_body
-            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
-            return
+        # Rebuild shape from recodes
         recodes = lib.get("recodes", [])
         bounds = lib.get("bounds")
         if not recodes:
@@ -2816,14 +2806,7 @@ class N2DCompiler:
 
     def _emit_morph_shape(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
-        # Raw tag passthrough for 1:1 roundtrip
-        if lib.get("rawTagBody"):
-            raw_body = _decode_raw_body(lib["rawTagBody"])
-            tag_type = lib.get("rawTagType", 84)  # DefineMorphShape2
-            raw_body = _remap_morph_shape_raw_body(raw_body, tag_type, self._orig_to_new_id)
-            tag_data = struct.pack('<H', swf_id) + raw_body
-            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
-            return
+        # Always rebuild morph shape from recodes
         start_recodes = lib.get("recodes") or lib.get("startRecodes") or []
         start_bounds = lib.get("bounds") or lib.get("startBounds")
         end_recodes = lib.get("endRecodes", [])
@@ -2852,19 +2835,7 @@ class N2DCompiler:
     def _emit_text(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_text: lib_id=%d, swf_id=%d', lib['id'], swf_id)
-        # Raw tag passthrough for 1:1 roundtrip
-        if lib.get("rawTagBody"):
-            raw_body = _decode_raw_body(lib["rawTagBody"])
-            tag_type = lib.get("rawTagType", 37)  # DefineEditText
-            # DefineText/DefineText2 have font ID refs; DefineEditText has fontID at fixed offset
-            if tag_type in (11, 33):  # DefineText, DefineText2
-                raw_body = _remap_text_raw_body(raw_body, tag_type, self._orig_to_new_id)
-            elif tag_type == 37 and len(raw_body) >= 2:  # DefineEditText
-                raw_body = _remap_edit_text_raw_body(raw_body, self._orig_to_new_id)
-            tag_data = struct.pack('<H', swf_id) + raw_body
-            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
-            return
-        # Build font name → new SWF char ID map for embedded font resolution
+        # Always rebuild text from properties
         font_map = self._build_font_name_map()
         tag = build_define_edit_text(swf_id, lib, font_map=font_map)
         self._definition_tags.extend(tag)
@@ -2878,45 +2849,56 @@ class N2DCompiler:
             if tag_bytes:
                 self._definition_tags.extend(tag_bytes)
                 return
-        # Raw tag passthrough for 1:1 roundtrip
-        if lib.get("rawTagBody"):
-            raw_body = _decode_raw_body(lib["rawTagBody"])
-            tag_type = lib.get("rawTagType", 14)  # DefineSound
-            tag_data = struct.pack('<H', swf_id) + raw_body
-            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
-            return
+        # Rebuild from buffer (WAV or MP3)
         buf_str = lib.get("buffer", "")
         if not buf_str:
             return
-        wav_bytes = _decode_raw_body(buf_str)
-        if wav_bytes[:4] != b"RIFF":
-            print(f"  WARNING: Skipping non-WAV sound: {lib['name']}")
+        audio_bytes = _decode_raw_body(buf_str)
+        if not audio_bytes:
             return
-        tag = build_define_sound(swf_id, wav_bytes)
-        self._definition_tags.extend(tag)
+        # Detect format and build appropriate DefineSound tag
+        if audio_bytes[:4] == b"RIFF":
+            # WAV — uncompressed PCM
+            tag = build_define_sound(swf_id, audio_bytes)
+            self._definition_tags.extend(tag)
+        elif len(audio_bytes) >= 2 and (audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xE0) == 0xE0):
+            # MP3 sync word detected
+            tag = _build_define_sound_from_mp3(swf_id, audio_bytes)
+            if tag:
+                self._definition_tags.extend(tag)
+            else:
+                print(f"  WARNING: Failed to build MP3 sound tag for: {lib.get('name', '?')}")
+        elif lib.get("soundFormat") == "mp3":
+            # Explicitly tagged as MP3
+            tag = _build_define_sound_from_mp3(swf_id, audio_bytes)
+            if tag:
+                self._definition_tags.extend(tag)
+            else:
+                print(f"  WARNING: Failed to build MP3 sound tag for: {lib.get('name', '?')}")
+        else:
+            print(f"  WARNING: Unknown sound format for: {lib.get('name', '?')} — skipping")
 
     def _emit_binary_data(self, lib: dict):
-        """Emit DefineBinaryData (tag 87) — raw passthrough only."""
+        """Emit DefineBinaryData (tag 87) from binaryDataBody field."""
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_binary_data: lib_id=%d, swf_id=%d', lib['id'], swf_id)
-        if lib.get("rawTagBody"):
-            raw_body = _decode_raw_body(lib["rawTagBody"])
-            tag_type = lib.get("rawTagType", 87)
+        body_data = lib.get("binaryDataBody") or lib.get("rawTagBody")
+        if body_data:
+            raw_body = _decode_raw_body(body_data)
             tag_data = struct.pack('<H', swf_id) + raw_body
-            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+            self._definition_tags.extend(build_tag(87, tag_data, force_long=True))
 
     def _emit_button(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_button: lib_id=%d, swf_id=%d', lib['id'], swf_id)
-        # Raw tag passthrough for 1:1 roundtrip (only path — no rebuild)
-        if lib.get("rawTagBody"):
-            raw_body = _decode_raw_body(lib["rawTagBody"])
-            tag_type = lib.get("rawTagType", 34)  # DefineButton2
+        # Emit button from buttonData field
+        body_data = lib.get("buttonData") or lib.get("rawTagBody")
+        if body_data:
+            raw_body = _decode_raw_body(body_data)
             # Remap charID references inside ButtonRecords
-            if tag_type == 34:
-                raw_body = _remap_button_raw_body(raw_body, self._orig_to_new_id)
+            raw_body = _remap_button_raw_body(raw_body, self._orig_to_new_id)
             tag_data = struct.pack('<H', swf_id) + raw_body
-            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+            self._definition_tags.extend(build_tag(34, tag_data, force_long=True))
         # Emit button auxiliary tags (DefineButtonSound, DefineButtonCxform)
         btn_aux = lib.get("buttonAuxTags", [])
         for aux in btn_aux:
@@ -2935,8 +2917,6 @@ class N2DCompiler:
         log.debug('_emit_container: lib_id=%d, swf_id=%d, name=%s', lib['id'], swf_id, lib.get('name', '?'))
         # Always rebuild containers from JSON so that editor placement edits
         # (position, colorTransform, filters, etc.) are compiled into the SWF.
-        # rawTagBody pass-through is only used for non-container types where
-        # the binary data cannot be reconstructed from JSON.
         tp = to_publish(lib, self._lib_to_char_idx, self.id_to_lib)
         total_frames = lib.get("totalFrame", 1)
         labels = lib.get("labels", [])
@@ -3005,23 +2985,23 @@ class N2DCompiler:
         for lib_id in self._deferred_lib_ids:
             lib = self.id_to_lib[lib_id]
             swf_id = self._lib_to_swf_id[lib_id]
-            buf = bytearray()
-            if lib.get("rawTagBody"):
-                raw_body = _decode_raw_body(lib["rawTagBody"])
-                tag_type = lib.get("rawTagType", 39)
-                # Remap charID references inside raw bodies
-                if tag_type == 39:
-                    raw_body = _remap_sprite_raw_body(raw_body, self._orig_to_new_id)
-                elif tag_type in (2, 22, 32, 83):
-                    raw_body = _remap_shape_raw_body(raw_body, tag_type, self._orig_to_new_id)
-                elif tag_type in (46, 84):
-                    raw_body = _remap_morph_shape_raw_body(raw_body, tag_type, self._orig_to_new_id)
-                elif tag_type in (11, 33):
-                    raw_body = _remap_text_raw_body(raw_body, tag_type, self._orig_to_new_id)
-                elif tag_type == 37:
-                    raw_body = _remap_edit_text_raw_body(raw_body, self._orig_to_new_id)
-                tag_data = struct.pack('<H', swf_id) + raw_body
-                buf.extend(build_tag(tag_type, tag_data, force_long=True))
+            # Temporarily capture definition tags produced by the normal emit path
+            saved = self._definition_tags
+            self._definition_tags = bytearray()
+            ltype = lib.get("type", "")
+            if ltype == "sound":
+                self._emit_sound(lib)
+            elif ltype == "bitmap":
+                self._emit_bitmap(lib)
+            elif ltype == "shape":
+                self._emit_shape(lib)
+            elif ltype == "text":
+                self._emit_text(lib)
+            elif ltype == "container":
+                self._emit_container(lib)
+            buf = bytearray(self._definition_tags)
+            self._definition_tags = saved
+            # Also emit font auxiliary tags
             pending = self._font_aux_tags.get(swf_id)
             if pending:
                 for tag_type, body in pending:

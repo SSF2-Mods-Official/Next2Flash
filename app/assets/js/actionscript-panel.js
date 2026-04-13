@@ -9,7 +9,7 @@
  *   5. Ace editor (with textarea fallback) for editing source scripts
  *   6. Expand-to-floating-window for side-by-side editing
  *   7. Full N2D round-trip: scripts, rawGlobalTags, swfVersion, per-library
- *      metadata (rawTagBody, rawTagType, swfCharId, etc.) are captured on
+ *      metadata (swfCharId, fontData, buttonData, etc.) are captured on
  *      load and re-injected into every Ctrl+Shift+S save.
  *
  * Opens via file:///  or through the Tauri converter app.
@@ -750,9 +750,11 @@
   /* ================================================================== */
 
   /** Per-library fields that the tool's toJSON() strips but we must preserve. */
-  var ROUNDTRIP_LIB_FIELDS = ['rawTagBody', 'rawTagType', 'swfCharId',
+  var ROUNDTRIP_LIB_FIELDS = ['swfCharId',
     'inBitmap', 'grid', 'bitmapId',
-    'rawSoundStreamHead', 'mode', 'totalFrame'
+    'rawSoundStreamHead', 'mode', 'totalFrame',
+    'fontData', 'fontTagType', 'fontAuxTags',
+    'buttonData', 'binaryDataBody', 'soundFormat', 'buttonAuxTags'
   ];
 
   /**
@@ -760,8 +762,6 @@
    * These are roundtrip-only fields or tool UI state — not user-visible content.
    */
   var CONTENT_SKIP_KEYS = {
-    rawTagBody: true,
-    rawTagType: true,
     swfCharId: true,
     inBitmap: true,
     grid: true,
@@ -769,7 +769,14 @@
     rawSoundStreamHead: true,
     mode: true,
     currentFrame: true,
-    leftFrame: true
+    leftFrame: true,
+    fontData: true,
+    fontTagType: true,
+    fontAuxTags: true,
+    buttonData: true,
+    binaryDataBody: true,
+    soundFormat: true,
+    buttonAuxTags: true
   };
 
   /**
@@ -870,11 +877,9 @@
           }
         }
 
-        // Content hash for edit detection — only for libs with rawTagBody
-        if (lib.rawTagBody) {
-          meta._contentHash = computeLibContentHash(lib);
-          has = true;
-        }
+        // Content hash for edit detection
+        meta._contentHash = computeLibContentHash(lib);
+        has = true;
 
         if (has) libMeta[lib.id] = meta;
       });
@@ -1247,28 +1252,18 @@
         }
       });
 
-      // 4) Per-library roundtrip fields (rawTagBody, rawTagType, etc.)
+      // 4) Per-library roundtrip fields (fontData, buttonData, etc.)
       if (roundtripData.libraries && Array.isArray(json.libraries)) {
-        var injectedCount = 0;
         json.libraries.forEach(function (lib) {
           var meta = roundtripData.libraries[lib.id];
           if (meta) {
-            // Always re-inject all roundtrip fields including rawTagBody.
-            // The content hash comparison was too sensitive — the tool's
-            // internal serialization normalizes/adds fields, causing false
-            // positives that strip rawTagBody from most libraries.
-            // Without rawTagBody, the compiler must reconstruct from the
-            // tool's simplified data, losing frames and tag fidelity.
             Object.keys(meta).forEach(function (k) {
               if (k === '_layerCustom' || k === '_contentHash') return;
-              // For critical roundtrip fields, overwrite if the tool's
-              // save set them to null/empty/"" (not just undefined).
-              var isCritical = (k === 'rawTagBody' || k === 'rawTagType' ||
-                k === 'swfCharId' || k === 'fontData' || k === 'fontTagType' ||
-                k === 'fontAuxTags' || k === 'totalFrame');
+              var isCritical = (k === 'swfCharId' || k === 'fontData' || k === 'fontTagType' ||
+                k === 'fontAuxTags' || k === 'totalFrame' ||
+                k === 'buttonData' || k === 'binaryDataBody' || k === 'soundFormat' || k === 'buttonAuxTags');
               if (lib[k] === undefined || (isCritical && !lib[k] && meta[k])) {
                 lib[k] = meta[k];
-                if (k === 'rawTagBody') injectedCount++;
               }
             });
 
@@ -1278,10 +1273,6 @@
             }
           }
         });
-        if (injectedCount > 0) {
-          _log.info(injectedCount,
-            'libraries restored with rawTagBody passthrough');
-        }
       }
     }
 

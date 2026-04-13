@@ -2904,7 +2904,8 @@ Util.$parserHandler = function (event)
                                 object.fontType = 1;
                             }
 
-                            // TODO
+                            // Preserve HTML flag for roundtrip
+                            object.html = !!character._$html;
                             object.htmlText = character._$htmlText;
 
                             const text = workSpace.addLibrary(object);

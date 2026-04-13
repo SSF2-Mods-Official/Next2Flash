@@ -781,6 +781,37 @@
   }
 
   /* ================================================================== */
+  /*  Collect editor text patches (lightweight, no full serialize)       */
+  /* ================================================================== */
+
+  /**
+   * Iterate all library items in the current workspace and return an array
+   * of text-field objects that the editor holds in memory.  Each item is the
+   * full toObject() of a TextField instance — a small JSON blob (< 1 KB per
+   * text field).  This avoids the V8 RangeError that kills JSON.stringify on
+   * the whole 225 MB+ workspace by serialising only the tiny text subset.
+   */
+  function _collectTextPatches() {
+    var Util = window.Util;
+    if (!Util || !Util.$currentWorkSpace) return [];
+    var ws = Util.$currentWorkSpace();
+    if (!ws) return [];
+    var repo = ws._$project && ws._$project.repository;
+    if (!repo) return [];
+
+    var patches = [];
+    var allLibs = repo.getAll();
+    for (var i = 0; i < allLibs.length; i++) {
+      var lib = allLibs[i];
+      if (lib && lib.type === 'text' && typeof lib.toObject === 'function') {
+        patches.push(lib.toObject());
+      }
+    }
+    _log.info('Collected ' + patches.length + ' text patches from editor');
+    return patches;
+  }
+
+  /* ================================================================== */
   /*  Export SWF                                                         */
   /* ================================================================== */
   function onExportSWF() {
@@ -799,16 +830,26 @@
     // to the project folder, then compile from there.
     if (_currentProjectDir) {
 
-      // ── ELECTRON FAST PATH: compile from disk, save via native dialog ──
+      // ── ELECTRON PATH: compile from disk + editor text patches ──
+      // _captureToolBlob() can't be used — JSON.stringify throws uncatchable
+      // RangeError for 225 MB+ projects.  Instead we collect only the small
+      // text-field objects from the editor (< 1 KB each) and send them as
+      // patches alongside the compile-disk request.  The server applies them
+      // to the on-disk project.n2d before compiling.
       if (window.n2fElectron) {
-        _log.info('Electron — compile from disk, native save dialog');
+        var textPatches = _collectTextPatches();
+        _log.info('Electron — compile from disk with ' + textPatches.length + ' text patches');
         window.n2fElectron.showSaveSWFDialog(name + '.swf').then(function (outputPath) {
           if (!outputPath) { hideProgress(); return; }
-          updateProgress('Compiling SWF...');
+          updateProgress('Compiling SWF from disk...');
           return fetch(API_BASE + '/api/compile-disk', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ projectDir: _currentProjectDir, outputPath: outputPath }),
+            body: JSON.stringify({
+              projectDir: _currentProjectDir,
+              outputPath: outputPath,
+              textPatches: textPatches
+            }),
           })
             .then(function (r) {
               if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Compilation failed'); });
@@ -841,7 +882,12 @@
           form.append('editorBlob', rawBlob, 'editor.bin');
         } else {
           // Disk-only: tell server to compile from existing project.n2d
+          // but include text patches so editor text edits are preserved
           form.append('diskOnly', '1');
+          var patches = _collectTextPatches();
+          if (patches.length) {
+            form.append('textPatches', JSON.stringify(patches));
+          }
         }
         return fetch(API_BASE + '/api/save-and-compile', { method: 'POST', body: form })
           .then(function (r) {
@@ -968,7 +1014,7 @@
    * Capture the current project as an N2D blob with roundtrip data injected.
    * This triggers the tool's internal save pipeline, intercepts the result,
    * then decompresses → injects roundtrip fields → recompresses so the
-   * Python compiler receives rawTagBody, rawGlobalTags, scripts, etc.
+   * Python compiler receives rawGlobalTags, scripts, etc.
    */
   function saveProjectAsN2D() {
     _log.debug('Capturing project as N2D blob');
@@ -1015,7 +1061,7 @@
             catch (ex) { json = JSON.parse(text); }
             _log.info('[PERF] parse JSON: ' + (performance.now() - _t2).toFixed(0) + 'ms');
 
-            // Inject roundtrip data (rawTagBody, rawGlobalTags, scripts, etc.)
+            // Inject roundtrip data (rawGlobalTags, scripts, etc.)
             var _t3 = performance.now();
             var panel = window.__n2d_as_panel;
             if (panel && typeof panel.injectRoundtripFields === 'function') {
@@ -1064,7 +1110,7 @@
                 if (json.swfCompressed === undefined && origJson.swfCompressed !== undefined) {
                   json.swfCompressed = origJson.swfCompressed;
                 }
-                // Restore rawTagBody for libraries that are missing it
+                // Restore critical library fields that may be missing
                 if (Array.isArray(json.libraries) && Array.isArray(origJson.libraries)) {
                   var origMap = {};
                   origJson.libraries.forEach(function (lib) {
@@ -1076,13 +1122,13 @@
                     if (!lib) return;
                     var orig = origMap[lib.id];
                     if (!orig) return;
-                    if (!lib.rawTagBody && orig.rawTagBody) {
-                      lib.rawTagBody = orig.rawTagBody;
-                      if (orig.rawTagType !== undefined) lib.rawTagType = orig.rawTagType;
-                      if (orig.swfCharId !== undefined && !lib.swfCharId) lib.swfCharId = orig.swfCharId;
-                      if (orig.fontAuxTags && !lib.fontAuxTags) lib.fontAuxTags = orig.fontAuxTags;
-                      restored++;
-                    }
+                    // Restore fontData/buttonData/binaryDataBody if missing
+                    ['fontData', 'fontTagType', 'fontAuxTags', 'buttonData',
+                     'binaryDataBody', 'soundFormat', 'buttonAuxTags', 'swfCharId'
+                    ].forEach(function (field) {
+                      if (!lib[field] && orig[field]) lib[field] = orig[field];
+                    });
+                    if (orig.fontData || orig.buttonData || orig.binaryDataBody) restored++;
                     // Restore totalFrame for any container where tool returned 1 but original had more
                     if ((!lib.totalFrame || lib.totalFrame <= 1) && orig.totalFrame > 1) {
                       lib.totalFrame = orig.totalFrame;
@@ -1090,7 +1136,7 @@
                     }
                   });
                   if (restored > 0) {
-                    _log.info('Restored rawTagBody from blob for', restored, 'libraries');
+                    _log.info('Restored critical fields from blob for', restored, 'libraries');
                   }
                   if (framesRestored > 0) {
                     _log.info('Restored totalFrame from blob for', framesRestored, 'libraries');
@@ -1099,15 +1145,9 @@
               }
 
               // Diagnostic logging
-              var libsWithRaw = 0, libsTotal = 0;
-              if (Array.isArray(json.libraries)) {
-                libsTotal = json.libraries.length;
-                json.libraries.forEach(function (lib) {
-                  if (lib && lib.rawTagBody) libsWithRaw++;
-                });
-              }
+              var libsTotal = Array.isArray(json.libraries) ? json.libraries.length : 0;
               _log.info('Injected roundtrip data:',
-                libsWithRaw + '/' + libsTotal, 'libs have rawTagBody,',
+                libsTotal, 'libs,',
                 'swfVersion=' + json.swfVersion,
                 'rootTimeline=' + (json.rootTimelineDefIds || []).length + ' ids,',
                 'rawGlobalTags=' + (json.rawGlobalTags || []).length,

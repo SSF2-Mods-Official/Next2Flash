@@ -34,6 +34,7 @@ class TextField extends Instance
         this._$border         = false;
         this._$scroll         = true;
         this._$cache          = null;
+        this._$html           = false;
         this._$htmlText       = null;
         this._$thickness      = 0;
         this._$thicknessColor = 0;
@@ -135,6 +136,10 @@ class TextField extends Instance
         if (object.thicknessColor) {
             this.thicknessColor = object.thicknessColor;
         }
+
+        if ("html" in object) {
+            this._$html = !!object.html;
+        }
     }
 
     /**
@@ -193,11 +198,14 @@ class TextField extends Instance
         const fontSelect = document
             .getElementById("font-select");
 
-        // font
-        fontSelect.children[0].selected = true;
-        for (let idx = 0; idx < fontSelect.children.length; ++idx) {
+        // ensure embedded/project fonts are in the dropdown
+        TextField._ensureEmbeddedFonts(fontSelect);
 
-            const node = fontSelect.children[idx];
+        // font - use .options to find options across optgroups
+        fontSelect.options[0].selected = true;
+        for (let idx = 0; idx < fontSelect.options.length; ++idx) {
+
+            const node = fontSelect.options[idx];
 
             if (node.value !== this._$font) {
                 continue;
@@ -958,5 +966,74 @@ class TextField extends Instance
 
                 return Promise.resolve(canvas);
             });
+    }
+
+    /**
+     * @description Ensure embedded/project fonts are present in the font
+     *              dropdown. Adds any fonts from Util.$fonts and from
+     *              workspace text library entries that aren't already listed.
+     *
+     * @param  {HTMLSelectElement} fontSelect
+     * @return {void}
+     * @method
+     * @static
+     */
+    static _ensureEmbeddedFonts (fontSelect)
+    {
+        const embeddedFonts = new Set();
+
+        // Collect from Util.$fonts (populated during SWF import)
+        if (Util.$fonts && Util.$fonts.size) {
+            for (const font of Util.$fonts.values()) {
+                if (font && font._$fontName) {
+                    embeddedFonts.add(font._$fontName);
+                }
+            }
+        }
+
+        // Collect from workspace text library entries
+        const ws = Util.$currentWorkSpace();
+        if (ws && ws._$libraries) {
+            for (const lib of ws._$libraries.values()) {
+                if (lib && lib._$font && lib.type === InstanceType.TEXT) {
+                    embeddedFonts.add(lib._$font);
+                }
+            }
+        }
+
+        if (!embeddedFonts.size) {
+            return;
+        }
+
+        // Build set of existing option values
+        const existingValues = new Set();
+        for (let i = 0; i < fontSelect.options.length; ++i) {
+            existingValues.add(fontSelect.options[i].value);
+        }
+
+        // Remove stale embedded font options no longer in the project
+        const toRemove = [];
+        for (let i = 0; i < fontSelect.options.length; ++i) {
+            const opt = fontSelect.options[i];
+            if (opt.dataset.embedded && !embeddedFonts.has(opt.value)) {
+                toRemove.push(opt);
+            }
+        }
+        for (let i = 0; i < toRemove.length; ++i) {
+            toRemove[i].remove();
+        }
+
+        // Add missing embedded fonts at the top of the dropdown
+        const sorted = Array.from(embeddedFonts)
+            .filter(function (name) { return !existingValues.has(name); })
+            .sort();
+
+        for (let i = 0; i < sorted.length; ++i) {
+            const opt  = document.createElement("option");
+            opt.value       = sorted[i];
+            opt.textContent = "\u26A1 " + sorted[i];
+            opt.dataset.embedded = "1";
+            fontSelect.insertBefore(opt, fontSelect.firstChild);
+        }
     }
 }
