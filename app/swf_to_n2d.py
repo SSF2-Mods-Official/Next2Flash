@@ -1212,13 +1212,15 @@ def parse_define_edit_text(tag_data: bytes, font_names: Dict[int, str],
     bounds_raw = read_rect(br)
     br.align()
 
-    # Convert from twips to pixels
-    bounds = {
+    # Convert from twips to pixels — raw values before expansion
+    raw_bounds = {
         'xMin': bounds_raw['xMin'] / 20.0,
         'xMax': bounds_raw['xMax'] / 20.0,
         'yMin': bounds_raw['yMin'] / 20.0,
         'yMax': bounds_raw['yMax'] / 20.0,
     }
+    # Will be expanded after font_size is known (see below)
+    bounds = dict(raw_bounds)
 
     # Flags byte 1
     f1 = br.read_ui8()
@@ -1306,6 +1308,31 @@ def parse_define_edit_text(tag_data: bytes, font_names: Dict[int, str],
         font_type = 1
     elif is_italic:
         font_type = 2
+
+    # --- Expand bounds for system-font rendering (same approach as DefineText) ---
+    # Flash embeds tight glyph-metric bounds; system fonts in browsers are wider/
+    # taller.  Expand so the text field is large enough for its content.
+    bw = bounds['xMax'] - bounds['xMin']
+    bh = bounds['yMax'] - bounds['yMin']
+
+    # Width: at minimum fit the text at ~0.65 em per char, plus margins + padding
+    if text:
+        char_estimate_w = len(text) * font_size * 0.65
+    else:
+        char_estimate_w = 0
+    padding_w = font_size * 0.5 + 8
+    effective_w = max(bw, char_estimate_w) + padding_w + left_margin + right_margin
+
+    # Height: at least font_size * 1.5 + 4 for line-height + descenders
+    min_h = font_size * 1.5 + 4
+    effective_h = max(bh, min_h)
+
+    bounds = {
+        'xMin': raw_bounds['xMin'],
+        'xMax': raw_bounds['xMin'] + effective_w,
+        'yMin': raw_bounds['yMin'],
+        'yMax': raw_bounds['yMin'] + effective_h,
+    }
 
     return {
         'text': text,

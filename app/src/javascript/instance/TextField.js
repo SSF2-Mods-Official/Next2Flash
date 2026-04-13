@@ -800,12 +800,14 @@ class TextField extends Instance
      */
     resize ()
     {
+        const prevXMax = this._$bounds.xMax;
+        const prevYMax = this._$bounds.yMax;
         const textField = this.createInstance();
         this._$bounds = {
             "xMin": textField._$bounds.xMin,
-            "xMax": textField._$bounds.xMax,
+            "xMax": Math.max(textField._$bounds.xMax, prevXMax),
             "yMin": textField._$bounds.yMin,
-            "yMax": textField._$bounds.yMax
+            "yMax": Math.max(textField._$bounds.yMax, prevYMax)
         };
     }
 
@@ -825,16 +827,16 @@ class TextField extends Instance
         textField._$characterId = this.id;
 
         textField._$bounds = {
-            "xMin": this._$originBounds.xMin,
-            "xMax": this._$originBounds.xMax,
-            "yMin": this._$originBounds.yMin,
-            "yMax": this._$originBounds.yMax
+            "xMin": this._$bounds.xMin,
+            "xMax": this._$bounds.xMax,
+            "yMin": this._$bounds.yMin,
+            "yMax": this._$bounds.yMax
         };
         textField._$originBounds = {
-            "xMin": this._$originBounds.xMin,
-            "xMax": this._$originBounds.xMax,
-            "yMin": this._$originBounds.yMin,
-            "yMax": this._$originBounds.yMax
+            "xMin": this._$bounds.xMin,
+            "xMax": this._$bounds.xMax,
+            "yMin": this._$bounds.yMin,
+            "yMax": this._$bounds.yMax
         };
 
         const textFormat         = textField.defaultTextFormat;
@@ -864,6 +866,15 @@ class TextField extends Instance
 
         }
 
+        textField.multiline      = this._$multiline;
+        textField.wordWrap       = this._$wordWrap;
+        textField.border         = this._$border;
+        textField.scroll         = this._$scroll;
+        textField.thickness      = this._$thickness;
+        textField.thicknessColor = this._$thicknessColor;
+        textField.defaultTextFormat = textFormat;
+        textField.text           = this._$text;
+
         switch (this._$autoSize) {
 
             case 1:
@@ -875,16 +886,6 @@ class TextField extends Instance
                 break;
 
         }
-
-        textField.multiline      = this._$multiline;
-        textField.wordWrap       = this._$wordWrap;
-        textField.border         = this._$border;
-        textField.scroll         = this._$scroll;
-        textField.thickness      = this._$thickness;
-        textField.thicknessColor = this._$thicknessColor;
-        textField.text           = this._$text;
-
-        textField.defaultTextFormat = textFormat;
 
         return textField;
     }

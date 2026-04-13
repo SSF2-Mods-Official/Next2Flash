@@ -1193,11 +1193,14 @@ class Screen extends BaseScreen
             const character   = layer.getCharacter(characterId);
             const instance    = workSpace.getLibrary(character.libraryId);
 
-            // update
-            instance._$text = element.value;
+            // update (use setter to trigger resize)
+            instance.text = element.value;
 
-            // clear
-            character.dispose();
+            // remove the editing textarea
+            element.remove();
+
+            // clear (disposeAll to also bust the transform-signature cache)
+            character.disposeAll();
             Util.$keyLock     = false;
 
             const children = document
