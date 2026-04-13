@@ -13,6 +13,19 @@ class Project
      */
     initialize ()
     {
+        // 新規プロジェクト
+        const newElement = document
+            .getElementById("tools-new-project");
+
+        if (newElement) {
+            newElement
+                .addEventListener("click", (event) =>
+                {
+                    event.preventDefault();
+                    this.newProject();
+                });
+        }
+
         // ファイル読み込み
         const loadElement = document
             .getElementById("tools-load");
@@ -100,6 +113,98 @@ class Project
                     Util.$addModalEvent(document);
                 });
         }
+    }
+
+    /**
+     * @description サーバー経由で新規プロジェクトを作成
+     *
+     * @return {void}
+     * @method
+     * @public
+     */
+    newProject ()
+    {
+        if (Util.$saveProgress.active) {
+            return ;
+        }
+
+        // Get current stage defaults from the active workspace (if any)
+        const current = Util.$currentWorkSpace();
+        const stage   = current ? current.stage : null;
+
+        const params = {
+            "name":            "untitled",
+            "width":           stage ? stage.width  : 550,
+            "height":          stage ? stage.height : 400,
+            "frameRate":       stage ? stage.fps    : 24,
+            "backgroundColor": stage ? stage.bgColor : 0xFFFFFF,
+            "saveFolder":      true
+        };
+
+        // Try the server endpoint first (creates project folder for export).
+        // Fall back to local-only blank workspace if server is unavailable.
+        fetch("/api/new-project", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(params)
+        })
+            .then(async (response) =>
+            {
+                if (!response.ok) {
+                    throw new Error(`Server returned ${response.status}`);
+                }
+
+                const buffer = await response.arrayBuffer();
+                const uint8  = new Uint8Array(buffer);
+                const name   = response.headers.get("X-N2D-Name") || params.name;
+
+                // Same loading path as load() for ZIP-msgpack
+                if (uint8.length >= 4 && uint8[0] === 0x50 && uint8[1] === 0x4B) {
+                    const zip     = await JSZip.loadAsync(buffer);
+                    let jsonData;
+
+                    if (zip.file("project.msgpack")) {
+                        const msgpackData = await zip.file("project.msgpack").async("uint8array");
+                        jsonData = window.MessagePack.decode(msgpackData);
+                    } else if (zip.file("project.json")) {
+                        jsonData = JSON.parse(await zip.file("project.json").async("string"));
+                    } else {
+                        throw new Error("Invalid N2D response");
+                    }
+
+                    const workSpace = new WorkSpace();
+                    workSpace.name = name;
+                    workSpace.loadFromObject(jsonData);
+
+                    Util.$workSpaces.push(workSpace);
+                    Util.$screenTab.createElement(workSpace, Util.$workSpaces.length - 1);
+                    Util.$screenTab.activeTab({
+                        "currentTarget": {
+                            "dataset": {
+                                "tabId": Util.$workSpaces.length - 1
+                            }
+                        }
+                    });
+                } else {
+                    throw new Error("Unexpected response format");
+                }
+            })
+            .catch(() =>
+            {
+                // Fallback: create a local-only blank workspace (no project folder)
+                const workSpace = new WorkSpace();
+                workSpace.name = params.name;
+
+                Util.$workSpaces.push(workSpace);
+                Util.$screenTab.createElement(workSpace, Util.$workSpaces.length - 1);
+                Util.$screenTab.activeTab({
+                    "currentTarget": {
+                        "dataset": {
+                            "tabId": Util.$workSpaces.length - 1
+                        }
+                    }
+                });
+            });
     }
 
     /**

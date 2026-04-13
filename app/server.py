@@ -81,6 +81,64 @@ def _get_compile_n2d():
     return _compile_n2d
 
 
+def _lib_has_editable_changes(elib: dict, dlib: dict) -> bool:
+    """Detect whether the editor version of a library entry has meaningful
+    property changes that should override the rawTagBody passthrough.
+
+    Returns True if rawTagBody should be cleared so the rebuild path is used.
+    """
+    ltype = elib.get('type') or dlib.get('type', '')
+
+    if ltype == 'text':
+        # Text properties that, if changed, mean the raw binary is stale
+        text_keys = ('text', 'font', 'size', 'color', 'align', 'leading',
+                     'letterSpacing', 'leftMargin', 'rightMargin',
+                     'multiline', 'wordWrap', 'border', 'fontType',
+                     'html', 'autoSize', 'inputType')
+        for k in text_keys:
+            ev = elib.get(k)
+            dv = dlib.get(k)
+            if ev is not None and dv is not None and ev != dv:
+                return True
+        return False
+
+    if ltype == 'shape':
+        # Font/button shapes use rawTagBody exclusively — never clear
+        if dlib.get('isFont') or dlib.get('isButton'):
+            return False
+        # MorphShape: check start/end recodes
+        if dlib.get('isMorphShape') or dlib.get('rawTagType') in (46, 84):
+            for k in ('recodes', 'startRecodes', 'endRecodes'):
+                ev = elib.get(k)
+                dv = dlib.get(k)
+                if ev is not None and dv is not None and ev != dv:
+                    return True
+            return False
+        # Regular shape: check recodes
+        ev = elib.get('recodes')
+        dv = dlib.get('recodes')
+        if ev is not None and dv is not None and ev != dv:
+            return True
+        return False
+
+    if ltype == 'bitmap':
+        # If editor provides a buffer or externalFile changed, rebuild
+        if elib.get('buffer') and elib.get('buffer') != dlib.get('buffer'):
+            return True
+        if elib.get('externalFile') and elib.get('externalFile') != dlib.get('externalFile'):
+            return True
+        return False
+
+    if ltype == 'sound':
+        if elib.get('buffer') and elib.get('buffer') != dlib.get('buffer'):
+            return True
+        if elib.get('externalFile') and elib.get('externalFile') != dlib.get('externalFile'):
+            return True
+        return False
+
+    return False
+
+
 def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
     """Merge lightweight editor state into full disk project data.
 
@@ -91,6 +149,8 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
     Strategy: For each library, take editor's non-roundtrip fields
     (placeObjects, timeline changes, etc.) and overlay them onto disk,
     keeping disk's rawTagBody and other roundtrip data intact.
+    When editable properties have changed, clear rawTagBody so the
+    rebuild path produces fresh SWF binary from the edited properties.
     Also update top-level stage/root properties from editor.
     """
     # Update top-level properties that the editor may change
@@ -118,9 +178,14 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
             disk_libs.append(elib)
             continue
 
+        # Detect editable property changes BEFORE we overwrite dlib
+        should_clear_raw = _lib_has_editable_changes(elib, dlib)
+
         # Preserve roundtrip fields from disk
         roundtrip_keys = ('rawTagBody', 'rawTagType', 'swfCharId',
-                          'fontAuxTags', 'externalFile')
+                          'fontAuxTags', 'externalFile', 'buttonAuxTags',
+                          'fontData', 'fontTagType',
+                          'isBinaryData', 'isFont', 'isButton', 'isMorphShape')
         saved = {}
         for k in roundtrip_keys:
             if k in dlib:
@@ -134,6 +199,12 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
         for k, v in saved.items():
             if k not in dlib or not dlib[k]:
                 dlib[k] = v
+
+        # If editable properties changed, clear rawTagBody so the
+        # rebuild path in compile_n2d.py produces fresh SWF binary
+        if should_clear_raw:
+            dlib.pop('rawTagBody', None)
+            dlib.pop('rawTagType', None)
 
     # Ensure critical roundtrip top-level fields stay from disk
     # (editor blob won't have these)
@@ -371,6 +442,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self._handle_compile_disk()
         elif self.path == "/api/import-swf-path":
             self._handle_import_swf_path()
+        elif self.path == "/api/new-project":
+            self._handle_new_project()
         else:
             self.send_error(404, "Not found")
 
@@ -1313,6 +1386,114 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             traceback.print_exc()
             log.error('_handle_import_swf_path: %s', e)
             self._error_response(500, f'SWF import from path failed: {e}')
+
+    def _handle_new_project(self):
+        """POST /api/new-project - Create a blank project (no SWF import needed).
+
+        Accepts JSON body with optional stage settings:
+            { "name": "my_project", "width": 1280, "height": 720,
+              "frameRate": 30, "backgroundColor": 16777215 }
+
+        Creates a minimal N2D with a root MovieClip (ID 0, one empty layer).
+        If 'saveFolder' is true, also creates a project folder on disk.
+        Returns the N2D as a ZIP-msgpack blob (same format as swf-to-project).
+        """
+        try:
+            body = self._read_body()
+            if body:
+                try:
+                    params = json.loads(body.decode('utf-8'))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    params = {}
+            else:
+                params = {}
+
+            name = str(params.get('name', 'untitled'))[:128]
+            width = max(1, min(4096, int(params.get('width', 550))))
+            height = max(1, min(4096, int(params.get('height', 400))))
+            fps = max(1, min(120, int(params.get('frameRate', 24))))
+            bg_raw = params.get('backgroundColor', 0xFFFFFF)
+            if isinstance(bg_raw, str):
+                bg_raw = bg_raw.lstrip('#')
+                bg = int(bg_raw, 16) & 0xFFFFFF
+            else:
+                bg = int(bg_raw) & 0xFFFFFF
+
+            n2d_json = {
+                'name': name,
+                'width': width,
+                'height': height,
+                'stage': {
+                    'width': width,
+                    'height': height,
+                    'fps': fps,
+                    'bgColor': bg,
+                    'lock': False,
+                },
+                'characterId': 0,
+                'swfVersion': 25,
+                'backgroundColor': bg,
+                'frameRate': fps,
+                'libraries': [
+                    {
+                        'id': 0,
+                        'type': 'container',
+                        'name': 'main',
+                        'symbol': '',
+                        'totalFrame': 1,
+                        'layers': [
+                            {
+                                'name': 'Layer 1',
+                                'disable': False,
+                                'mode': 0,
+                                'characters': [],
+                            }
+                        ],
+                        'labels': {},
+                        'actions': {},
+                    }
+                ],
+                'scripts': [],
+                'rawGlobalTags': [],
+            }
+
+            log.info('_handle_new_project: %s %dx%d @%dfps bg=#%06x',
+                      name, width, height, fps, bg)
+
+            # Optionally create on-disk project folder
+            if params.get('saveFolder'):
+                project_dir = os.path.join(SERVER_DIR, 'converted', name)
+                mod = _get_swf_to_n2d()
+                mod.save_project_folder(n2d_json, project_dir)
+                with self._project_lock:
+                    Next2FlashHandler._current_project_dir = project_dir
+
+            # Return ZIP-msgpack (same format as swf-to-project)
+            import zipfile as _zipfile
+            import io as _io
+            zip_buffer = _io.BytesIO()
+            with _zipfile.ZipFile(zip_buffer, 'w', _zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+                msgpack_data = msgpack.packb(n2d_json, use_bin_type=True)
+                zf.writestr('project.msgpack', msgpack_data)
+
+            compressed = zip_buffer.getvalue()
+
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Disposition', f'attachment; filename="{name}.n2d"')
+            self.send_header('X-N2D-Name', name)
+            self.send_header('X-N2D-Libraries', '1')
+            self.send_header('X-N2D-Scripts', '0')
+            self.send_header('X-N2D-Format', 'msgpack')
+            self.send_header('Content-Length', str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_new_project: %s', e)
+            self._error_response(500, f'New project creation failed: {e}')
 
     def _handle_lazy_library(self):
         """GET /api/lazy/library/<id> — Return full library data for on-demand loading.

@@ -376,6 +376,8 @@ class ParseRawTagsStage(PipelineStage):
                     log.warning('Font aux tag %d references unknown charId %d — skipped', tag_type, ref_cid)
             elif tag_type in (24, 45, 86):  # Protect, SoundStreamHead2, SceneAndFrameLabel
                 ctx.raw_aux_tags.extend(build_tag(tag_type, body, force_long=(tag_type == 86)))
+            elif tag_type in (57, 71):  # ImportAssets, ImportAssets2
+                ctx.raw_aux_tags.extend(build_tag(tag_type, body, force_long=True))
 
         # Load font aux tags from library entries
         for lib in ctx.libs:

@@ -91,6 +91,8 @@ class LibraryMenu
         const elementIds = [
             "library-menu-container-add",
             "library-menu-folder-add",
+            "library-menu-shape-add",
+            "library-menu-text-add",
             "library-menu-file",
             "library-menu-delete",
             "library-menu-no-use-delete",
@@ -307,6 +309,72 @@ class LibraryMenu
         Util.$libraryController.reload();
 
         this._$saved = false;
+    }
+
+    /**
+     * @description 新規のシェイプを生成
+     *
+     * @return {void}
+     * @method
+     * @public
+     */
+    executeLibraryMenuShapeAdd ()
+    {
+        this.save();
+
+        const workSpace = Util.$currentWorkSpace();
+
+        const id = workSpace.nextLibraryId;
+        workSpace.addLibrary({
+            "id": id,
+            "type": InstanceType.SHAPE,
+            "name": `Shape_${id}`,
+            "symbol": "",
+            "recodes": [],
+            "bounds": { "xMin": 0, "xMax": 100, "yMin": 0, "yMax": 100 }
+        });
+
+        this._$saved = false;
+
+        // 再読み込み
+        Util.$libraryController.reload();
+    }
+
+    /**
+     * @description 新規のテキストフィールドを生成
+     *
+     * @return {void}
+     * @method
+     * @public
+     */
+    executeLibraryMenuTextAdd ()
+    {
+        this.save();
+
+        const workSpace = Util.$currentWorkSpace();
+
+        const id = workSpace.nextLibraryId;
+        workSpace.addLibrary({
+            "id": id,
+            "type": InstanceType.TEXT,
+            "name": `Text_${id}`,
+            "symbol": "",
+            "text": "",
+            "font": "sans-serif",
+            "size": 12,
+            "color": 0,
+            "align": "left",
+            "multiline": true,
+            "wordWrap": true,
+            "border": false,
+            "autoSize": 0,
+            "bounds": { "xMin": 0, "xMax": 200, "yMin": 0, "yMax": 200 }
+        });
+
+        this._$saved = false;
+
+        // 再読み込み
+        Util.$libraryController.reload();
     }
 
     /**

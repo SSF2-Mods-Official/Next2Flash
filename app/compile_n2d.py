@@ -2578,6 +2578,93 @@ class N2DCompiler:
 
     # ── Unified asset emission ──────────────────────────────────────────
 
+    def _build_font_name_map(self) -> Dict[str, int]:
+        """Build a mapping of font name → new SWF character ID.
+
+        Scans all font libraries (isFont=True) and extracts the font name
+        from the DefineFont3 raw data, mapping it to the newly assigned
+        SWF char ID.  Used by text_converter to write the correct FontID.
+        """
+        if hasattr(self, '_font_name_map_cache'):
+            return self._font_name_map_cache
+        fmap: Dict[str, int] = {}
+        for lib in self.libs:
+            if not lib.get('isFont'):
+                continue
+            lid = lib['id']
+            swf_id = self._lib_to_swf_id.get(lid)
+            if swf_id is None:
+                continue
+            # Try to extract font name from fontData (raw DefineFont3 body)
+            font_data_b64 = lib.get('fontData') or lib.get('rawTagBody')
+            if font_data_b64:
+                try:
+                    raw = _decode_raw_body(font_data_b64)
+                    # DefineFont3 body (after charID): flags(1) + langCode(1) +
+                    # nameLen(1) + name(nameLen) + ...
+                    if len(raw) >= 3:
+                        name_len = raw[2]
+                        if name_len > 0 and len(raw) >= 3 + name_len:
+                            font_name = raw[3:3 + name_len].rstrip(b'\x00').decode('utf-8', errors='replace')
+                            fmap[font_name] = swf_id
+                except Exception:
+                    pass
+            # Also try the lib 'name' field as fallback (often "Font_123" but
+            # parse_define_font3_name stores the real name there via import)
+            lib_name = lib.get('name', '')
+            if lib_name and lib_name not in fmap:
+                fmap[lib_name] = swf_id
+        self._font_name_map_cache = fmap
+        return fmap
+
+    def _validate_library_entry(self, lib: dict):
+        """Validate a library entry has the minimum required fields for emission.
+
+        Returns None if valid, or a warning string if the entry should be skipped.
+        """
+        lib_id = lib.get("id")
+        ltype = lib.get("type", "")
+        name = lib.get("name", "?")
+
+        if lib_id is None:
+            return f"Library entry '{name}' has no id"
+        if not ltype:
+            return f"Library entry id={lib_id} '{name}' has no type"
+        if lib_id not in self._lib_to_swf_id:
+            return f"Library entry id={lib_id} '{name}' has no SWF charID mapping"
+
+        # All types: rawTagBody is always sufficient
+        if lib.get("rawTagBody"):
+            return None
+
+        if ltype == "bitmap":
+            if not (lib.get("buffer") or
+                    (self._project_dir and lib.get("externalFile"))):
+                return (f"Bitmap '{name}' (id={lib_id}) has no rawTagBody,"
+                        " buffer, or externalFile -- skipping")
+
+        elif ltype == "sound":
+            if not (lib.get("buffer") or
+                    (self._project_dir and lib.get("externalFile"))):
+                return (f"Sound '{name}' (id={lib_id}) has no rawTagBody,"
+                        " buffer, or externalFile -- skipping")
+
+        elif ltype == "text":
+            # Rebuild path needs at least a text or font field
+            pass  # text_converter handles defaults for missing fields
+
+        elif ltype == "shape":
+            # Font shapes need fontData
+            if lib.get("isFont") and not lib.get("fontData"):
+                return (f"Font '{name}' (id={lib_id}) has no rawTagBody"
+                        " or fontData -- skipping")
+
+        elif ltype == "container":
+            # Containers always rebuild from layers; no hard requirement
+            pass
+
+        return None
+
     def _emit_font_aux_for(self, swf_id: int):
         """Emit any pending font/text auxiliary tags (73, 74, 88) that
         reference *swf_id*. Must be called right after the definition tag
@@ -2598,6 +2685,12 @@ class N2DCompiler:
         for lib_id in self._emission_order:
             lib = self.id_to_lib[lib_id]
             ltype = lib["type"]
+
+            # ── Phase 5: Validate required fields before emission ──
+            warning = self._validate_library_entry(lib)
+            if warning:
+                print(f"  SKIP: {warning}")
+                continue
 
             if ltype == "sound":
                 self._emit_sound(lib)
@@ -2660,6 +2753,10 @@ class N2DCompiler:
         # If this is a button (DefineButton2), dispatch to button emitter
         if lib.get("isButton") or lib.get("rawTagType") == 34:
             self._emit_button(lib)
+            return
+        # If this is binary data (DefineBinaryData), dispatch to binary emitter
+        if lib.get("isBinaryData") or lib.get("rawTagType") == 87:
+            self._emit_binary_data(lib)
             return
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_shape: lib_id=%d, swf_id=%d, name=%s', lib['id'], swf_id, lib.get('name', '?'))
@@ -2767,7 +2864,9 @@ class N2DCompiler:
             tag_data = struct.pack('<H', swf_id) + raw_body
             self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
             return
-        tag = build_define_edit_text(swf_id, lib)
+        # Build font name → new SWF char ID map for embedded font resolution
+        font_map = self._build_font_name_map()
+        tag = build_define_edit_text(swf_id, lib, font_map=font_map)
         self._definition_tags.extend(tag)
 
     def _emit_sound(self, lib: dict):
@@ -2796,6 +2895,16 @@ class N2DCompiler:
         tag = build_define_sound(swf_id, wav_bytes)
         self._definition_tags.extend(tag)
 
+    def _emit_binary_data(self, lib: dict):
+        """Emit DefineBinaryData (tag 87) — raw passthrough only."""
+        swf_id = self._lib_to_swf_id[lib["id"]]
+        log.debug('_emit_binary_data: lib_id=%d, swf_id=%d', lib['id'], swf_id)
+        if lib.get("rawTagBody"):
+            raw_body = _decode_raw_body(lib["rawTagBody"])
+            tag_type = lib.get("rawTagType", 87)
+            tag_data = struct.pack('<H', swf_id) + raw_body
+            self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+
     def _emit_button(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_button: lib_id=%d, swf_id=%d', lib['id'], swf_id)
@@ -2808,6 +2917,18 @@ class N2DCompiler:
                 raw_body = _remap_button_raw_body(raw_body, self._orig_to_new_id)
             tag_data = struct.pack('<H', swf_id) + raw_body
             self._definition_tags.extend(build_tag(tag_type, tag_data, force_long=True))
+        # Emit button auxiliary tags (DefineButtonSound, DefineButtonCxform)
+        btn_aux = lib.get("buttonAuxTags", [])
+        for aux in btn_aux:
+            aux_type = aux.get('tagType')
+            aux_body = _decode_raw_body(aux.get('body', ''))
+            if aux_body and len(aux_body) >= 2:
+                # Remap the button charID reference in the first 2 bytes
+                orig_btn_cid = struct.unpack_from('<H', aux_body, 0)[0]
+                new_btn_cid = self._orig_to_new_id.get(orig_btn_cid, swf_id)
+                remapped = struct.pack('<H', new_btn_cid) + aux_body[2:]
+                self._definition_tags.extend(
+                    build_tag(aux_type, remapped, force_long=True))
 
     def _emit_container(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]

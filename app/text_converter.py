@@ -23,9 +23,14 @@ from swf_writer import (
 def build_define_edit_text(
     char_id: int,
     tf: dict,
+    font_map: dict = None,
 ) -> bytes:
     """
     Build a DefineEditText (tag 37) from a Next2D ITextFieldCharacter dict.
+
+    font_map: optional dict mapping font name (str) → SWF char ID (int).
+              When provided, the correct embedded font ID is written instead
+              of the device-font placeholder (0).
 
     SWF DefineEditText fields reference:
     https://open-flash.github.io/mirrors/swf-spec-19.pdf  §p.197
@@ -111,9 +116,18 @@ def build_define_edit_text(
 
     body.write(struct.pack("<BB", flags1, flags2))
 
-    # FontID (UI16) — we'll use char_id + 1000 as a font ID placeholder
+    # FontID (UI16) — resolve to embedded font charID via font_map
     if has_font:
-        body.write(struct.pack("<H", 0))  # FontID = 0 (use device font)
+        font_id = 0  # default: device font
+        if font_map:
+            # Try exact match first, then case-insensitive
+            font_id = font_map.get(font_name, 0)
+            if font_id == 0:
+                for fname, fid in font_map.items():
+                    if fname.lower() == font_name.lower():
+                        font_id = fid
+                        break
+        body.write(struct.pack("<H", font_id))
 
     # FontHeight (UI16) in twips
     if has_font:

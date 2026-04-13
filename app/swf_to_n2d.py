@@ -63,7 +63,10 @@ from swf_constants import (
     TAG_DEFINE_MORPH_SHAPE2, TAG_SYMBOL_CLASS, TAG_DO_ABC, TAG_DO_ABC2,
     TAG_FILE_ATTRIBUTES, TAG_SET_BACKGROUND_COLOR, TAG_DEFINE_FONT3,
     TAG_DEFINE_BUTTON2, TAG_START_SOUND, TAG_START_SOUND2,
-    TAG_DEFINE_SCALING_GRID
+    TAG_DEFINE_SCALING_GRID,
+    TAG_JPEG_TABLES, TAG_DEFINE_BUTTON_SOUND, TAG_DEFINE_BUTTON_CXFORM,
+    TAG_DEFINE_FONT2, TAG_IMPORT_ASSETS, TAG_IMPORT_ASSETS2,
+    TAG_DEFINE_BINARY_DATA,
 )
 from cycle_detector import validate_swf_sprites
 
@@ -705,6 +708,32 @@ def _parse_image_dimensions(data: bytes) -> Tuple[int, int]:
     return (0, 0)
 
 
+def _merge_jpeg_tables(jpeg_table: bytes, define_bits_body: bytes) -> bytes:
+    """Merge JPEGTables (tag 8) header with DefineBits (tag 6) body.
+
+    SWF DefineBits (tag 6) relies on a separate JPEGTables for the JPEG
+    header (SOI + quantization/huffman tables).  This function merges them
+    into a standalone JPEG suitable for storage as DefineBitsJPEG2.
+
+    Per SWF spec, both the table and the image data may be wrapped in
+    SOI/EOI markers that need stripping to avoid duplicate markers.
+    """
+    # Strip erroneous SOI/EOI pairs from both streams
+    # Adobe tools sometimes wrap table/data in extra SOI(FFD8)/EOI(FFD9) pairs
+    tbl = jpeg_table
+    img = define_bits_body
+    # Strip trailing EOI from table
+    if tbl[-2:] == b'\xff\xd9':
+        tbl = tbl[:-2]
+    # Strip leading SOI from image data
+    if img[:2] == b'\xff\xd8':
+        img = img[2:]
+    # If table doesn't start with SOI, prepend one
+    if tbl[:2] != b'\xff\xd8':
+        tbl = b'\xff\xd8' + tbl
+    return tbl + img
+
+
 def parse_define_bits_jpeg_info(tag_type: int, tag_data: bytes) -> Tuple[int, int, int]:
     """Parse DefineBitsJPEG2/3/4 → (charId, width, height)."""
     char_id = struct.unpack_from('<H', tag_data, 0)[0]
@@ -845,6 +874,59 @@ def parse_define_font3_code_table(tag_data: bytes) -> Tuple[int, List[str]]:
     code_table = []
     for i in range(num_glyphs):
         cp = struct.unpack_from('<H', tag_data, ct_start + i * 2)[0]
+        code_table.append(chr(cp))
+
+    return char_id, code_table
+
+
+def parse_define_font2_name(tag_data: bytes) -> Tuple[int, str, bool, bool]:
+    """Parse DefineFont2 (tag 48) → (charId, fontName, bold, italic).
+
+    DefineFont2 has the same header layout as DefineFont3:
+      UI16  FontID
+      UI8   Flags
+      UI8   LanguageCode
+      UI8   FontNameLen
+      UI8[] FontName
+    """
+    # DefineFont2 shares the same header structure as DefineFont3
+    return parse_define_font3_name(tag_data)
+
+
+def parse_define_font2_code_table(tag_data: bytes) -> Tuple[int, List[str]]:
+    """Parse DefineFont2 (tag 48) → (charId, code_table).
+
+    DefineFont2 code table has the same structure as DefineFont3, except
+    codes may be UI8 (non-wide) or UI16 (wide) depending on WideCodes flag.
+    """
+    char_id = struct.unpack_from('<H', tag_data, 0)[0]
+    flags = tag_data[2]
+    wide_offsets = bool(flags & 0x08)
+    wide_codes = bool(flags & 0x04)
+    name_len = tag_data[4]
+    offset = 5 + name_len
+    num_glyphs = struct.unpack_from('<H', tag_data, offset)[0]
+    offset += 2
+
+    if num_glyphs == 0:
+        return char_id, []
+
+    # Jump past offset table + glyph shapes using code table offset
+    ot_start = offset
+    if wide_offsets:
+        code_table_offset = struct.unpack_from('<I', tag_data,
+                                               offset + num_glyphs * 4)[0]
+    else:
+        code_table_offset = struct.unpack_from('<H', tag_data,
+                                               offset + num_glyphs * 2)[0]
+
+    ct_start = ot_start + code_table_offset
+    code_table = []
+    for i in range(num_glyphs):
+        if wide_codes:
+            cp = struct.unpack_from('<H', tag_data, ct_start + i * 2)[0]
+        else:
+            cp = tag_data[ct_start + i]
         code_table.append(chr(cp))
 
     return char_id, code_table
@@ -2018,6 +2100,12 @@ class N2DBuilder:
         self.scripts: List[dict] = []
         # Bitmap RGBA buffers: n2d_lib_id → raw RGBA bytes (for ZIP packaging)
         self.bitmap_buffers: Dict[int, bytes] = {}
+        # JPEGTables (tag 8) — shared JPEG header for DefineBits (tag 6)
+        self.jpeg_table: Optional[bytes] = None
+        # Button auxiliary tags: swf_char_id → [(tag_type, full_tag_data)]
+        self.button_aux_tags: Dict[int, List[Tuple[int, bytes]]] = {}
+        # ImportAssets tags: [(tag_type, full_tag_data)] for passthrough
+        self.import_asset_tags: List[Tuple[int, bytes]] = []
 
     def _alloc_id(self) -> int:
         """Allocate a new library ID."""
@@ -2035,7 +2123,8 @@ class N2DBuilder:
             TAG_DEFINE_SHAPE3, TAG_DEFINE_SHAPE4, TAG_DEFINE_SPRITE,
             TAG_DEFINE_SOUND, TAG_DEFINE_TEXT, TAG_DEFINE_TEXT2,
             TAG_DEFINE_EDIT_TEXT, TAG_DEFINE_MORPH_SHAPE, TAG_DEFINE_MORPH_SHAPE2,
-            TAG_DEFINE_FONT3, TAG_DEFINE_BUTTON2,
+            TAG_DEFINE_FONT3, TAG_DEFINE_BUTTON2, TAG_DEFINE_FONT2,
+            TAG_DEFINE_BINARY_DATA,
         }
         past_symbol_class = False
         self.root_timeline_def_ids: List[int] = []  # charIds defined inside root timeline
@@ -2053,8 +2142,13 @@ class N2DBuilder:
                 self.char_types[char_id] = 'bitmap'
                 if w > 0 and h > 0:
                     self.bitmap_dims[char_id] = (w, h)
-                # Store raw tag body for 1:1 roundtrip
-                self.raw_tag_data[char_id] = (tag.tag_type, tag.data[2:])
+                # For DefineBits (tag 6), merge shared JPEGTables header to
+                # make the data standalone, then store as DefineBitsJPEG2.
+                if tag.tag_type == TAG_DEFINE_BITS and self.jpeg_table is not None:
+                    merged = _merge_jpeg_tables(self.jpeg_table, tag.data[2:])
+                    self.raw_tag_data[char_id] = (TAG_DEFINE_BITS_JPEG2, merged)
+                else:
+                    self.raw_tag_data[char_id] = (tag.tag_type, tag.data[2:])
 
             elif tag.tag_type in (TAG_DEFINE_SHAPE, TAG_DEFINE_SHAPE2,
                                   TAG_DEFINE_SHAPE3, TAG_DEFINE_SHAPE4):
@@ -2118,6 +2212,47 @@ class N2DBuilder:
                 # Store raw tag body for 1:1 roundtrip
                 self.raw_tag_data[char_id] = (tag.tag_type, tag.data[2:])
 
+            elif tag.tag_type == TAG_JPEG_TABLES:
+                # Tag 8: shared JPEG header used by DefineBits (tag 6)
+                self.jpeg_table = bytes(tag.data)
+
+            elif tag.tag_type == TAG_DEFINE_FONT2:
+                # Tag 48: DefineFont2 — parse like DefineFont3 (subset)
+                char_id = struct.unpack_from('<H', tag.data, 0)[0]
+                self.char_types[char_id] = 'font'
+                self.raw_tag_data[char_id] = (tag.tag_type, tag.data[2:])
+                try:
+                    _, fname, fbold, fitalic = parse_define_font2_name(tag.data)
+                    self.font_names[char_id] = fname
+                    self.font_attrs[char_id] = (fbold, fitalic)
+                except Exception:
+                    pass
+                try:
+                    _, code_table = parse_define_font2_code_table(tag.data)
+                    if code_table:
+                        self.font_code_tables[char_id] = code_table
+                except Exception:
+                    pass
+
+            elif tag.tag_type == TAG_DEFINE_BINARY_DATA:
+                # Tag 87: DefineBinaryData — store as raw passthrough
+                if len(tag.data) >= 2:
+                    char_id = struct.unpack_from('<H', tag.data, 0)[0]
+                    self.char_types[char_id] = 'binaryData'
+                    self.raw_tag_data[char_id] = (tag.tag_type, tag.data[2:])
+
+            elif tag.tag_type in (TAG_IMPORT_ASSETS, TAG_IMPORT_ASSETS2):
+                # Tags 57/71: ImportAssets — store for passthrough
+                self.import_asset_tags.append((tag.tag_type, bytes(tag.data)))
+
+            elif tag.tag_type in (TAG_DEFINE_BUTTON_SOUND,
+                                  TAG_DEFINE_BUTTON_CXFORM):
+                # Tags 17/23: button auxiliary — store keyed by button charID
+                if len(tag.data) >= 2:
+                    btn_char_id = struct.unpack_from('<H', tag.data, 0)[0]
+                    self.button_aux_tags.setdefault(btn_char_id, []).append(
+                        (tag.tag_type, bytes(tag.data)))
+
             elif tag.tag_type == TAG_SYMBOL_CLASS:
                 sc = parse_symbol_class(tag.data)
                 self.symbol_names.update(sc)
@@ -2153,7 +2288,9 @@ class N2DBuilder:
                                 24,   # Protect
                                 45,   # SoundStreamHead2
                                 86,   # DefineSceneAndFrameLabelData
-                                76):  # SymbolClass
+                                76,   # SymbolClass
+                                TAG_IMPORT_ASSETS,    # ImportAssets
+                                TAG_IMPORT_ASSETS2):  # ImportAssets2
                 self.global_raw_tags.append((tag.tag_type, bytes(tag.data)))
 
     def build_all(self, *, fast_shapes: bool = False):
@@ -2698,11 +2835,49 @@ class N2DBuilder:
                 tag_type, body = self.raw_tag_data[cid]
                 entry['rawTagType'] = tag_type
                 entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
+            # Attach button auxiliary tags (DefineButtonSound, DefineButtonCxform)
+            if cid in self.button_aux_tags:
+                entry['buttonAuxTags'] = [
+                    {'tagType': tt, 'body': base64.b64encode(body).decode('ascii')}
+                    for tt, body in self.button_aux_tags[cid]
+                ]
             self.libraries.append(entry)
             button_count += 1
 
         if button_count:
             step(f"Built {button_count} button entries")
+
+        # Phase 7a.5: Build binary data entries (DefineBinaryData, tag 87)
+        bindata_count = 0
+        for cid in all_char_ids:
+            if self.char_types[cid] != 'binaryData':
+                continue
+            lid = self.swf_to_n2d[cid]
+            sym_name = self.symbol_names.get(cid, '')
+            display_name = sym_name.split('.')[-1] if sym_name else f"BinaryData_{cid}"
+            entry = {
+                'id': lid,
+                'swfCharId': cid,
+                'name': display_name,
+                'type': 'shape',
+                'isBinaryData': True,
+                'symbol': sym_name,
+                'folderId': self.folder_ids.get('binaryData', 0),
+                'bitmapId': 0,
+                'grid': None,
+                'inBitmap': False,
+                'recodes': [],
+                'bounds': {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20},
+            }
+            if cid in self.raw_tag_data:
+                tag_type, body = self.raw_tag_data[cid]
+                entry['rawTagType'] = tag_type
+                entry['rawTagBody'] = base64.b64encode(body).decode('ascii')
+            self.libraries.append(entry)
+            bindata_count += 1
+
+        if bindata_count:
+            step(f"Built {bindata_count} binary data entries")
 
         # Phase 7b: Build MovieClip (container) entries from DefineSprite data
         sprite_count = 0
