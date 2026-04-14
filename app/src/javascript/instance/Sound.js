@@ -44,7 +44,7 @@ class Sound extends Instance
         if (this._$buffer) {
             this._$audio.src = URL.createObjectURL(new Blob(
                 [new Uint8Array(this._$buffer)],
-                { "type": "audio/mp3" }
+                { "type": this._detectMime() }
             ));
             this._$audio.load();
         }
@@ -100,7 +100,7 @@ class Sound extends Instance
 
             audio.src = URL.createObjectURL(new Blob(
                 [new Uint8Array(this._$buffer)],
-                { "type": "audio/mp3" }
+                { "type": this._detectMime() }
             ));
             audio.load();
         });
@@ -169,6 +169,28 @@ class Sound extends Instance
                 break;
 
         }
+    }
+
+    /**
+     * @description Detect audio MIME type from buffer header bytes.
+     * @return {string}
+     * @private
+     */
+    _detectMime ()
+    {
+        if (this._$buffer && this._$buffer.length >= 4) {
+            // RIFF header = WAV
+            if (this._$buffer[0] === 0x52 && this._$buffer[1] === 0x49
+                && this._$buffer[2] === 0x46 && this._$buffer[3] === 0x46) {
+                return "audio/wav";
+            }
+            // OGG header
+            if (this._$buffer[0] === 0x4F && this._$buffer[1] === 0x67
+                && this._$buffer[2] === 0x67 && this._$buffer[3] === 0x53) {
+                return "audio/ogg";
+            }
+        }
+        return "audio/mp3";
     }
 
     /**
@@ -273,7 +295,7 @@ class Sound extends Instance
             // Rebuild audio element
             this._$audio.src = URL.createObjectURL(new Blob(
                 [new Uint8Array(this._$buffer)],
-                { "type": "audio/mp3" }
+                { "type": this._detectMime() }
             ));
             this._$audio.load();
         }

@@ -157,8 +157,13 @@ def build_define_edit_text(
     # VariableName (always empty string)
     body.write(b"\x00")
 
-    # InitialText
+    # InitialText — for HTML text fields, use the full HTML markup for SWF
     if has_text:
-        body.write(text.encode("utf-8") + b"\x00")
+        emit_text = text
+        if html:
+            ht = tf.get('htmlText', '')
+            if ht:
+                emit_text = ht
+        body.write(emit_text.encode("utf-8") + b"\x00")
 
     return build_tag(TAG_DEFINE_EDIT_TEXT, body.getvalue())

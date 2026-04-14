@@ -22,7 +22,9 @@ coordinates stage execution, error handling, and rollback.
 
 from __future__ import annotations
 
+import base64
 import logging
+import struct
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -339,8 +341,70 @@ class AllocateCharIDsStage(PipelineStage):
                 ctx.orig_to_new_id[orig_cid] = new_id
 
 
+# ── Helpers for rebuilding SWF tags from structured fields ──────────────
+
+def _write_encoded_u32(val: int) -> bytes:
+    """Write a SWF EncodedU32 (variable-length, 1-5 bytes)."""
+    result = bytearray()
+    while True:
+        byte = val & 0x7f
+        val >>= 7
+        if val:
+            byte |= 0x80
+        result.append(byte)
+        if not val:
+            break
+    return bytes(result)
+
+
+def _rebuild_scene_and_frame_label(data: dict) -> bytes:
+    """Rebuild DefineSceneAndFrameLabelData (tag 86) from structured dict."""
+    buf = bytearray()
+    scenes = data.get('scenes', [])
+    buf.extend(_write_encoded_u32(len(scenes)))
+    for sc in scenes:
+        buf.extend(_write_encoded_u32(sc.get('offset', 0)))
+        buf.extend(sc.get('name', '').encode('utf-8') + b'\x00')
+    labels = data.get('frameLabels', [])
+    buf.extend(_write_encoded_u32(len(labels)))
+    for lbl in labels:
+        buf.extend(_write_encoded_u32(lbl.get('frame', 0)))
+        buf.extend(lbl.get('name', '').encode('utf-8') + b'\x00')
+    return bytes(buf)
+
+
+def _rebuild_sound_stream_head(data: dict) -> bytes:
+    """Rebuild SoundStreamHead2 (tag 45) from structured dict."""
+    b0 = ((data.get('playbackRate', 0) & 0x03) << 2 |
+          (data.get('playbackSize', 0) & 0x01) << 1 |
+          (data.get('playbackType', 0) & 0x01))
+    b1 = ((data.get('compression', 0) & 0x0f) << 4 |
+          (data.get('streamRate', 0) & 0x03) << 2 |
+          (data.get('streamSize', 0) & 0x01) << 1 |
+          (data.get('streamType', 0) & 0x01))
+    buf = bytearray([b0, b1])
+    buf.extend(struct.pack('<H', data.get('streamSampleCount', 0)))
+    if data.get('compression') == 2:  # MP3
+        buf.extend(struct.pack('<h', data.get('latencySeek', 0)))
+    return bytes(buf)
+
+
+def _rebuild_import_assets(data: dict) -> bytes:
+    """Rebuild ImportAssets (57) or ImportAssets2 (71) from structured dict."""
+    buf = bytearray()
+    buf.extend(data.get('url', '').encode('utf-8') + b'\x00')
+    if data.get('version', 1) == 2:
+        buf.extend(b'\x01\x00')  # reserved bytes for ImportAssets2
+    assets = data.get('assets', [])
+    buf.extend(struct.pack('<H', len(assets)))
+    for asset in assets:
+        buf.extend(struct.pack('<H', 0))  # charID placeholder
+        buf.extend(asset.get('name', '').encode('utf-8') + b'\x00')
+    return bytes(buf)
+
+
 class ParseRawTagsStage(PipelineStage):
-    """Stage 3: Parse rawGlobalTags and fontAuxTags."""
+    """Stage 3: Parse rawGlobalTags and structured global fields."""
 
     @property
     def name(self) -> str:
@@ -353,11 +417,48 @@ class ParseRawTagsStage(PipelineStage):
         log.info("ParseRawTagsStage: parsing raw global tags")
         print("Parsing raw global tags...")
 
+        # ── NEW: Rebuild from structured fields when available ──
+        abc_blocks = ctx.data.get("abcBlocks", [])
+        if abc_blocks:
+            for blk in abc_blocks:
+                bytecode = base64.b64decode(blk['bytecode'])
+                if blk.get('tagVersion', 1) == 2:
+                    flags = struct.pack('<I', blk.get('flags', 0))
+                    name = blk.get('name', '').encode('utf-8') + b'\x00'
+                    body = flags + name + bytecode
+                    ctx.raw_doabc_tags.extend(build_tag(82, body))
+                else:
+                    ctx.raw_doabc_tags.extend(build_tag(72, bytecode))
+
+        # Build aux tags from structured fields
+        if ctx.data.get('protectFromImport'):
+            ctx.raw_aux_tags.extend(build_tag(24, b''))
+
+        scene_labels = ctx.data.get('sceneAndFrameLabels')
+        if scene_labels:
+            body = _rebuild_scene_and_frame_label(scene_labels)
+            ctx.raw_aux_tags.extend(build_tag(86, body, force_long=True))
+
+        sound_stream = ctx.data.get('soundStream')
+        if sound_stream:
+            body = _rebuild_sound_stream_head(sound_stream)
+            ctx.raw_aux_tags.extend(build_tag(45, body))
+
+        import_assets = ctx.data.get('importAssets', [])
+        for ia in import_assets:
+            body = _rebuild_import_assets(ia)
+            tag_type = 71 if ia.get('version', 1) == 2 else 57
+            ctx.raw_aux_tags.extend(build_tag(tag_type, body, force_long=True))
+
+        # ── LEGACY: Fall back to rawGlobalTags for backward compat ──
         raw_global = ctx.data.get("rawGlobalTags", [])
+        has_structured_abc = bool(abc_blocks)
+        has_structured_aux = bool(ctx.data.get('protectFromImport') or scene_labels or sound_stream)
+
         for rgt in raw_global:
             tag_type = rgt["tagType"]
             body = _decode_raw_body(rgt["body"])
-            if tag_type in (72, 82):  # DoABC, DoABC2
+            if tag_type in (72, 82) and not has_structured_abc:
                 ctx.raw_doabc_tags.extend(build_tag(tag_type, body))
             elif tag_type == 76:  # SymbolClass
                 ctx.raw_aux_map[76] = body
@@ -374,9 +475,9 @@ class ParseRawTagsStage(PipelineStage):
                     ctx.font_aux_tags.setdefault(new_swf_id, []).append((tag_type, body))
                 else:
                     log.warning('Font aux tag %d references unknown charId %d — skipped', tag_type, ref_cid)
-            elif tag_type in (24, 45, 86):  # Protect, SoundStreamHead2, SceneAndFrameLabel
+            elif tag_type in (24, 45, 86) and not has_structured_aux:
                 ctx.raw_aux_tags.extend(build_tag(tag_type, body, force_long=(tag_type == 86)))
-            elif tag_type in (57, 71):  # ImportAssets, ImportAssets2
+            elif tag_type in (57, 71) and not import_assets:
                 ctx.raw_aux_tags.extend(build_tag(tag_type, body, force_long=True))
 
         # Load font aux tags from library entries

@@ -32,7 +32,8 @@
   /* ================================================================== */
   var scripts = []; // {name, path, source}  — editable
   var abcClasses = []; // {name, pkg, superName, tagIdx} — parsed from DoABC
-  var rawGlobalTags = []; // raw from N2D
+  var rawGlobalTags = []; // raw from N2D (legacy)
+  var structuredGlobals = {}; // new structured fields: abcBlocks, protectFromImport, etc.
   var roundtripData = null; // swfVersion, swfCompressed, rootTimelineDefIds, per-lib metadata
   var originalN2DJson = null; // full parsed JSON from loaded N2D (in-memory, for fallback)
   var scriptsModified = false; // true when user has edited any script source
@@ -121,6 +122,7 @@
     scripts = [];
     abcClasses = [];
     rawGlobalTags = [];
+    structuredGlobals = {};
     activeScript = null;
     try {
       localStorage.removeItem('n2d_as_scripts');
@@ -598,6 +600,7 @@
     scripts = [];
     abcClasses = [];
     rawGlobalTags = [];
+    structuredGlobals = {};
     roundtripData = null;
     // Keep previousOriginal for merging rootTimelineDefIds on tool reloads
     var previousOriginal = originalN2DJson;
@@ -655,6 +658,14 @@
           rawGlobalTags = json.rawGlobalTags;
           extractAbcClasses();
         }
+        // Load structured global fields
+        structuredGlobals = {};
+        ['abcBlocks', 'protectFromImport', 'metadata', 'sceneAndFrameLabels',
+         'soundStream', 'importAssets'].forEach(function (key) {
+          if (json[key] !== undefined) {
+            structuredGlobals[key] = json[key];
+          }
+        });
         captureRoundtripData(json);
         renderScriptList();
       }).catch(function (ex) {
@@ -1113,6 +1124,7 @@
 
   function hasRoundtripData() {
     return scripts.length > 0 || rawGlobalTags.length > 0 ||
+      Object.keys(structuredGlobals).length > 0 ||
       (roundtripData && Object.keys(roundtripData).length > 0);
   }
 
@@ -1240,6 +1252,16 @@
     // 2) Raw global SWF tags (DoABC, SymbolClass, etc.)
     if (rawGlobalTags.length > 0) {
       json.rawGlobalTags = rawGlobalTags;
+    }
+
+    // 2b) Structured global fields
+    if (structuredGlobals) {
+      ['abcBlocks', 'protectFromImport', 'metadata', 'sceneAndFrameLabels',
+       'soundStream', 'importAssets'].forEach(function (key) {
+        if (structuredGlobals[key] !== undefined) {
+          json[key] = structuredGlobals[key];
+        }
+      });
     }
 
     // 3) Top-level SWF metadata
@@ -1891,7 +1913,8 @@
     var win = window.open(url, 'as_editor_' + script.path);
 
     if (!win) {
-      toast('Pop-up blocked — allow pop-ups for this site', true);
+      // Popup blocked (common in Electron) — fall back to inline editor
+      openScriptInEditor(index);
       return;
     }
     floatingWindows[script.path] = win;

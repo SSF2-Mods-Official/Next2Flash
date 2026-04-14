@@ -1826,6 +1826,10 @@ class LibraryController
                 break;
 
             case "audio/mpeg":
+            case "audio/wav":
+            case "audio/wave":
+            case "audio/x-wav":
+            case "audio/ogg":
                 file
                     .arrayBuffer()
                     .then((buffer) =>

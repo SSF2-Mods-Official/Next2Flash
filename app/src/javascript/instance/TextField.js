@@ -140,6 +140,10 @@ class TextField extends Instance
         if ("html" in object) {
             this._$html = !!object.html;
         }
+
+        if (object.htmlText) {
+            this._$htmlText = object.htmlText;
+        }
     }
 
     /**
@@ -731,6 +735,7 @@ class TextField extends Instance
             "symbol":         this.symbol,
             "folderId":       this.folderId,
             "text":           this.text,
+            "htmlText":       this._$htmlText || "",
             "font":           this.font,
             "fontType":       this.fontType,
             "inputType":      this.inputType,
@@ -749,7 +754,8 @@ class TextField extends Instance
             "originBounds":   this.originBounds,
             "bounds":         this.bounds,
             "thickness":      this.thickness,
-            "thicknessColor": this.thicknessColor
+            "thicknessColor": this.thicknessColor,
+            "html":           this._$html
         };
     }
 
@@ -776,6 +782,7 @@ class TextField extends Instance
             "symbol":         this.symbol,
             "extends":        this.defaultSymbol,
             "text":           this.text,
+            "htmlText":       this._$htmlText || "",
             "font":           this.font,
             "fontType":       this.fontType,
             "inputType":      this.inputType,
@@ -794,7 +801,8 @@ class TextField extends Instance
             "originBounds":   this.originBounds,
             "bounds":         this.bounds,
             "thickness":      this.thickness,
-            "thicknessColor": this.thicknessColor
+            "thicknessColor": this.thicknessColor,
+            "html":           this._$html
         };
     }
 

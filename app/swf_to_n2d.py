@@ -93,6 +93,100 @@ except ImportError:
 #  SWF BINARY PARSER
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ── Low-level helpers for structured tag parsing ──────────────────────────
+
+def _read_encoded_u32(data: bytes, off: int) -> Tuple[int, int]:
+    """Read a SWF EncodedU32 (variable-length, 1-5 bytes)."""
+    result = 0
+    for i in range(5):
+        b = data[off]; off += 1
+        result |= (b & 0x7f) << (7 * i)
+        if not (b & 0x80):
+            break
+    return result, off
+
+
+def _read_cstring(data: bytes, off: int) -> Tuple[str, int]:
+    """Read a NUL-terminated string."""
+    nul = data.index(0, off) if 0 in data[off:] else len(data)
+    s = data[off:nul].decode('utf-8', errors='replace')
+    return s, nul + 1
+
+
+def _read_swf_matrix(data: bytes, off: int) -> Tuple[dict, int]:
+    """Read a SWF MATRIX record from byte data at byte offset."""
+    br = BitReader(data, off)
+    has_scale = br.read_ub(1)
+    sx, sy = 1.0, 1.0
+    if has_scale:
+        nb = br.read_ub(5)
+        sx = br.read_fb(nb)
+        sy = br.read_fb(nb)
+    has_rot = br.read_ub(1)
+    r0, r1 = 0.0, 0.0
+    if has_rot:
+        nb = br.read_ub(5)
+        r0 = br.read_fb(nb)
+        r1 = br.read_fb(nb)
+    nb = br.read_ub(5)
+    tx = br.read_sb(nb)
+    ty = br.read_sb(nb)
+    new_off = (br.pos + 7) // 8
+    return {'scaleX': sx, 'rotateSkew0': r0, 'rotateSkew1': r1,
+            'scaleY': sy, 'translateX': tx, 'translateY': ty}, new_off
+
+
+def _read_swf_cxform_alpha(data: bytes, off: int) -> Tuple[dict, int]:
+    """Read CXFORMWITHALPHA from byte data."""
+    br = BitReader(data, off)
+    has_add = br.read_ub(1)
+    has_mult = br.read_ub(1)
+    nb = br.read_ub(4)
+    rm, gm, bm, am = 256, 256, 256, 256
+    ra, ga, ba, aa = 0, 0, 0, 0
+    if has_mult:
+        rm = br.read_sb(nb); gm = br.read_sb(nb)
+        bm = br.read_sb(nb); am = br.read_sb(nb)
+    if has_add:
+        ra = br.read_sb(nb); ga = br.read_sb(nb)
+        ba = br.read_sb(nb); aa = br.read_sb(nb)
+    new_off = (br.pos + 7) // 8
+    return {'redMultTerm': rm, 'greenMultTerm': gm, 'blueMultTerm': bm, 'alphaMultTerm': am,
+            'redAddTerm': ra, 'greenAddTerm': ga, 'blueAddTerm': ba, 'alphaAddTerm': aa}, new_off
+
+
+def _read_swf_filter_list(data: bytes, off: int) -> Tuple[list, int]:
+    """Read FILTERLIST — returns list of filter dicts and new offset."""
+    count = data[off]; off += 1
+    filters = []
+    for _ in range(count):
+        fid = data[off]; off += 1
+        # Store as base64 per-filter — full parse TBD
+        # We need to know the filter size; for now, skip known sizes
+        filter_sizes = {0: 23, 1: 9, 2: 15, 3: 27, 4: -1, 5: -1, 6: -1, 7: -1}
+        sz = filter_sizes.get(fid, 0)
+        if sz > 0:
+            filters.append({'filterId': fid, 'data': base64.b64encode(data[off:off+sz]).decode('ascii')})
+            off += sz
+        else:
+            # Variable-size filters: GradientGlow(4), GradientBevel(7), ColorMatrix(6), Convolution(5)
+            if fid == 6:  # ColorMatrix: 20 floats
+                filters.append({'filterId': fid, 'data': base64.b64encode(data[off:off+80]).decode('ascii')})
+                off += 80
+            elif fid == 5:  # Convolution
+                mx = data[off]; my = data[off+1]; off += 2
+                skip = 4 + mx * my * 4 + 4 + 1  # divisor, matrix, bias, clamp+preserveAlpha, defaultColor
+                filters.append({'filterId': fid, 'data': base64.b64encode(data[off-2:off-2+2+skip]).decode('ascii')})
+                off += skip
+            elif fid in (4, 7):  # GradientGlow / GradientBevel
+                num_colors = data[off]; off += 1
+                skip = num_colors * 4 + num_colors + 19  # colors + ratios + rest
+                filters.append({'filterId': fid, 'data': base64.b64encode(data[off-1:off-1+1+skip]).decode('ascii')})
+                off += skip
+            else:
+                filters.append({'filterId': fid, 'data': ''})
+    return filters, off
+
 
 def read_rect(br: BitReader) -> dict:
     """Parse a RECT record."""
@@ -1137,10 +1231,115 @@ def extract_sound_buffer(raw_tag_body: bytes) -> Tuple[str, bytes, int]:
         return ('nellymoser', sound_data, sound_rate_code)
 
     elif sound_format == 1:
-        # ADPCM — not directly playable
+        # SWF ADPCM — decode to PCM and wrap in WAV
+        try:
+            pcm = _decode_swf_adpcm(sound_data, num_channels)
+            if pcm:
+                wav = _build_wav(pcm, sample_rate, 16, num_channels)
+                return ('wav', wav, sound_rate_code)
+        except Exception as e:
+            log.warning("ADPCM decode failed: %s", e)
         return ('adpcm', sound_data, sound_rate_code)
 
     return ('unknown', b'', sound_rate_code)
+
+
+# ── SWF ADPCM Decoder ──────────────────────────────────────────────────
+
+# SWF ADPCM step table (IMA-style, 89 entries)
+_ADPCM_STEP_TABLE = [
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34,
+    37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143,
+    157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494,
+    544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552,
+    1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428,
+    4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487,
+    12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086,
+    29794, 32767,
+]
+
+# Index adjustment table per nBits (2..5)
+_ADPCM_INDEX_TABLES = {
+    2: [-1, 2],
+    3: [-1, -1, 2, 4],
+    4: [-1, -1, -1, -1, 2, 4, 6, 8],
+    5: [-1, -1, -1, -1, -1, -1, -1, -1, 1, 2, 4, 6, 8, 10, 13, 16],
+}
+
+
+def _decode_swf_adpcm(sound_data: bytes, num_channels: int) -> bytes:
+    """Decode SWF ADPCM sound data to 16-bit signed PCM.
+
+    SWF ADPCM format (per the SWF spec):
+    - First 2 bits: AdpcmCodeSize (n_bits = value + 2, so 2..5 bits per sample)
+    - Then for each 4096-sample block per channel:
+        - Initial sample: SI16 (signed 16-bit)
+        - Initial index: UB6 (6 bits)
+        - Then (4096 - 1) ADPCM codes of n_bits each
+    - Stereo interleaves left/right blocks.
+    """
+    if not sound_data:
+        return b''
+
+    br = BitReader(sound_data)
+    n_bits = br.read_ub(2) + 2
+    idx_table = _ADPCM_INDEX_TABLES[n_bits]
+
+    samples_per_block = 4096
+    output = io.BytesIO()
+
+    try:
+        while br.remaining > 0:
+            # Read initial values for each channel
+            predictors = []
+            indices = []
+            for _ch in range(num_channels):
+                # Initial sample: 16-bit signed
+                init_sample = br.read_sb(16)
+                # Initial step index: 6 bits unsigned
+                init_index = br.read_ub(6)
+                init_index = max(0, min(init_index, 88))
+                predictors.append(init_sample)
+                indices.append(init_index)
+                # Write the initial sample
+                output.write(struct.pack('<h', max(-32768, min(32767, init_sample))))
+
+            # Decode 4095 more samples per channel, interleaved
+            for _s in range(1, samples_per_block):
+                for ch in range(num_channels):
+                    if br.remaining <= 0:
+                        # Pad remaining with last known value if data ends early
+                        output.write(struct.pack('<h', max(-32768, min(32767, predictors[ch]))))
+                        continue
+
+                    code = br.read_ub(n_bits)
+                    step = _ADPCM_STEP_TABLE[indices[ch]]
+
+                    # Compute difference
+                    delta = 0
+                    for bit in range(n_bits - 1):
+                        if code & (1 << (n_bits - 2 - bit)):
+                            delta += step >> bit
+                    delta += step >> (n_bits - 1)
+
+                    # Apply sign
+                    if code & (1 << (n_bits - 1)):
+                        predictors[ch] -= delta
+                    else:
+                        predictors[ch] += delta
+
+                    # Clamp
+                    predictors[ch] = max(-32768, min(32767, predictors[ch]))
+
+                    # Update step index
+                    indices[ch] += idx_table[code & ((1 << (n_bits - 1)) - 1)]
+                    indices[ch] = max(0, min(88, indices[ch]))
+
+                    output.write(struct.pack('<h', predictors[ch]))
+    except (IndexError, struct.error):
+        pass  # End of data — return what we have
+
+    return output.getvalue()
 
 
 def _build_wav(pcm_data: bytes, sample_rate: int, bits_per_sample: int,
@@ -1374,8 +1573,13 @@ def parse_define_edit_text(tag_data: bytes, font_names: Dict[int, str],
     _var_name = br.read_string()
 
     text = ""
+    html_text = ""
     if has_text:
         text = br.read_string()
+        if html and text:
+            html_text = text
+            # Strip HTML tags for display, keep only visible text
+            text = re.sub(r'<[^>]+>', '', text).strip()
 
     # Determine inputType
     if read_only:
@@ -1419,6 +1623,7 @@ def parse_define_edit_text(tag_data: bytes, font_names: Dict[int, str],
 
     return {
         'text': text,
+        'htmlText': html_text,
         'font': font_name,
         'fontType': font_type,
         'inputType': input_type,
@@ -2097,6 +2302,15 @@ class N2DBuilder:
         # Global raw tags (DoABC, fonts, auxiliary) for 1:1 roundtrip
         # List of (tag_type, full_tag_body_bytes)
         self.global_raw_tags: List[Tuple[int, bytes]] = []
+        # ── Structured parsed global tags (replaces raw passthrough) ──
+        self.parsed_abc_blocks: List[dict] = []       # DoABC / DoABC2
+        self.parsed_protect: Optional[bool] = None     # Protect (tag 24)
+        self.parsed_metadata: Optional[str] = None     # Metadata XML (tag 77)
+        self.parsed_scene_labels: Optional[dict] = None  # SceneAndFrameLabel (tag 86)
+        self.parsed_sound_stream: Optional[dict] = None  # SoundStreamHead2 (tag 45) global
+        self.parsed_import_assets: List[dict] = []     # ImportAssets / ImportAssets2
+        # Font aux: swf_char_id → {fontAlignZones, csmTextSettings, fontNameRecord}
+        self.parsed_font_aux: Dict[int, dict] = {}
         # AS3 source scripts: [{name, path, source}]
         self.scripts: List[dict] = []
         # Bitmap RGBA buffers: n2d_lib_id → raw RGBA bytes (for ZIP packaging)
@@ -2293,6 +2507,261 @@ class N2DBuilder:
                                 TAG_IMPORT_ASSETS,    # ImportAssets
                                 TAG_IMPORT_ASSETS2):  # ImportAssets2
                 self.global_raw_tags.append((tag.tag_type, bytes(tag.data)))
+
+            # ── Structured parsing of global tags (replaces raw passthrough) ──
+            if tag.tag_type == 24:  # Protect
+                self.parsed_protect = True
+
+            elif tag.tag_type == 77:  # Metadata
+                try:
+                    self.parsed_metadata = tag.data.decode('utf-8').rstrip('\x00')
+                except Exception:
+                    self.parsed_metadata = tag.data.decode('latin-1').rstrip('\x00')
+
+            elif tag.tag_type == 86:  # DefineSceneAndFrameLabelData
+                self.parsed_scene_labels = self._parse_scene_and_frame_label(bytes(tag.data))
+
+            elif tag.tag_type == 45 and self.parsed_sound_stream is None:  # SoundStreamHead2 (global)
+                self.parsed_sound_stream = self._parse_sound_stream_head(bytes(tag.data))
+
+            elif tag.tag_type in (TAG_DO_ABC, TAG_DO_ABC2):
+                self.parsed_abc_blocks.append(
+                    self._parse_doabc(tag.tag_type, bytes(tag.data)))
+
+            elif tag.tag_type in (TAG_IMPORT_ASSETS, TAG_IMPORT_ASSETS2):
+                self.parsed_import_assets.append(
+                    self._parse_import_assets(tag.tag_type, bytes(tag.data)))
+
+            elif tag.tag_type in (73, 74, 88):  # Font aux tags
+                body = bytes(tag.data)
+                if len(body) >= 2:
+                    ref_cid = struct.unpack_from('<H', body, 0)[0]
+                    aux = self.parsed_font_aux.setdefault(ref_cid, {})
+                    if tag.tag_type == 73:
+                        aux['fontAlignZones'] = self._parse_font_align_zones(body)
+                    elif tag.tag_type == 74:
+                        aux['csmTextSettings'] = self._parse_csm_text_settings(body)
+                    elif tag.tag_type == 88:
+                        aux['fontNameRecord'] = self._parse_font_name(body)
+
+    # ── Structured tag parsing helpers ──────────────────────────────────
+
+    @staticmethod
+    def _parse_sound_stream_head(data: bytes) -> dict:
+        """Parse SoundStreamHead / SoundStreamHead2 into structured fields."""
+        if len(data) < 4:
+            return {}
+        b0 = data[0]
+        b1 = data[1]
+        result = {
+            'playbackRate': (b0 >> 2) & 0x03,
+            'playbackSize': (b0 >> 1) & 0x01,
+            'playbackType': b0 & 0x01,
+            'compression': (b1 >> 4) & 0x0f,
+            'streamRate': (b1 >> 2) & 0x03,
+            'streamSize': (b1 >> 1) & 0x01,
+            'streamType': b1 & 0x01,
+            'streamSampleCount': struct.unpack_from('<H', data, 2)[0],
+        }
+        if result['compression'] == 2 and len(data) >= 6:  # MP3
+            result['latencySeek'] = struct.unpack_from('<h', data, 4)[0]
+        return result
+
+    @staticmethod
+    def _parse_scene_and_frame_label(data: bytes) -> dict:
+        """Parse DefineSceneAndFrameLabelData (tag 86)."""
+        off = 0
+        result = {'scenes': [], 'frameLabels': []}
+        if not data:
+            return result
+        # EncodedU32 scene count
+        scene_count, off = _read_encoded_u32(data, off)
+        for _ in range(scene_count):
+            offset_val, off = _read_encoded_u32(data, off)
+            name, off = _read_cstring(data, off)
+            result['scenes'].append({'offset': offset_val, 'name': name})
+        # EncodedU32 frame label count
+        label_count, off = _read_encoded_u32(data, off)
+        for _ in range(label_count):
+            frame_num, off = _read_encoded_u32(data, off)
+            name, off = _read_cstring(data, off)
+            result['frameLabels'].append({'frame': frame_num, 'name': name})
+        return result
+
+    @staticmethod
+    def _parse_doabc(tag_type: int, data: bytes) -> dict:
+        """Parse DoABC (72) or DoABC2 (82) tag wrapper."""
+        if tag_type == 82:  # DoABC2: flags(UI32) + name(NUL-terminated) + abc
+            if len(data) < 5:
+                return {'tagVersion': 2, 'flags': 0, 'name': '', 'bytecode': base64.b64encode(data).decode('ascii')}
+            flags = struct.unpack_from('<I', data, 0)[0]
+            nul_pos = data.index(0, 4) if 0 in data[4:] else len(data)
+            name = data[4:nul_pos].decode('utf-8', errors='replace')
+            abc_bytes = data[nul_pos + 1:]
+            return {
+                'tagVersion': 2,
+                'flags': flags,
+                'name': name,
+                'bytecode': base64.b64encode(abc_bytes).decode('ascii'),
+            }
+        else:  # DoABC (72): raw ABC bytecode only
+            return {
+                'tagVersion': 1,
+                'flags': 0,
+                'name': '',
+                'bytecode': base64.b64encode(data).decode('ascii'),
+            }
+
+    @staticmethod
+    def _parse_import_assets(tag_type: int, data: bytes) -> dict:
+        """Parse ImportAssets (57) or ImportAssets2 (71)."""
+        off = 0
+        url, off = _read_cstring(data, off)
+        version = 2 if tag_type == 71 else 1
+        if tag_type == 71 and off + 2 <= len(data):
+            off += 2  # skip reserved UI8 + UI8
+        count = struct.unpack_from('<H', data, off)[0] if off + 2 <= len(data) else 0
+        off += 2
+        assets = []
+        for _ in range(count):
+            if off + 2 > len(data):
+                break
+            _char_id = struct.unpack_from('<H', data, off)[0]
+            off += 2
+            name, off = _read_cstring(data, off)
+            assets.append({'name': name})
+        return {'version': version, 'url': url, 'assets': assets}
+
+    @staticmethod
+    def _parse_font_align_zones(data: bytes) -> dict:
+        """Parse DefineFontAlignZones (tag 73) body (includes charID prefix)."""
+        if len(data) < 3:
+            return {'tableHint': 0, 'zones': []}
+        off = 2  # skip charID
+        table_hint = (data[off] >> 6) & 0x03
+        off += 1
+        zones = []
+        while off < len(data):
+            num_zones = data[off]; off += 1
+            zone_data = []
+            for _ in range(num_zones):
+                if off + 4 > len(data):
+                    break
+                zd = struct.unpack_from('<HH', data, off)
+                zone_data.append({'alignmentCoord': zd[0] / 256.0, 'range': zd[1] / 256.0})
+                off += 4
+            if off < len(data):
+                off += 1  # zoneMask byte
+            zones.append(zone_data)
+        return {'tableHint': table_hint, 'zones': zones}
+
+    @staticmethod
+    def _parse_csm_text_settings(data: bytes) -> dict:
+        """Parse CSMTextSettings (tag 74) body (includes charID prefix)."""
+        if len(data) < 12:
+            return {'useFlashType': 0, 'gridFit': 0, 'thickness': 0.0, 'sharpness': 0.0}
+        off = 2  # skip charID
+        byte3 = data[off]
+        use_flash = (byte3 >> 6) & 0x03
+        grid_fit = (byte3 >> 3) & 0x07
+        off += 1
+        thickness = struct.unpack_from('<f', data, off)[0] if off + 4 <= len(data) else 0.0
+        off += 4
+        sharpness = struct.unpack_from('<f', data, off)[0] if off + 4 <= len(data) else 0.0
+        return {'useFlashType': use_flash, 'gridFit': grid_fit,
+                'thickness': thickness, 'sharpness': sharpness}
+
+    @staticmethod
+    def _parse_font_name(data: bytes) -> dict:
+        """Parse DefineFontName (tag 88) body (includes charID prefix)."""
+        off = 2  # skip charID
+        font_name, off = _read_cstring(data, off)
+        copyright_str, off = _read_cstring(data, off)
+        return {'fontName': font_name, 'copyright': copyright_str}
+
+    @staticmethod
+    def _parse_button2(data_after_cid: bytes) -> dict:
+        """Parse DefineButton2 tag body (after charID) into structured fields."""
+        if len(data_after_cid) < 3:
+            return {'trackAsMenu': False, 'buttonStates': {}, 'buttonActions': []}
+        off = 0
+        flags = data_after_cid[off]; off += 1
+        track_as_menu = bool(flags & 0x01)
+        action_offset = struct.unpack_from('<H', data_after_cid, off)[0]; off += 2
+
+        states = {'up': [], 'over': [], 'down': [], 'hit': []}
+        while off < len(data_after_cid):
+            state_flags = data_after_cid[off]
+            if state_flags == 0:
+                off += 1
+                break
+            has_blend = bool(state_flags & 0x20)
+            has_filter = bool(state_flags & 0x10)
+            off += 1
+            if off + 4 > len(data_after_cid):
+                break
+            char_id = struct.unpack_from('<H', data_after_cid, off)[0]; off += 2
+            depth = struct.unpack_from('<H', data_after_cid, off)[0]; off += 2
+
+            # Parse MATRIX
+            matrix, off = _read_swf_matrix(data_after_cid, off)
+            # Parse CXFORMWITHALPHA
+            cxform, off = _read_swf_cxform_alpha(data_after_cid, off)
+            # FilterList
+            filters = []
+            if has_filter:
+                filters, off = _read_swf_filter_list(data_after_cid, off)
+            blend_mode = 0
+            if has_blend and off < len(data_after_cid):
+                blend_mode = data_after_cid[off]; off += 1
+
+            record = {
+                'characterId': char_id,
+                'placeDepth': depth,
+                'matrix': matrix,
+                'colorTransform': cxform,
+                'filters': filters,
+                'blendMode': blend_mode,
+            }
+            if state_flags & 0x01:
+                states['up'].append(record)
+            if state_flags & 0x02:
+                states['over'].append(record)
+            if state_flags & 0x04:
+                states['down'].append(record)
+            if state_flags & 0x08:
+                states['hit'].append(record)
+
+        # Parse ButtonCondActions if present
+        button_actions = []
+        if action_offset > 0:
+            act_off = action_offset  # relative to start of data_after_cid
+            while act_off < len(data_after_cid):
+                if act_off + 4 > len(data_after_cid):
+                    break
+                cond_action_size = struct.unpack_from('<H', data_after_cid, act_off)[0]
+                cond_flags = struct.unpack_from('<H', data_after_cid, act_off + 2)[0]
+                if cond_action_size == 0:
+                    # Last action — rest of data
+                    action_bytes = data_after_cid[act_off + 4:]
+                    button_actions.append({
+                        'conditions': cond_flags,
+                        'actionBytes': base64.b64encode(action_bytes).decode('ascii'),
+                    })
+                    break
+                else:
+                    action_bytes = data_after_cid[act_off + 4:act_off + cond_action_size]
+                    button_actions.append({
+                        'conditions': cond_flags,
+                        'actionBytes': base64.b64encode(action_bytes).decode('ascii'),
+                    })
+                    act_off += cond_action_size
+
+        return {
+            'trackAsMenu': track_as_menu,
+            'buttonStates': states,
+            'buttonActions': button_actions,
+        }
 
     def build_all(self, *, fast_shapes: bool = False):
         """Build all library entries from cataloged SWF data.
@@ -2615,7 +3084,7 @@ class N2DBuilder:
             sym_name = self.symbol_names.get(cid, '')
             display_name = sym_name.split('.')[-1] if sym_name else f"Sound_{cid}"
 
-            buffer_str = ''
+            buffer_data = b''
             sound_fmt = 'unknown'
             if cid in sound_data_cache:
                 fmt_name, audio_bytes, swf_rate = sound_data_cache[cid]
@@ -2625,7 +3094,7 @@ class N2DBuilder:
                     audio_bytes = nelly_results[cid]
                     sound_fmt = 'mp3'
                 if audio_bytes:
-                    buffer_str = base64.b64encode(audio_bytes if isinstance(audio_bytes, (bytes, bytearray)) else bytes(audio_bytes)).decode('ascii')
+                    buffer_data = audio_bytes if isinstance(audio_bytes, (bytes, bytearray)) else bytes(audio_bytes)
 
             entry = {
                 'id': lid,
@@ -2634,7 +3103,7 @@ class N2DBuilder:
                 'type': 'sound',
                 'symbol': sym_name,
                 'folderId': self.folder_ids.get('sound', 0),
-                'buffer': buffer_str,
+                'buffer': buffer_data,
                 'soundFormat': sound_fmt,
                 'volume': 100,
                 'loopCount': 0,
@@ -2772,8 +3241,9 @@ class N2DBuilder:
                 # Store font body as fontData for compilation
                 entry['fontData'] = base64.b64encode(body).decode('ascii')
                 entry['fontTagType'] = tag_type
-            # Attach font auxiliary tags (DefineFontAlignZones, CSMTextSettings,
-            # DefineFontName) to the entry so they survive without rawGlobalTags
+            # Attach font auxiliary tags — use structured parsed data when available
+            if cid in self.parsed_font_aux:
+                entry['fontAuxParsed'] = self.parsed_font_aux[cid]
             if cid in _font_aux_by_cid:
                 entry['fontAuxTags'] = [
                     {'tagType': tt, 'body': base64.b64encode(body).decode('ascii')}
@@ -2809,6 +3279,13 @@ class N2DBuilder:
             if cid in self.raw_tag_data:
                 tag_type, body = self.raw_tag_data[cid]
                 entry['buttonData'] = base64.b64encode(body).decode('ascii')
+                # Add structured button parse
+                try:
+                    # body starts after charID in raw_tag_data, but DefineButton2
+                    # raw_tag_data stores the full body after charID
+                    entry['buttonParsed'] = self._parse_button2(body)
+                except Exception as e:
+                    log.warning("Could not parse button %d: %s", cid, e)
             # Attach button auxiliary tags (DefineButtonSound, DefineButtonCxform)
             if cid in self.button_aux_tags:
                 entry['buttonAuxTags'] = [
@@ -2871,6 +3348,7 @@ class N2DBuilder:
             for ntag in nested_tags:
                 if ntag.tag_type in (18, 45):
                     container['rawSoundStreamHead'] = base64.b64encode(ntag.data).decode('ascii')
+                    container['soundStreamParsed'] = self._parse_sound_stream_head(bytes(ntag.data))
                     break
             self.libraries.append(container)
             sprite_count += 1
@@ -3678,6 +4156,20 @@ class N2DBuilder:
                 {'tagType': tt, 'body': base64.b64encode(body).decode('ascii')}
                 for tt, body in self.global_raw_tags
             ]
+
+        # ── Structured global tag fields (replace raw passthrough) ──
+        if self.parsed_abc_blocks:
+            result['abcBlocks'] = self.parsed_abc_blocks
+        if self.parsed_protect:
+            result['protectFromImport'] = True
+        if self.parsed_metadata:
+            result['metadata'] = self.parsed_metadata
+        if self.parsed_scene_labels:
+            result['sceneAndFrameLabels'] = self.parsed_scene_labels
+        if self.parsed_sound_stream:
+            result['soundStream'] = self.parsed_sound_stream
+        if self.parsed_import_assets:
+            result['importAssets'] = self.parsed_import_assets
         # Include SWF version and compression format for matching
         result['swfVersion'] = self.header.get('version', 14)
         result['swfCompressed'] = self.header.get('compressed', True)
@@ -3847,10 +4339,10 @@ def save_project_folder(data: dict, folder_path: str):
         cid = lib.get('swfCharId', lib.get('id', 0))
         name = _safe_filename(lib.get('name', f'sound_{cid}'))
 
-        buf = lib.get('buffer', '')
+        buf = lib.get('buffer', b'')
         if not buf:
             return 0
-        audio_bytes = base64.b64decode(buf)
+        audio_bytes = buf if isinstance(buf, (bytes, bytearray)) else base64.b64decode(buf)
         ext = _detect_audio_ext(audio_bytes)
         fname = f"{cid}_{name}.{ext}"
         fpath = os.path.join(sounds_dir, fname)

@@ -236,13 +236,25 @@ class FLfile
                 case value instanceof Uint8Array:
                     {
                         let ext = "";
-                        if (name.indexOf(".mp3") === -1) {
-                            ext = ".mp3";
+                        let mime = "audio/mp3";
+                        // Detect format from header
+                        if (value.length >= 4
+                            && value[0] === 0x52 && value[1] === 0x49
+                            && value[2] === 0x46 && value[3] === 0x46) {
+                            if (name.indexOf(".wav") === -1) ext = ".wav";
+                            mime = "audio/wav";
+                        } else if (value.length >= 4
+                            && value[0] === 0x4F && value[1] === 0x67
+                            && value[2] === 0x67 && value[3] === 0x53) {
+                            if (name.indexOf(".ogg") === -1) ext = ".ogg";
+                            mime = "audio/ogg";
+                        } else {
+                            if (name.indexOf(".mp3") === -1) ext = ".mp3";
                         }
 
                         zip.file(`${name}${ext}`, new Blob(
                             [value],
-                            { "type": "audio/mp3" }
+                            { "type": mime }
                         ), { "base64": true });
                     }
                     break;
