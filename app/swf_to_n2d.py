@@ -2687,6 +2687,11 @@ class N2DBuilder:
                             self.font_names, self.font_attrs,
                             self.font_code_tables
                         )
+                        # Preserve raw tag body so export can emit the original
+                        # DefineText binary (with font-ID remapping) instead of
+                        # converting to DefineEditText which garbles glyph rendering.
+                        parsed_props['rawTagBody'] = base64.b64encode(body).decode('ascii')
+                        parsed_props['rawTagType'] = tag_type
                         text_parsed += 1
                     except Exception as e:
                         print(f"    Warning: Could not parse DefineText {cid}: {e}")
@@ -2746,12 +2751,14 @@ class N2DBuilder:
             lid = self.swf_to_n2d[cid]
             sym_name = self.symbol_names.get(cid, '')
             display_name = sym_name.split('.')[-1] if sym_name else f"Font_{cid}"
+            face_name = self.font_names.get(cid, display_name)
             entry = {
                 'id': lid,
                 'swfCharId': cid,
                 'name': display_name,
                 'type': 'shape',
                 'isFont': True,
+                'fontFaceName': face_name,
                 'symbol': sym_name,
                 'folderId': self.folder_ids.get('font', 0),
                 'bitmapId': 0,

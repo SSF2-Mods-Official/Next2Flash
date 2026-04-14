@@ -194,8 +194,11 @@
         var libs = r.headers.get('X-N2D-Libraries') || '?';
         var scripts = r.headers.get('X-N2D-Scripts') || '0';
         var projDir = r.headers.get('X-Project-Dir') || '';
+        var fontsHeader = r.headers.get('X-N2D-Fonts') || '';
+        var fonts = null;
+        if (fontsHeader) { try { fonts = JSON.parse(fontsHeader); } catch(e) {} }
         return r.blob().then(function (blob) {
-          return { blob: blob, name: name, libs: libs, scripts: scripts, projDir: projDir };
+          return { blob: blob, name: name, libs: libs, scripts: scripts, projDir: projDir, fonts: fonts };
         });
       })
       .then(function (result) {
@@ -207,6 +210,9 @@
         if (refreshBtn) refreshBtn.disabled = false;
         var saveBtn = document.getElementById('n2f-save-project');
         if (saveBtn) saveBtn.disabled = false;
+
+        // Register @font-face rules BEFORE feeding the project to the tool
+        _registerEmbeddedFonts(result.fonts);
 
         _importedN2DBlob = result.blob.slice(0);
         _saveImportedBlobToIDB(_importedN2DBlob);
@@ -523,6 +529,9 @@
         var libs = r.headers.get('X-N2D-Libraries') || '?';
         var scripts = r.headers.get('X-N2D-Scripts') || '0';
         var projDir = r.headers.get('X-Project-Dir') || '';
+        var fontsHeader = r.headers.get('X-N2D-Fonts') || '';
+        var fonts = null;
+        if (fontsHeader) { try { fonts = JSON.parse(fontsHeader); } catch(e) {} }
         if (window.N2FProfiler) {
           window.N2FProfiler.count('libraries', parseInt(libs) || 0);
           window.N2FProfiler.count('scripts', parseInt(scripts) || 0);
@@ -533,7 +542,7 @@
             window.N2FProfiler.stopTimer();
             window.N2FProfiler.size('n2d_blob', blob.size);
           }
-          return { blob: blob, name: name, libs: libs, scripts: scripts, projDir: projDir };
+          return { blob: blob, name: name, libs: libs, scripts: scripts, projDir: projDir, fonts: fonts };
         });
       })
       .then(function (result) {
@@ -545,6 +554,9 @@
         if (refreshBtn) refreshBtn.disabled = false;
         var saveBtn = document.getElementById('n2f-save-project');
         if (saveBtn) saveBtn.disabled = false;
+
+        // Register @font-face rules BEFORE feeding the project to the tool
+        _registerEmbeddedFonts(result.fonts);
 
         _importedN2DBlob = result.blob.slice(0);
         _saveImportedBlobToIDB(_importedN2DBlob);
@@ -706,6 +718,39 @@
           }
         }
         setTimeout(waitAndCloseOldTab, 100);
+      });
+    });
+  }
+
+  /* ================================================================== */
+  /*  Helper: Register @font-face rules for embedded SWF fonts          */
+  /* ================================================================== */
+  function _registerEmbeddedFonts(fontManifest) {
+    if (!fontManifest || !fontManifest.length) return;
+    // Remove any previous embedded-font stylesheet
+    var prev = document.getElementById('n2f-embedded-fonts');
+    if (prev) prev.remove();
+
+    var css = '';
+    for (var i = 0; i < fontManifest.length; i++) {
+      var f = fontManifest[i];
+      css += '@font-face { font-family: "' + f.faceName.replace(/"/g, '\\"') + '"; '
+           + "src: url('" + API_BASE + '/api/font/' + f.id + "') format('truetype'); "
+           + 'font-display: block; }\n';
+    }
+    var style = document.createElement('style');
+    style.id = 'n2f-embedded-fonts';
+    style.textContent = css;
+    document.head.appendChild(style);
+    console.log('[N2F] Registered ' + fontManifest.length + ' @font-face rule(s)');
+    _serverLog('INFO', 'Registered ' + fontManifest.length + ' embedded @font-face rule(s)');
+
+    // Preload fonts so they are ready when the canvas renders
+    fontManifest.forEach(function (f) {
+      document.fonts.load('20px "' + f.faceName + '"').then(function () {
+        console.log('[N2F] Font preloaded: ' + f.faceName);
+      }).catch(function (e) {
+        console.warn('[N2F] Font preload failed for ' + f.faceName + ':', e);
       });
     });
   }

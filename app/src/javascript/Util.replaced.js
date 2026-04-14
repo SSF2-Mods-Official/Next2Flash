@@ -1462,6 +1462,50 @@ Util.$decodeURIComponentChunked = function(str)
  * @param {string} source - calling context for log messages
  * @private
  */
+/**
+ * Register @font-face CSS rules for embedded SWF fonts so the editor
+ * renders text using the original typefaces from the SWF.
+ * Each font library with isFont=true gets a @font-face pointing to
+ * /api/font/<id> which dynamically converts DefineFont3→TTF.
+ *
+ * @param {Array} libraries — raw library data array from N2D JSON
+ */
+Util.$registerEmbeddedFonts = function(libraries)
+{
+    // Reuse or create a dedicated <style> element
+    let style = document.getElementById("n2f-embedded-fonts");
+    if (!style) {
+        style = document.createElement("style");
+        style.id = "n2f-embedded-fonts";
+        document.head.appendChild(style);
+    }
+
+    const rules = [];
+    if (Array.isArray(libraries)) {
+        for (let i = 0; i < libraries.length; i++) {
+            const lib = libraries[i];
+            if (!lib || !lib.isFont) continue;
+            const name = lib.name;
+            const id   = lib.id;
+            if (!name || typeof id === "undefined") continue;
+
+            // Escape quotes in font name for CSS
+            const safeName = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+            rules.push(
+                `@font-face {\n` +
+                `  font-family: "${safeName}";\n` +
+                `  src: url("/api/font/${id}") format("truetype");\n` +
+                `}`
+            );
+        }
+    }
+
+    style.textContent = rules.join("\n");
+    if (rules.length) {
+        console.log(`[N2F] Registered ${rules.length} embedded @font-face rule(s)`);
+    }
+};
+
 Util._$validateLibraries = function(libraries, source)
 {
     if (!Array.isArray(libraries)) {
@@ -1606,6 +1650,9 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
         console.timeEnd("[N2F] Load all libraries");
         console.log("[N2F] Progressive loading complete!");;
         
+        // Register @font-face rules for embedded SWF fonts
+        Util.$registerEmbeddedFonts(libraries);
+
         // Re-initialize UI now that libraries are loaded
         console.log("[N2F] Refreshing UI with loaded libraries...");
         try {
@@ -1767,6 +1814,9 @@ Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
         console.timeEnd("[N2F] Load all libraries");
         console.log("[N2F] Progressive loading complete!");
         
+        // Register @font-face rules for embedded SWF fonts
+        Util.$registerEmbeddedFonts(libraries);
+
         // Re-initialize UI now that libraries are loaded
         console.log("[N2F] Refreshing UI with loaded libraries...");
         try {

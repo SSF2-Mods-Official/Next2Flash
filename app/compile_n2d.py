@@ -2614,8 +2614,32 @@ class N2DCompiler:
             lib_name = lib.get('name', '')
             if lib_name and lib_name not in fmap:
                 fmap[lib_name] = swf_id
+            # Also try fontFaceName (set during SWF import for face-name matching)
+            face_name = lib.get('fontFaceName', '')
+            if face_name and face_name not in fmap:
+                fmap[face_name] = swf_id
         self._font_name_map_cache = fmap
         return fmap
+
+    def _build_font_id_map(self) -> Dict[int, int]:
+        """Build a mapping of original SWF font charID → new SWF charID.
+
+        Used by _remap_text_raw_body to update font references inside
+        DefineText/DefineText2 raw binary passthrough bodies.
+        """
+        if hasattr(self, '_font_id_map_cache'):
+            return self._font_id_map_cache
+        id_map: Dict[int, int] = {}
+        for lib in self.libs:
+            if not lib.get('isFont'):
+                continue
+            orig_cid = lib.get('swfCharId')
+            lid = lib['id']
+            new_swf_id = self._lib_to_swf_id.get(lid)
+            if orig_cid is not None and new_swf_id is not None:
+                id_map[orig_cid] = new_swf_id
+        self._font_id_map_cache = id_map
+        return id_map
 
     def _validate_library_entry(self, lib: dict):
         """Validate a library entry has the minimum required fields for emission.
@@ -2679,6 +2703,114 @@ class N2DCompiler:
                 self._definition_tags.extend(
                     build_tag(tag_type, body, force_long=True)
                 )
+
+    def _embed_system_fonts(self):
+        """Auto-embed system fonts referenced by text fields.
+
+        Scans all text library entries for font names not already present
+        in the embedded font library.  For each missing font, looks up the
+        TTF on the system, converts it to DefineFont3, and creates a
+        synthetic font library entry so it gets compiled into the SWF.
+        """
+        # Collect font names already embedded
+        existing = set()
+        for lib in self.libs:
+            if not lib.get('isFont'):
+                continue
+            fd = lib.get('fontData')
+            if not fd:
+                continue
+            # Extract font face name from raw DefineFont3 body
+            try:
+                raw = _decode_raw_body(fd)
+                if len(raw) >= 3:
+                    nl = raw[2]
+                    if nl > 0 and len(raw) >= 3 + nl:
+                        existing.add(raw[3:3 + nl].rstrip(b'\x00').decode('utf-8', errors='replace'))
+            except Exception:
+                pass
+            # Also register library name
+            n = lib.get('name', '')
+            if n:
+                existing.add(n)
+            fn = lib.get('fontFaceName', '')
+            if fn:
+                existing.add(fn)
+
+        # Collect font names used by text fields
+        needed: set = set()
+        for lib in self.libs:
+            if lib.get('type') != 'text':
+                continue
+            fname = lib.get('font', '')
+            if fname and fname not in existing and fname != 'sans-serif':
+                needed.add(fname)
+
+        if not needed:
+            return
+
+        log.info('_embed_system_fonts: need system fonts: %s', needed)
+
+        # Enumerate system fonts
+        from server import _enumerate_system_fonts
+        sys_fonts = _enumerate_system_fonts()
+        sys_map = {f['name']: f['path'] for f in sys_fonts}
+
+        import base64
+        from ttf_to_swf_font import ttf_to_define_font3
+
+        added = 0
+        for font_name in sorted(needed):
+            ttf_path = sys_map.get(font_name)
+            if not ttf_path or not os.path.isfile(ttf_path):
+                log.warning('_embed_system_fonts: system font not found: %s', font_name)
+                continue
+
+            try:
+                with open(ttf_path, 'rb') as fh:
+                    ttf_data = fh.read()
+                body = ttf_to_define_font3(ttf_data, font_name)
+                if not body:
+                    log.warning('_embed_system_fonts: conversion failed for %s', font_name)
+                    continue
+            except Exception as e:
+                log.warning('_embed_system_fonts: error converting %s: %s', font_name, e)
+                continue
+
+            # Create synthetic library entry
+            syn_id = max((lib['id'] for lib in self.libs), default=0) + 1 + added
+            entry = {
+                'id': syn_id,
+                'name': font_name,
+                'type': 'shape',
+                'isFont': True,
+                'fontFaceName': font_name,
+                'symbol': '',
+                'folderId': 0,
+                'bitmapId': 0,
+                'inBitmap': False,
+                'recodes': [],
+                'bounds': {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20},
+                'fontData': base64.b64encode(body).decode('ascii'),
+                'fontTagType': 75,  # DefineFont3
+            }
+
+            self.libs.append(entry)
+            self.id_to_lib[syn_id] = entry
+
+            # Allocate SWF character ID and add to emission order
+            swf_id = self._alloc_id()
+            self._lib_to_swf_id[syn_id] = swf_id
+            self._emission_order.insert(0, syn_id)  # fonts first
+
+            added += 1
+            print(f"  [FONT] Embedded system font: {font_name} (lib {syn_id} -> SWF {swf_id}, {len(body):,} bytes)")
+
+        if added:
+            log.info('_embed_system_fonts: embedded %d system fonts', added)
+            # Invalidate font name map cache
+            if hasattr(self, '_font_name_map_cache'):
+                del self._font_name_map_cache
 
     def _define_all_assets(self):
         """Emit all definition tags in dependency order (sounds first, then
@@ -2835,7 +2967,23 @@ class N2DCompiler:
     def _emit_text(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_text: lib_id=%d, swf_id=%d', lib['id'], swf_id)
-        # Always rebuild text from properties
+
+        # If the text was originally a DefineText/DefineText2 tag, pass through
+        # the original binary with font-ID remapping to preserve glyph rendering.
+        raw_body_b64 = lib.get('rawTagBody')
+        raw_tag_type = lib.get('rawTagType')
+        if raw_body_b64 and raw_tag_type in (11, 33):  # DefineText / DefineText2
+            raw_body = _decode_raw_body(raw_body_b64)
+            # Build old-font-charID → new-font-charID map
+            font_id_map = self._build_font_id_map()
+            remapped = _remap_text_raw_body(raw_body, raw_tag_type, font_id_map)
+            tag_data = struct.pack('<H', swf_id) + remapped
+            self._definition_tags.extend(
+                build_tag(raw_tag_type, tag_data, force_long=True)
+            )
+            return
+
+        # DefineEditText or no raw body: rebuild from properties
         font_map = self._build_font_name_map()
         tag = build_define_edit_text(swf_id, lib, font_map=font_map)
         self._definition_tags.extend(tag)

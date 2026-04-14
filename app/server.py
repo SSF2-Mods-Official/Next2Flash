@@ -63,6 +63,61 @@ _session_manager = SessionManager(ttl=1800)
 _error_handler = ErrorHandler()
 _swf_validator = SWFValidator()
 
+def _enumerate_system_fonts():
+    """Scan system font directories and return a list of available fonts.
+
+    Returns list of dicts: [{name, path, style}, ...]
+    Grouped by family — picks Regular style where possible.
+    """
+    import glob
+
+    font_dirs = []
+    if os.name == 'nt':
+        font_dirs.append(os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts'))
+        local_fonts = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Microsoft', 'Windows', 'Fonts')
+        if os.path.isdir(local_fonts):
+            font_dirs.append(local_fonts)
+    else:
+        for d in ['/usr/share/fonts', '/usr/local/share/fonts',
+                  os.path.expanduser('~/.fonts'),
+                  os.path.expanduser('~/.local/share/fonts')]:
+            if os.path.isdir(d):
+                font_dirs.append(d)
+
+    # Collect all TTF/OTF files
+    ttf_files = []
+    for fd in font_dirs:
+        ttf_files.extend(glob.glob(os.path.join(fd, '**', '*.ttf'), recursive=True))
+        ttf_files.extend(glob.glob(os.path.join(fd, '**', '*.otf'), recursive=True))
+
+    # Read font metadata with fontTools
+    families = {}  # family_name → {path, style, bold, italic}
+    try:
+        from fontTools.ttLib import TTFont
+    except ImportError:
+        log.warning('fontTools not installed — system font enumeration unavailable')
+        return []
+
+    for fp in ttf_files:
+        try:
+            font = TTFont(fp, fontNumber=0)
+            name_table = font['name']
+            family = name_table.getBestFamilyName()
+            sub_family = name_table.getBestSubFamilyName() or 'Regular'
+            font.close()
+            if not family:
+                continue
+            # Prefer Regular style; skip duplicates
+            if family not in families or sub_family.lower() == 'regular':
+                families[family] = {'name': family, 'path': fp, 'style': sub_family}
+        except Exception:
+            continue
+
+    result = sorted(families.values(), key=lambda f: f['name'].lower())
+    log.info('_enumerate_system_fonts: found %d font families', len(result))
+    return result
+
+
 def _get_swf_to_n2d():
     global _swf_to_n2d
     if _swf_to_n2d is None:
@@ -202,6 +257,7 @@ def _apply_text_patches_to_n2d(n2d_path: str, text_patches: list,
             continue
         # Save roundtrip fields from disk
         saved = {k: lib[k] for k in roundtrip_keys if k in lib}
+        original_font = lib.get('font', '')
         # Overlay editor text fields onto disk entry
         for key, val in patch.items():
             if key not in roundtrip_keys:
@@ -209,6 +265,12 @@ def _apply_text_patches_to_n2d(n2d_path: str, text_patches: list,
         # Restore roundtrip fields
         for k, v in saved.items():
             lib[k] = v
+        # If font was changed, the raw DefineText binary contains glyph
+        # indices specific to the old font and cannot be reused.  Strip it
+        # so _emit_text() rebuilds as DefineEditText with the new font.
+        if lib.get('font', '') != original_font:
+            lib.pop('rawTagBody', None)
+            lib.pop('rawTagType', None)
         patched += 1
         log.info('_apply_text_patches: patched lib id=%s text="%s"',
                  lib_id, patch.get('text', '')[:50])
@@ -262,11 +324,18 @@ def _apply_text_patches_inline(data: dict, text_patches: list) -> int:
         if not patch:
             continue
         saved = {k: lib[k] for k in roundtrip_keys if k in lib}
+        original_font = lib.get('font', '')
         for key, val in patch.items():
             if key not in roundtrip_keys:
                 lib[key] = val
         for k, v in saved.items():
             lib[k] = v
+        # If font was changed, the raw DefineText binary contains glyph
+        # indices specific to the old font and cannot be reused.  Strip it
+        # so _emit_text() rebuilds as DefineEditText with the new font.
+        if lib.get('font', '') != original_font:
+            lib.pop('rawTagBody', None)
+            lib.pop('rawTagType', None)
         patched += 1
         log.info('_apply_text_patches_inline: lib id=%s text="%s"',
                  lib.get('id'), patch.get('text', '')[:50])
@@ -451,6 +520,12 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self._handle_lazy_library()
         elif self.path == "/api/lazy/bulk":
             self._handle_lazy_bulk()
+        elif self.path.startswith("/api/font/"):
+            self._handle_font_ttf()
+        elif self.path == "/api/system-fonts":
+            self._handle_system_fonts()
+        elif self.path.startswith("/api/system-font-data/"):
+            self._handle_system_font_data()
         else:
             super().do_GET()
 
@@ -781,6 +856,16 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self.send_header("X-N2D-Scripts", str(len(n2d_json.get("scripts", []))))
             self.send_header("X-N2D-Format", "msgpack")
             self.send_header("X-Project-Dir", project_dir)
+            # Font manifest for @font-face registration
+            _swf2proj_fonts = []
+            for _lib in n2d_json.get('libraries', []):
+                if _lib.get('isFont') and _lib.get('fontData'):
+                    _swf2proj_fonts.append({
+                        'id': _lib['id'],
+                        'faceName': _lib.get('fontFaceName', _lib.get('name', ''))
+                    })
+            if _swf2proj_fonts:
+                self.send_header('X-N2D-Fonts', json.dumps(_swf2proj_fonts))
             self.send_header("Content-Length", str(len(compressed)))
             self.end_headers()
             self.wfile.write(compressed)
@@ -1300,6 +1385,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                     # Read lib/script counts from the full N2D cache
                     _skel_lib_count = 0
                     _skel_script_count = 0
+                    _skel_fonts = []
                     _full_n2d = os.path.join(project_dir, 'project.n2d')
                     if os.path.isfile(_full_n2d):
                         try:
@@ -1317,6 +1403,13 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                                     _n2d = {}
                                 _skel_lib_count = len(_n2d.get('libraries', []))
                                 _skel_script_count = len(_n2d.get('scripts', []))
+                                _skel_fonts = []
+                                for _lib in _n2d.get('libraries', []):
+                                    if _lib.get('isFont') and _lib.get('fontData'):
+                                        _skel_fonts.append({
+                                            'id': _lib['id'],
+                                            'faceName': _lib.get('fontFaceName', _lib.get('name', ''))
+                                        })
                             _tick(f"skeleton lib count from full N2D: {_skel_lib_count}")
                         except Exception as _e:
                             _tick(f"could not read lib count from full N2D: {_e}")
@@ -1333,6 +1426,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                     self.send_header('X-N2D-Scripts', str(_skel_script_count))
                     self.send_header('X-N2D-Format', 'msgpack')
                     self.send_header('X-Project-Dir', project_dir)
+                    if _skel_fonts:
+                        self.send_header('X-N2D-Fonts', json.dumps(_skel_fonts))
                     self.send_header('Content-Length', str(len(compressed)))
                     self.end_headers()
                     self.wfile.write(compressed)
@@ -1400,6 +1495,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 with self._lazy_lock:
                     Next2FlashHandler._lazy_libraries.clear()
                     Next2FlashHandler._lazy_bulk_cache = None  # invalidate cache
+                    Next2FlashHandler._font_ttf_cache.clear()
                     for lib in n2d_json.get('libraries', []):
                         lib_id = lib.get('id')
                         if lib_id is not None:
@@ -1453,6 +1549,16 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             lib_count = len(n2d_json.get('libraries', [])) if n2d_json else 0
             script_count = len(n2d_json.get('scripts', [])) if n2d_json else 0
 
+            # Build font manifest for @font-face registration on client
+            font_manifest = []
+            if n2d_json:
+                for lib in n2d_json.get('libraries', []):
+                    if lib.get('isFont') and lib.get('fontData'):
+                        font_manifest.append({
+                            'id': lib['id'],
+                            'faceName': lib.get('fontFaceName', lib.get('name', ''))
+                        })
+
             self.send_response(200)
             self._cors_headers()
             self.send_header('Content-Type', 'application/octet-stream')
@@ -1462,6 +1568,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self.send_header('X-N2D-Scripts', str(script_count))
             self.send_header('X-N2D-Format', 'msgpack')
             self.send_header('X-Project-Dir', project_dir)
+            if font_manifest:
+                self.send_header('X-N2D-Fonts', json.dumps(font_manifest))
             self.send_header('Content-Length', str(len(compressed)))
             self.end_headers()
             self.wfile.write(compressed)
@@ -1645,6 +1753,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                                 return self._error_response(404, 'No lazy libraries stored')
                         with self._lazy_lock:
                             Next2FlashHandler._lazy_libraries.clear()
+                            Next2FlashHandler._font_ttf_cache.clear()
                             for lib in n2d_json.get('libraries', []):
                                 lib_id = lib.get('id')
                                 if lib_id is not None:
@@ -1685,6 +1794,143 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             traceback.print_exc()
             log.error('_handle_lazy_bulk: %s', e)
+            self._error_response(500, str(e))
+
+    # ── Font TTF endpoint ────────────────────────────────────────────────
+
+    # Cache: lib_id → TTF bytes (cleared on new SWF import)
+    _font_ttf_cache: dict = {}
+
+    def _handle_font_ttf(self):
+        """GET /api/font/<lib_id> — Serve an embedded SWF font as a TTF file.
+
+        Converts the DefineFont3/DefineFont2 glyph outlines stored in the
+        font library entry to a TrueType font on the fly (cached).
+        """
+        try:
+            lib_id_str = self.path.rsplit('/', 1)[-1]
+            try:
+                lib_id = int(lib_id_str)
+            except ValueError:
+                return self._error_response(400, f'Invalid library ID: {lib_id_str}')
+
+            # Check cache first
+            if lib_id in Next2FlashHandler._font_ttf_cache:
+                ttf_bytes = Next2FlashHandler._font_ttf_cache[lib_id]
+            else:
+                # Find the font library entry in the lazy store
+                with self._lazy_lock:
+                    lib_data = Next2FlashHandler._lazy_libraries.get(lib_id)
+
+                if lib_data is None:
+                    # Lazy store may be empty after restart with cached skeleton;
+                    # try loading from the full project N2D on disk.
+                    with self._project_lock:
+                        proj_dir = Next2FlashHandler._current_project_dir
+                    if proj_dir:
+                        cached_n2d = os.path.join(proj_dir, 'project.n2d')
+                        if os.path.isfile(cached_n2d):
+                            import zipfile as _zipfile
+                            import io as _io
+                            with _zipfile.ZipFile(cached_n2d, 'r') as zf:
+                                names = zf.namelist()
+                                if 'project.msgpack' in names:
+                                    raw = zf.read('project.msgpack')
+                                    n2d_json = msgpack.unpackb(raw, raw=False)
+                                elif 'project.json' in names:
+                                    raw = zf.read('project.json')
+                                    n2d_json = json.loads(raw)
+                                else:
+                                    n2d_json = {}
+                            with self._lazy_lock:
+                                for lib in n2d_json.get('libraries', []):
+                                    lid = lib.get('id')
+                                    if lid is not None:
+                                        Next2FlashHandler._lazy_libraries[int(lid)] = lib
+                                lib_data = Next2FlashHandler._lazy_libraries.get(lib_id)
+
+                if lib_data is None:
+                    return self._error_response(404, f'Library {lib_id} not found')
+
+                font_data_b64 = lib_data.get('fontData')
+                if not font_data_b64:
+                    return self._error_response(404, f'Library {lib_id} has no fontData')
+
+                import base64
+                if isinstance(font_data_b64, bytes):
+                    raw_body = font_data_b64
+                else:
+                    raw_body = base64.b64decode(font_data_b64)
+
+                tag_type = lib_data.get('fontTagType', 75)
+
+                from swf_font_to_ttf import swf_font_to_ttf
+                ttf_bytes = swf_font_to_ttf(raw_body, tag_type)
+                Next2FlashHandler._font_ttf_cache[lib_id] = ttf_bytes
+                log.info('_handle_font_ttf: generated TTF for lib %d (%d bytes)', lib_id, len(ttf_bytes))
+
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header('Content-Type', 'font/ttf')
+            self.send_header('Content-Length', str(len(ttf_bytes)))
+            self.send_header('Access-Control-Expose-Headers', 'Content-Length')
+            self.end_headers()
+            self.wfile.write(ttf_bytes)
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_font_ttf: %s', e)
+            self._error_response(500, str(e))
+
+    # ── System fonts endpoints ───────────────────────────────────────────
+
+    _system_fonts_cache: list | None = None  # cached [{name, path, style}, ...]
+
+    def _handle_system_fonts(self):
+        """GET /api/system-fonts — List fonts installed on the system."""
+        try:
+            if Next2FlashHandler._system_fonts_cache is None:
+                Next2FlashHandler._system_fonts_cache = _enumerate_system_fonts()
+            self._json_response(Next2FlashHandler._system_fonts_cache)
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_system_fonts: %s', e)
+            self._error_response(500, str(e))
+
+    def _handle_system_font_data(self):
+        """GET /api/system-font-data/<font_name> — Serve a system font's TTF bytes."""
+        try:
+            from urllib.parse import unquote
+            font_name = unquote(self.path.split('/api/system-font-data/', 1)[-1])
+            if not font_name:
+                return self._error_response(400, 'No font name provided')
+
+            # Find the font path from the cache
+            if Next2FlashHandler._system_fonts_cache is None:
+                Next2FlashHandler._system_fonts_cache = _enumerate_system_fonts()
+
+            font_path = None
+            for f in Next2FlashHandler._system_fonts_cache:
+                if f['name'] == font_name:
+                    font_path = f['path']
+                    break
+
+            if not font_path or not os.path.isfile(font_path):
+                return self._error_response(404, f'System font not found: {font_name}')
+
+            with open(font_path, 'rb') as fh:
+                data = fh.read()
+
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header('Content-Type', 'font/ttf')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_system_font_data: %s', e)
             self._error_response(500, str(e))
 
     def _handle_refresh_assets(self):
@@ -2032,7 +2278,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Requested-With")
         self.send_header("Access-Control-Expose-Headers",
-                         "X-N2D-Name, X-N2D-Libraries, X-N2D-Scripts, X-Project-Dir, X-Refreshed-Scripts, X-Refreshed-Bitmaps, X-Refreshed-Sounds")
+                         "X-N2D-Name, X-N2D-Libraries, X-N2D-Scripts, X-N2D-Fonts, X-N2D-Format, X-Project-Dir, X-Refreshed-Scripts, X-Refreshed-Bitmaps, X-Refreshed-Sounds")
 
     def _json_response(self, data, status=200):
         body = json.dumps(data).encode("utf-8")

@@ -434,6 +434,7 @@ class DefineAssetsStage(PipelineStage):
         temp_compiler._project_dir = ctx.project_dir
         temp_compiler._orig_to_new_id = ctx.orig_to_new_id
 
+        temp_compiler._embed_system_fonts()
         temp_compiler._define_all_assets()
 
         # Copy back modified state

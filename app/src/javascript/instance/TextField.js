@@ -1001,10 +1001,6 @@ class TextField extends Instance
             }
         }
 
-        if (!embeddedFonts.size) {
-            return;
-        }
-
         // Build set of existing option values
         const existingValues = new Set();
         for (let i = 0; i < fontSelect.options.length; ++i) {
@@ -1034,6 +1030,99 @@ class TextField extends Instance
             opt.textContent = "\u26A1 " + sorted[i];
             opt.dataset.embedded = "1";
             fontSelect.insertBefore(opt, fontSelect.firstChild);
+        }
+
+        // ── System fonts (loaded async, cached) ────────────────────
+        TextField._loadSystemFonts(fontSelect);
+    }
+
+    /**
+     * Fetch system fonts from the server and add them as an optgroup.
+     * The fetch is only done once; subsequent calls use the cached list.
+     *
+     * @param  {HTMLSelectElement} fontSelect
+     * @return {void}
+     * @method
+     * @static
+     */
+    static _loadSystemFonts (fontSelect)
+    {
+        // Already populated?
+        if (fontSelect.querySelector("optgroup[data-system]")) {
+            return;
+        }
+        // Already fetching or fetched?
+        if (TextField._systemFontsCache) {
+            TextField._populateSystemFonts(fontSelect, TextField._systemFontsCache);
+            return;
+        }
+        if (TextField._systemFontsFetching) {
+            return;
+        }
+        TextField._systemFontsFetching = true;
+
+        const base = location.origin;
+        fetch(base + "/api/system-fonts")
+            .then(function (r) { return r.json(); })
+            .then(function (fonts) {
+                TextField._systemFontsCache = fonts;
+                // Find all currently visible font-select elements
+                const sel = document.getElementById("font-select");
+                if (sel) {
+                    TextField._populateSystemFonts(sel, fonts);
+                }
+            })
+            .catch(function (e) {
+                console.warn("[N2F] Failed to load system fonts:", e);
+            })
+            .finally(function () {
+                TextField._systemFontsFetching = false;
+            });
+    }
+
+    /**
+     * Insert system fonts into the font-select dropdown as an optgroup.
+     *
+     * @param  {HTMLSelectElement} fontSelect
+     * @param  {Array}            fonts
+     * @return {void}
+     * @method
+     * @static
+     */
+    static _populateSystemFonts (fontSelect, fonts)
+    {
+        if (fontSelect.querySelector("optgroup[data-system]")) {
+            return;
+        }
+        if (!fonts || !fonts.length) {
+            return;
+        }
+
+        // Build existing values set to avoid duplicates
+        const existing = new Set();
+        for (let i = 0; i < fontSelect.options.length; ++i) {
+            existing.add(fontSelect.options[i].value);
+        }
+
+        const group = document.createElement("optgroup");
+        group.label = "\uD83D\uDCBB System Fonts";
+        group.dataset.system = "1";
+
+        let count = 0;
+        for (let i = 0; i < fonts.length; ++i) {
+            const name = fonts[i].name;
+            if (existing.has(name)) {
+                continue;
+            }
+            const opt = document.createElement("option");
+            opt.value = name;
+            opt.textContent = name;
+            opt.dataset.systemFont = "1";
+            group.appendChild(opt);
+            ++count;
+        }
+        if (count > 0) {
+            fontSelect.appendChild(group);
         }
     }
 }
