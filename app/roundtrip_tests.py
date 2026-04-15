@@ -1,6 +1,7 @@
 """Roundtrip all test SWFs and compare original vs output."""
 import os, struct, sys
 from swf_binary_io import BitReader
+from swf_shape_to_recodes import parse_define_shape_to_recodes
 
 def read_swf_tags(path):
     with open(path, 'rb') as f:
@@ -280,7 +281,7 @@ def compare_one(name, orig_path):
         orig_info = dump_shape_records(ob, ott)
         rt_info = dump_shape_records(rb, rtt)
         
-        # Compare
+        # Compare raw SWF records first
         diffs = []
         if orig_info.get('nfills') != rt_info.get('nfills'):
             diffs.append(f"fills {orig_info.get('nfills')}->{rt_info.get('nfills')}")
@@ -304,20 +305,33 @@ def compare_one(name, orig_path):
         if rec_diffs > 5:
             diffs.append(f"  ...and {rec_diffs-5} more record diffs")
         
-        status = "OK" if not diffs else "DIFF"
         tag_change = f" (tag {ott}->{rtt})" if ott != rtt else ""
-        print(f"  Shape[{i}] cid={orig_info['cid']}{tag_change}: {status}")
-        if diffs:
-            ok = False
-            for d in diffs:
-                print(f"    {d}")
-            # Show first few records side by side
-            print(f"    --- ORIG records (first 15) ---")
-            for r in orig_recs[:15]:
-                print(f"      {r}")
-            print(f"    --- RT records (first 15) ---")
-            for r in rt_recs[:15]:
-                print(f"      {r}")
+        
+        if not diffs:
+            print(f"  Shape[{i}] cid={orig_info['cid']}{tag_change}: OK")
+        else:
+            # Raw SWF records differ — check visual equivalence via N2D recodes
+            try:
+                orig_recodes, _, _ = parse_define_shape_to_recodes(ott, ob[2:], {})
+                rt_recodes, _, _ = parse_define_shape_to_recodes(rtt, rb[2:], {})
+                if orig_recodes == rt_recodes:
+                    print(f"  Shape[{i}] cid={orig_info['cid']}{tag_change}: OK (visual equiv)")
+                else:
+                    ok = False
+                    print(f"  Shape[{i}] cid={orig_info['cid']}{tag_change}: DIFF")
+                    for d in diffs:
+                        print(f"    {d}")
+                    print(f"    --- ORIG records (first 15) ---")
+                    for r in orig_recs[:15]:
+                        print(f"      {r}")
+                    print(f"    --- RT records (first 15) ---")
+                    for r in rt_recs[:15]:
+                        print(f"      {r}")
+            except Exception as e:
+                ok = False
+                print(f"  Shape[{i}] cid={orig_info['cid']}{tag_change}: DIFF (recode err: {e})")
+                for d in diffs:
+                    print(f"    {d}")
     
     return ok
 

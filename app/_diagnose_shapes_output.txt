@@ -1,0 +1,276 @@
+================================================================================
+TARGET SHAPES IN N2D
+================================================================================
+
+CID 183: NOT FOUND in N2D by swfCharId
+CID 185: NOT FOUND in N2D by swfCharId
+CID 188: NOT FOUND in N2D by swfCharId
+CID 306: NOT FOUND in N2D by swfCharId
+
+================================================================================
+TARGET SHAPES IN ORIGINAL SWF
+================================================================================
+
+CID 183: tag=2, size=51 bytes
+CID 185: tag=2, size=51 bytes
+CID 188: tag=2, size=46 bytes
+CID 306: tag=2, size=52 bytes
+
+================================================================================
+ALL SHAPE CIDS IN ROUNDTRIP (first 300)
+================================================================================
+
+Total shape tags in roundtrip: 209
+  CID 237: tag=83, size=70
+  CID 243: tag=32, size=42
+  CID 244: tag=32, size=39
+  CID 246: tag=32, size=66
+  CID 249: tag=32, size=40
+  CID 250: tag=32, size=40
+  CID 251: tag=32, size=40
+  CID 252: tag=32, size=40
+  CID 253: tag=32, size=40
+  CID 254: tag=32, size=40
+  CID 255: tag=32, size=40
+  CID 256: tag=32, size=83
+  CID 257: tag=32, size=83
+  CID 258: tag=32, size=83
+  CID 259: tag=32, size=83
+  CID 260: tag=32, size=83
+  CID 261: tag=32, size=83
+  CID 262: tag=32, size=40
+  CID 263: tag=32, size=40
+  CID 264: tag=32, size=40
+  CID 265: tag=32, size=40
+  CID 266: tag=32, size=40
+  CID 267: tag=32, size=40
+  CID 268: tag=32, size=40
+  CID 270: tag=32, size=40
+  CID 271: tag=32, size=40
+  CID 272: tag=32, size=40
+  CID 273: tag=32, size=40
+  CID 274: tag=32, size=39
+  CID 276: tag=32, size=40
+  CID 277: tag=32, size=40
+  CID 278: tag=32, size=40
+  CID 279: tag=32, size=40
+  CID 280: tag=32, size=39
+  CID 282: tag=32, size=68
+  CID 283: tag=32, size=68
+  CID 284: tag=32, size=68
+  CID 285: tag=32, size=68
+  CID 286: tag=32, size=65
+  CID 288: tag=32, size=774
+  CID 294: tag=83, size=154
+  CID 295: tag=83, size=122
+  CID 297: tag=83, size=70
+  CID 298: tag=83, size=70
+  CID 300: tag=32, size=76
+  CID 306: tag=32, size=40
+  CID 307: tag=32, size=40
+  CID 308: tag=32, size=40
+  CID 309: tag=32, size=40
+  CID 310: tag=32, size=40
+  CID 311: tag=32, size=40
+  CID 312: tag=32, size=40
+  CID 315: tag=32, size=45
+  CID 318: tag=83, size=46
+  CID 323: tag=83, size=118
+  CID 324: tag=83, size=213
+  CID 383: tag=32, size=40
+  CID 428: tag=32, size=101
+  CID 430: tag=32, size=46
+  CID 558: tag=32, size=40
+  CID 622: tag=32, size=41
+  CID 701: tag=32, size=39
+  CID 702: tag=32, size=39
+  CID 703: tag=32, size=39
+  CID 704: tag=32, size=39
+  CID 705: tag=32, size=39
+  CID 706: tag=32, size=39
+  CID 823: tag=32, size=128
+  CID 824: tag=32, size=170
+  CID 849: tag=32, size=44
+  CID 850: tag=32, size=44
+  CID 901: tag=32, size=3390
+  CID 903: tag=83, size=3711
+  CID 905: tag=32, size=2072
+  CID 907: tag=83, size=2984
+  CID 909: tag=83, size=3189
+  CID 911: tag=83, size=2854
+  CID 913: tag=83, size=7304
+  CID 915: tag=83, size=4551
+  CID 935: tag=83, size=460
+  CID 937: tag=83, size=255
+  CID 939: tag=83, size=625
+  CID 941: tag=83, size=205
+  CID 943: tag=83, size=441
+  CID 945: tag=83, size=272
+  CID 947: tag=83, size=391
+  CID 949: tag=83, size=279
+  CID 951: tag=32, size=1549
+  CID 953: tag=83, size=528
+  CID 955: tag=83, size=372
+  CID 957: tag=83, size=3183
+  CID 959: tag=83, size=271
+  CID 961: tag=83, size=6914
+  CID 963: tag=83, size=191
+  CID 965: tag=83, size=9075
+  CID 1023: tag=32, size=41
+  CID 1024: tag=32, size=41
+  CID 1025: tag=32, size=41
+  CID 1026: tag=32, size=41
+  CID 1027: tag=32, size=41
+  CID 1028: tag=32, size=41
+  CID 1029: tag=32, size=88
+  CID 1032: tag=32, size=41
+  CID 1033: tag=32, size=41
+  CID 1034: tag=32, size=39
+  CID 1036: tag=32, size=36
+  CID 1039: tag=32, size=106
+  CID 1041: tag=32, size=112
+  CID 1116: tag=32, size=44
+  CID 1122: tag=32, size=315
+  CID 1123: tag=32, size=352
+  CID 1124: tag=32, size=358
+  CID 1125: tag=32, size=412
+  CID 1128: tag=32, size=41
+  CID 1256: tag=32, size=44
+  CID 1259: tag=32, size=40
+  CID 1260: tag=32, size=40
+  CID 1261: tag=32, size=40
+  CID 1262: tag=32, size=40
+  CID 1264: tag=32, size=34
+  CID 1265: tag=32, size=40
+  CID 1266: tag=32, size=40
+  CID 1270: tag=32, size=116
+  CID 1295: tag=32, size=107
+  CID 1297: tag=32, size=127
+  CID 1341: tag=83, size=33
+  CID 1343: tag=32, size=188
+  CID 1414: tag=32, size=87
+  CID 1419: tag=32, size=98
+  CID 1420: tag=32, size=97
+  CID 1421: tag=32, size=98
+  CID 1422: tag=32, size=98
+  CID 1423: tag=32, size=98
+  CID 1424: tag=32, size=99
+  CID 1425: tag=32, size=98
+  CID 1426: tag=32, size=97
+  CID 1427: tag=32, size=97
+  CID 1428: tag=32, size=98
+  CID 1429: tag=32, size=98
+  CID 1430: tag=32, size=94
+  CID 1432: tag=32, size=71
+  CID 1437: tag=32, size=39
+  CID 1438: tag=32, size=39
+  CID 1439: tag=32, size=39
+  CID 1440: tag=32, size=39
+  CID 1442: tag=32, size=36
+  CID 1444: tag=32, size=93
+  CID 1480: tag=32, size=50
+  CID 1484: tag=32, size=38
+  CID 1489: tag=32, size=41
+  CID 1494: tag=32, size=44
+  CID 1511: tag=32, size=106
+  CID 1513: tag=32, size=112
+  CID 1550: tag=83, size=52
+  CID 1553: tag=32, size=32
+  CID 1620: tag=32, size=41
+  CID 1621: tag=32, size=42
+  CID 1622: tag=32, size=42
+  CID 1623: tag=32, size=42
+  CID 1624: tag=32, size=42
+  CID 1625: tag=32, size=42
+  CID 1626: tag=32, size=41
+  CID 1627: tag=32, size=41
+  CID 1628: tag=32, size=42
+  CID 1629: tag=32, size=42
+  CID 1630: tag=32, size=42
+  CID 1631: tag=32, size=42
+  CID 1632: tag=32, size=42
+  CID 1633: tag=32, size=42
+  CID 1634: tag=32, size=42
+  CID 1635: tag=32, size=42
+  CID 1636: tag=32, size=42
+  CID 1637: tag=32, size=42
+  CID 1638: tag=32, size=49
+  CID 1648: tag=32, size=44
+  CID 1649: tag=32, size=42
+  CID 1650: tag=32, size=42
+  CID 1651: tag=32, size=42
+  CID 1652: tag=32, size=43
+  CID 1653: tag=32, size=43
+  CID 1654: tag=32, size=43
+  CID 1655: tag=32, size=43
+  CID 1656: tag=32, size=43
+  CID 1657: tag=32, size=43
+  CID 1658: tag=32, size=42
+  CID 1659: tag=32, size=42
+  CID 1660: tag=32, size=41
+  CID 1661: tag=32, size=42
+  CID 1662: tag=32, size=103
+  CID 1666: tag=32, size=89
+  CID 1668: tag=32, size=41
+  CID 1670: tag=32, size=41
+  CID 1671: tag=32, size=41
+  CID 1673: tag=32, size=84
+  CID 1675: tag=32, size=80
+  CID 1677: tag=32, size=84
+  CID 1679: tag=32, size=80
+  CID 1681: tag=32, size=84
+  CID 1683: tag=32, size=84
+  CID 1685: tag=32, size=84
+  CID 1687: tag=32, size=84
+  CID 1689: tag=32, size=82
+  CID 1691: tag=83, size=173
+  CID 1693: tag=32, size=63
+  CID 1695: tag=32, size=39
+  CID 1697: tag=32, size=52
+  CID 1698: tag=32, size=52
+  CID 1699: tag=32, size=40
+  CID 1701: tag=32, size=31
+
+================================================================================
+N2D LIB SCAN - Finding shapes near target CIDs
+================================================================================
+
+
+================================================================================
+CID PRESERVATION CHECK
+================================================================================
+
+  Orig CID 126 (tag=2, size=54): in RT=NO  
+  Orig CID 129 (tag=2, size=51): in RT=NO  
+  Orig CID 133 (tag=2, size=48): in RT=NO  
+  Orig CID 136 (tag=2, size=60): in RT=NO  
+  Orig CID 139 (tag=2, size=49): in RT=NO  
+  Orig CID 141 (tag=2, size=49): in RT=NO  
+  Orig CID 143 (tag=2, size=49): in RT=NO  
+  Orig CID 145 (tag=2, size=49): in RT=NO  
+  Orig CID 150 (tag=32, size=71): in RT=NO  
+  Orig CID 154 (tag=32, size=87): in RT=NO  
+  Orig CID 159 (tag=83, size=123): in RT=NO  
+  Orig CID 160 (tag=2, size=188): in RT=NO  
+  Orig CID 162 (tag=83, size=219): in RT=NO  
+  Orig CID 169 (tag=83, size=46): in RT=NO  
+  Orig CID 172 (tag=2, size=55): in RT=NO  
+  Orig CID 173 (tag=32, size=112): in RT=NO  
+  Orig CID 175 (tag=32, size=106): in RT=NO  
+  Orig CID 181 (tag=2, size=49): in RT=NO  
+  Orig CID 183 (tag=2, size=51): in RT=NO  
+  Orig CID 185 (tag=2, size=51): in RT=NO  
+
+  Original CID range: 126 - 1696
+  Roundtrip CID range: 237 - 1701
+  Original count: 209
+  Roundtrip count: 209
+
+================================================================================
+CHECKING ALL TAG TYPES FOR TARGET CIDS IN ROUNDTRIP
+================================================================================
+
+CID 183: Found as tag type 36, size=1152
+CID 185: Found as tag type 36, size=1374
+CID 188: Found as tag type 36, size=1376
+CID 306: Found as tag type 32, size=40

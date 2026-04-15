@@ -691,10 +691,15 @@ def _write_fill_style_array(out: io.BytesIO, fill_styles: list, version: int = 3
 
         elif isinstance(fs, BitmapFill):
             # Choose fill type based on repeat + smoothing
+            # SWF fill types:
+            #   0x40 = repeating bitmap, smoothed
+            #   0x41 = clipped bitmap, smoothed
+            #   0x42 = repeating bitmap, non-smoothed (SWF 8+)
+            #   0x43 = clipped bitmap, non-smoothed (SWF 8+)
             if fs.repeat:
-                fill_type = 0x40 if fs.smooth else 0x41
+                fill_type = 0x40 if fs.smooth else 0x42
             else:
-                fill_type = 0x42 if fs.smooth else 0x43
+                fill_type = 0x41 if fs.smooth else 0x43
             out.write(struct.pack("<B", fill_type))
             # BitmapId — use assigned char ID if available, else placeholder
             bmp_id = fs.bitmap_char_id if fs.bitmap_char_id else 0xFFFF
@@ -846,13 +851,16 @@ def _encode_shape_records(
     bw.write_ub(4, num_line_bits)
 
     prev_x, prev_y = 0, 0
+    cur_fill1 = 0  # track active fill1 state (SWF styles are incremental)
+    cur_line = 0   # track active line state
 
     for sp in sub_paths:
         # Style change record to set position and styles
         has_move = True  # always set initial move
         has_fill0 = False
-        has_fill1 = sp.fill_style_idx > 0   # fill1 = left-side fill (interior for CW paths)
-        has_line = sp.line_style_idx > 0
+        # Emit fill1/line when the value changes (including clearing to 0)
+        has_fill1 = sp.fill_style_idx != cur_fill1
+        has_line = sp.line_style_idx != cur_line
         has_new_styles = False
 
         # Find the first coordinate
@@ -892,8 +900,10 @@ def _encode_shape_records(
             bw.write_ub(num_fill_bits, 0)
         if has_fill1:
             bw.write_ub(num_fill_bits, sp.fill_style_idx)
+            cur_fill1 = sp.fill_style_idx
         if has_line:
             bw.write_ub(num_line_bits, sp.line_style_idx)
+            cur_line = sp.line_style_idx
 
         # Write edges
         for edge in sp.edges:

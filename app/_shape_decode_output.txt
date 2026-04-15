@@ -1,0 +1,110 @@
+
+======================================================================
+  ORIGINAL SHAPE CID 183
+======================================================================
+
+  CharID: 183
+  Tag: 2, Version: 1
+  Bounds: {'xMin': -42.4, 'xMax': 55.25, 'yMin': -73.5, 'yMax': 75.0}
+  FillStyles (2):
+    [1] {'type': 'bitmap', 'bitmapId': 65535, 'matrix': {'sx': 20.0, 'sy': 20.0, 'r0': 0.0, 'r1': 0.0, 'tx': 0, 'ty': 0}, 'repeat': 'no-repeat', 'smooth': True, 'fillType': '0x41'}
+    [2] {'type': 'bitmap', 'bitmapId': 182, 'matrix': {'sx': 27.50244140625, 'sy': 27.50244140625, 'r0': 0.0, 'r1': 0.0, 'tx': 0, 'ty': 0}, 'repeat': 'no-repeat', 'smooth': True, 'fillType': '0x41'}
+  LineStyles (203):
+    [1] {'width': 845.3, 'color': (0, 32, 21, 255)}
+    [2] {'width': 1249.25, 'color': (72, 87, 67, 255)}
+    [3] {'width': 3159.2, 'color': (174, 107, 162, 255)}
+    [4] {'width': 3213.95, 'color': (104, 204, 0, 255)}
+  DECODE ERROR: unpack_from requires a buffer of at least 53 bytes for unpacking 2 bytes at offset 51 (actual buffer size is 51)
+Traceback (most recent call last):
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 339, in <module>
+    decode_shape(tag_type, body, f)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 227, in decode_shape
+    line = read_line_style(br, version)
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 163, in read_line_style
+    width = br.read_ui16() / 20.0
+            ~~~~~~~~~~~~^^
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 80, in read_ui16
+    val = struct.unpack_from('<H', self.data, byte_idx)[0]
+          ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+struct.error: unpack_from requires a buffer of at least 53 bytes for unpacking 2 bytes at offset 51 (actual buffer size is 51)
+
+======================================================================
+  ORIGINAL SHAPE CID 185
+======================================================================
+
+  CharID: 185
+  Tag: 2, Version: 1
+  Bounds: {'xMin': -63.05, 'xMax': 78.6, 'yMin': -61.15, 'yMax': 79.1}
+  FillStyles (2):
+    [1] {'type': 'bitmap', 'bitmapId': 65535, 'matrix': {'sx': 20.0, 'sy': 20.0, 'r0': 0.0, 'r1': 0.0, 'tx': 0, 'ty': 0}, 'repeat': 'no-repeat', 'smooth': True, 'fillType': '0x41'}
+    [2] {'type': 'bitmap', 'bitmapId': 184, 'matrix': {'sx': 27.50244140625, 'sy': 27.50244140625, 'r0': 0.0, 'r1': 0.0, 'tx': 0, 'ty': 0}, 'repeat': 'no-repeat', 'smooth': True, 'fillType': '0x41'}
+  LineStyles (177):
+    [1] {'width': 732.55, 'color': (0, 32, 21, 255)}
+    [2] {'width': 506.7, 'color': (103, 55, 98, 255)}
+    [3] {'width': 1584.2, 'color': (85, 235, 217, 255)}
+    [4] {'width': 3255.1, 'color': (218, 133, 128, 255)}
+  DECODE ERROR: unpack_from requires a buffer of at least 53 bytes for unpacking 2 bytes at offset 51 (actual buffer size is 51)
+Traceback (most recent call last):
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 339, in <module>
+    decode_shape(tag_type, body, f)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 227, in decode_shape
+    line = read_line_style(br, version)
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 163, in read_line_style
+    width = br.read_ui16() / 20.0
+            ~~~~~~~~~~~~^^
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 80, in read_ui16
+    val = struct.unpack_from('<H', self.data, byte_idx)[0]
+          ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+struct.error: unpack_from requires a buffer of at least 53 bytes for unpacking 2 bytes at offset 51 (actual buffer size is 51)
+
+======================================================================
+  ORIGINAL SHAPE CID 188
+======================================================================
+
+  CharID: 188
+  Tag: 2, Version: 1
+  Bounds: {'xMin': 0.0, 'xMax': 125.15, 'yMin': 0.0, 'yMax': 121.0}
+  FillStyles (2):
+    [1] {'type': 'bitmap', 'bitmapId': 65535, 'matrix': {'sx': 20.0, 'sy': 20.0, 'r0': 0.0, 'r1': 0.0, 'tx': 0, 'ty': 0}, 'repeat': 'no-repeat', 'smooth': True, 'fillType': '0x41'}
+    [2] {'type': 'bitmap', 'bitmapId': 187, 'matrix': {'sx': 27.50244140625, 'sy': 27.50244140625, 'r0': 0.0, 'r1': 0.0, 'tx': 0, 'ty': 0}, 'repeat': 'no-repeat', 'smooth': True, 'fillType': '0x41'}
+  LineStyles (0):
+  NumFillBits=2, NumLineBits=0
+  Shape Records:
+    StyleChange: fill1=2
+    Line: dx=125.15 dy=0.00 → (125.15,0.00)
+    Line: dx=0.00 dy=121.00 → (125.15,121.00)
+    Line: dx=-125.15 dy=0.00 → (0.00,121.00)
+    Line: dx=0.00 dy=-121.00 → (0.00,0.00)
+    EndShape
+
+======================================================================
+  ORIGINAL SHAPE CID 306
+======================================================================
+
+  CharID: 306
+  Tag: 2, Version: 1
+  Bounds: {'xMin': -27.0, 'xMax': 80.25, 'yMin': -12.0, 'yMax': 134.25}
+  FillStyles (2):
+    [1] {'type': 'bitmap', 'bitmapId': 65535, 'matrix': {'sx': 20.0, 'sy': 20.0, 'r0': 0.0, 'r1': 0.0, 'tx': 0, 'ty': 0}, 'repeat': 'no-repeat', 'smooth': True, 'fillType': '0x41'}
+    [2] {'type': 'bitmap', 'bitmapId': 305, 'matrix': {'sx': 12.99957275390625, 'sy': 12.99957275390625, 'r0': 0.0, 'r1': 0.0, 'tx': 0, 'ty': 0}, 'repeat': 'no-repeat', 'smooth': True, 'fillType': '0x41'}
+  LineStyles (242):
+    [1] {'width': 5.65, 'color': (0, 32, 21, 255)}
+    [2] {'width': 1887.55, 'color': (136, 93, 136, 255)}
+    [3] {'width': 3038.45, 'color': (91, 111, 101, 255)}
+    [4] {'width': 3224.35, 'color': (105, 38, 0, 255)}
+  DECODE ERROR: unpack_from requires a buffer of at least 54 bytes for unpacking 2 bytes at offset 52 (actual buffer size is 52)
+Traceback (most recent call last):
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 339, in <module>
+    decode_shape(tag_type, body, f)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 227, in decode_shape
+    line = read_line_style(br, version)
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 163, in read_line_style
+    width = br.read_ui16() / 20.0
+            ~~~~~~~~~~~~^^
+  File "C:\Users\glwex\Documents\GitHub\Next2Flash\app\_decode_shapes.py", line 80, in read_ui16
+    val = struct.unpack_from('<H', self.data, byte_idx)[0]
+          ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+struct.error: unpack_from requires a buffer of at least 54 bytes for unpacking 2 bytes at offset 52 (actual buffer size is 52)
