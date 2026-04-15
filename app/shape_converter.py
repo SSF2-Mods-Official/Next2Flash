@@ -20,7 +20,7 @@ from swf_constants import (
     ShapeCommand, CMD_MOVE_TO, CMD_CURVE_TO, CMD_LINE_TO, CMD_CUBIC, CMD_ARC,
     CMD_FILL_STYLE, CMD_STROKE_STYLE, CMD_END_FILL, CMD_END_STROKE, CMD_BEGIN_PATH,
     CMD_GRADIENT_FILL, CMD_GRADIENT_STROKE, CMD_CLOSE_PATH, CMD_BITMAP_FILL, CMD_BITMAP_STROKE,
-    TAG_DEFINE_SHAPE3, TAG_DEFINE_SHAPE4, TAG_DEFINE_MORPH_SHAPE
+    TAG_DEFINE_SHAPE3, TAG_DEFINE_SHAPE4, TAG_DEFINE_MORPH_SHAPE, TAG_DEFINE_MORPH_SHAPE2
 )
 from swf_writer import (
     build_tag,
@@ -60,10 +60,10 @@ class GradientFill:
 
 
 class BitmapFill:
-    __slots__ = ('width', 'height', 'pixel_data', 'matrix', 'repeat', 'smooth', 'bitmap_char_id')
+    __slots__ = ('width', 'height', 'pixel_data', 'matrix', 'repeat', 'smooth', 'bitmap_char_id', 'bitmap_lib_id')
     def __init__(self, width: int, height: int, pixel_data: bytes,
                  matrix: List[float], repeat: bool, smooth: bool,
-                 bitmap_char_id: int = 0):
+                 bitmap_char_id: int = 0, bitmap_lib_id: int = 0):
         self.width = width
         self.height = height
         self.pixel_data = pixel_data
@@ -71,6 +71,7 @@ class BitmapFill:
         self.repeat = repeat
         self.smooth = smooth
         self.bitmap_char_id = bitmap_char_id  # SWF character ID, set later
+        self.bitmap_lib_id = bitmap_lib_id    # N2D library ID for resolution
 
 
 class LineStyle:
@@ -120,13 +121,15 @@ class SubPath:
     """
     A sequence of edges sharing the same fill/stroke style.
     """
-    __slots__ = ('fill_style_idx', 'line_style_idx', 'edges', 'start_x', 'start_y')
+    __slots__ = ('fill_style_idx', 'line_style_idx', 'edges', 'start_x', 'start_y',
+                 '_morph_use_fill0')
     def __init__(self):
         self.fill_style_idx: int = 0    # 1-based index (0 = none)
         self.line_style_idx: int = 0    # 1-based index (0 = none)
         self.edges: List[EdgeRecord] = []
         self.start_x: float = 0.0
         self.start_y: float = 0.0
+        self._morph_use_fill0: bool = False
 
 
 # ── Rich format helpers (string → int conversion) ───────────────────────
@@ -179,20 +182,25 @@ def _parse_rich_stops(stops_list: list) -> List[GradientStop]:
     return result
 
 
-def _parse_bitmap_data(val) -> Tuple[int, int, bytes]:
-    """Extract (width, height, pixel_data) from an embedded bitmap dict
-    or return a placeholder for integer bitmap refs."""
+def _parse_bitmap_data(val) -> Tuple[int, int, bytes, int]:
+    """Extract (width, height, pixel_data, bitmap_lib_id) from an embedded
+    bitmap dict or return a placeholder for integer bitmap refs."""
     if isinstance(val, dict):
         w = int(val.get('width', 1))
         h = int(val.get('height', 1))
         buf = val.get('buffer', [])
         if isinstance(buf, str):
             pixel_data = bytes(ord(c) for c in buf)
+        elif isinstance(buf, (bytes, bytearray)):
+            pixel_data = bytes(buf)
         else:
             pixel_data = bytes(int(b) for b in buf)
-        return w, h, pixel_data
-    # Integer bitmap reference — no pixel data available; placeholder
-    return 1, 1, b'\x00\x00\x00\xff'
+        lib_id = int(val.get('bitmapId', 0))
+        return w, h, pixel_data, lib_id
+    # Integer bitmap reference — store library ID for later resolution
+    if isinstance(val, (int, float)):
+        return 1, 1, b'\x00\x00\x00\xff', int(val)
+    return 1, 1, b'\x00\x00\x00\xff', 0
 
 
 def _to_repeat(v) -> bool:
@@ -276,7 +284,7 @@ def parse_next2d_shape_buffer(buf: List) -> Tuple[List, List, List[SubPath]]:
             val = buf[i]
             if isinstance(val, dict) or (isinstance(val, (int, float)) and i + 1 < len(buf) and isinstance(buf[i + 1], list)):
                 # Rich format: [{buffer,width,height} or bmp_id, [matrix], repeat_str, smooth_bool]
-                w, h, pixel_data = _parse_bitmap_data(val); i += 1
+                w, h, pixel_data, bmp_lib_id = _parse_bitmap_data(val); i += 1
                 mat = list(buf[i]); i += 1
                 repeat = _to_repeat(buf[i]); i += 1
                 smooth = bool(buf[i]); i += 1
@@ -289,7 +297,8 @@ def parse_next2d_shape_buffer(buf: List) -> Tuple[List, List, List[SubPath]]:
                 mat = [buf[i+j] for j in range(6)]; i += 6
                 repeat = bool(buf[i]); i += 1
                 smooth = bool(buf[i]); i += 1
-            fill_styles.append(BitmapFill(w, h, pixel_data, mat, repeat, smooth))
+                bmp_lib_id = 0
+            fill_styles.append(BitmapFill(w, h, pixel_data, mat, repeat, smooth, bitmap_lib_id=bmp_lib_id))
             cur_fill_idx = len(fill_styles)
             if cur_path is not None:
                 cur_path.fill_style_idx = cur_fill_idx
@@ -607,6 +616,53 @@ def build_define_shape3(
     return build_tag(TAG_DEFINE_SHAPE3, body.getvalue())
 
 
+def build_define_shape4(
+    shape_id: int,
+    fill_styles: list,
+    line_styles: list,
+    sub_paths: List[SubPath],
+    bounds: Optional[dict] = None,
+) -> bytes:
+    """Build a DefineShape4 tag from parsed shape data.
+
+    DefineShape4 extends DefineShape3 with:
+      - An additional EdgeBounds RECT (same as shape bounds here)
+      - A flags byte (UsesFillWindingRule, UsesNonScalingStrokes, etc.)
+      - LINESTYLE2 records (caps, joins, miter limit, fill for strokes)
+    """
+    log.debug("build_define_shape4: shape_id=%d fills=%d lines=%d paths=%d",
+              shape_id, len(fill_styles), len(line_styles), len(sub_paths))
+    if bounds:
+        xmin = twips(bounds.get("xMin", 0))
+        xmax = twips(bounds.get("xMax", 0))
+        ymin = twips(bounds.get("yMin", 0))
+        ymax = twips(bounds.get("yMax", 0))
+    else:
+        xmin, ymin = 0, 0
+        xmax, ymax = twips(100), twips(100)
+
+    body = io.BytesIO()
+    body.write(struct.pack("<H", shape_id))
+    body.write(write_rect(xmin, xmax, ymin, ymax))   # ShapeBounds
+    body.write(write_rect(xmin, xmax, ymin, ymax))   # EdgeBounds (same)
+
+    # Flags: bit 0 = UsesFillWindingRule, bit 1 = UsesNonScalingStrokes,
+    #         bit 2 = UsesScalingStrokes
+    body.write(struct.pack("<B", 0x04))  # UsesScalingStrokes = true
+
+    # ─ Fill styles ─
+    _write_fill_style_array(body, fill_styles, version=4)
+
+    # ─ Line styles (LINESTYLE2 for DefineShape4) ─
+    _write_line_style2_array(body, line_styles)
+
+    # ─ Shape records ─
+    shape_data = _encode_shape_records(fill_styles, line_styles, sub_paths)
+    body.write(shape_data)
+
+    return build_tag(TAG_DEFINE_SHAPE4, body.getvalue())
+
+
 def _write_fill_style_array(out: io.BytesIO, fill_styles: list, version: int = 3) -> None:
     """Write FILLSTYLEARRAY."""
     count = len(fill_styles)
@@ -643,7 +699,24 @@ def _write_fill_style_array(out: io.BytesIO, fill_styles: list, version: int = 3
             # BitmapId — use assigned char ID if available, else placeholder
             bmp_id = fs.bitmap_char_id if fs.bitmap_char_id else 0xFFFF
             out.write(struct.pack("<H", bmp_id))
-            _write_gradient_matrix(out, fs.matrix)
+            _write_bitmap_matrix(out, fs.matrix)
+
+
+def _write_bitmap_matrix(out: io.BytesIO, matrix: List[float]) -> None:
+    """Write a MATRIX for a bitmap fill, converting pixel-space scale back to twips.
+
+    During import, bitmap fill matrices have their scale/rotate components
+    divided by 20 (twips→pixels).  We reverse that here (* 20) so the SWF
+    matrix is correct.
+    """
+    from swf_writer import write_matrix
+    a = (matrix[0] if len(matrix) > 0 else 1.0) * 20.0
+    b = (matrix[1] if len(matrix) > 1 else 0.0) * 20.0
+    c = (matrix[2] if len(matrix) > 2 else 0.0) * 20.0
+    d = (matrix[3] if len(matrix) > 3 else 1.0) * 20.0
+    tx = matrix[4] if len(matrix) > 4 else 0.0
+    ty = matrix[5] if len(matrix) > 5 else 0.0
+    out.write(write_matrix(a, b, c, d, tx, ty))
 
 
 def _write_gradient_matrix(out: io.BytesIO, matrix: List[float]) -> None:
@@ -702,6 +775,60 @@ def _write_line_style_array(out: io.BytesIO, line_styles: list, version: int = 3
             out.write(struct.pack("<BBBB", 0, 0, 0, 255))
 
 
+def _write_line_style2_array(out: io.BytesIO, line_styles: list) -> None:
+    """Write LINESTYLE2ARRAY for DefineShape4.
+
+    LINESTYLE2 adds StartCapStyle, JoinStyle, EndCapStyle, miter limit,
+    and the ability to fill a stroke with a gradient or bitmap.
+    """
+    count = len(line_styles)
+    if count < 0xFF:
+        out.write(struct.pack("<B", count))
+    else:
+        out.write(struct.pack("<BH", 0xFF, count))
+
+    # Cap/Join maps: Next2D values → SWF encoding
+    CAP_MAP = {'round': 0, 'none': 1, 'square': 2}
+    JOIN_MAP = {'round': 0, 'bevel': 1, 'miter': 2}
+
+    for ls in line_styles:
+        width_twips = max(twips(ls.thickness), 1) if isinstance(ls, (LineStyle, GradientLineStyle)) else 20
+        out.write(struct.pack("<H", width_twips))
+
+        cap_val = CAP_MAP.get(getattr(ls, 'cap', 'round'), 0)
+        join_val = JOIN_MAP.get(getattr(ls, 'join', 'round'), 0)
+        miter_val = getattr(ls, 'miter_limit', 3.0) if isinstance(ls, LineStyle) else 3.0
+        has_fill = isinstance(ls, GradientLineStyle)
+
+        # LINESTYLE2 flags packed in 2 bytes (big-endian bit layout):
+        # StartCapStyle(2) | JoinStyle(2) | HasFillFlag(1) |
+        # NoHScaleFlag(1) | NoVScaleFlag(1) | PixelHintingFlag(1) |
+        # Reserved(5) | NoClose(1) | EndCapStyle(2)
+        flags = 0
+        flags |= (cap_val & 0x3) << 14     # StartCapStyle
+        flags |= (join_val & 0x3) << 12    # JoinStyle
+        flags |= (1 if has_fill else 0) << 11  # HasFillFlag
+        flags |= (cap_val & 0x3)           # EndCapStyle (same as start)
+        out.write(struct.pack(">H", flags))
+
+        if join_val == 2:  # Miter join → write MiterLimitFactor (FIXED 16.16)
+            out.write(struct.pack("<I", int(miter_val * 65536)))
+
+        if has_fill:
+            # Write fill style for gradient stroke
+            gf = ls.gradient_fill
+            if gf.grad_type == 0:
+                out.write(struct.pack("<B", 0x10))
+            else:
+                out.write(struct.pack("<B", 0x12))
+            _write_gradient_matrix(out, gf.matrix)
+            _write_gradient(out, gf, 4)
+        else:
+            # Solid colour fill
+            r, g, b, a = (ls.r, ls.g, ls.b, ls.a) if isinstance(ls, LineStyle) else (0, 0, 0, 255)
+            out.write(struct.pack("<BBBB", r, g, b, a))
+
+
 def _encode_shape_records(
     fill_styles: list,
     line_styles: list,
@@ -735,8 +862,6 @@ def _encode_shape_records(
 
         move_x_tw = twips(move_x)
         move_y_tw = twips(move_y)
-        dx = move_x_tw - prev_x
-        dy = move_y_tw - prev_y
 
         # Non-edge record (bit 0 = 0)
         bw.write_ub(1, 0)
@@ -756,10 +881,11 @@ def _encode_shape_records(
         bw.write_ub(5, flags)
 
         if has_move:
-            move_bits = max(_nbits_signed_list([dx, dy]), 1)
+            # SWF MoveDeltaX/Y are absolute coords (not deltas from prev)
+            move_bits = max(_nbits_signed_list([move_x_tw, move_y_tw]), 1)
             bw.write_ub(5, move_bits)
-            bw.write_sb(move_bits, dx)
-            bw.write_sb(move_bits, dy)
+            bw.write_sb(move_bits, move_x_tw)
+            bw.write_sb(move_bits, move_y_tw)
             prev_x, prev_y = move_x_tw, move_y_tw
 
         if has_fill0:
@@ -775,16 +901,15 @@ def _encode_shape_records(
                 # Emit a StyleChange with MoveTo only
                 ex = twips(edge.x)
                 ey = twips(edge.y)
-                edx = ex - prev_x
-                edy = ey - prev_y
-                if edx == 0 and edy == 0:
+                if ex == prev_x and ey == prev_y:
                     continue
                 bw.write_ub(1, 0)  # non-edge
                 bw.write_ub(5, 0x01)  # StateMoveTo only
-                mbits = max(_nbits_signed_list([edx, edy]), 1)
+                # SWF MoveDeltaX/Y are absolute coords (not deltas)
+                mbits = max(_nbits_signed_list([ex, ey]), 1)
                 bw.write_ub(5, mbits)
-                bw.write_sb(mbits, edx)
-                bw.write_sb(mbits, edy)
+                bw.write_sb(mbits, ex)
+                bw.write_sb(mbits, ey)
                 prev_x, prev_y = ex, ey
 
             elif isinstance(edge, LineToEdge):
@@ -926,16 +1051,162 @@ def _write_morph_line_style_array(
         out.write(struct.pack("<BBBB", er, eg, eb, ea))  # end RGBA
 
 
+def _write_morph_line_style2_array(
+    out: io.BytesIO,
+    start_lines: list,
+    end_lines: list,
+) -> None:
+    """Write MORPHLINESTYLE2ARRAY for DefineMorphShape2.
+
+    MORPHLINESTYLE2 extends MORPHLINESTYLE with caps, joins, miter limit,
+    and optional fill-based strokes (gradient/bitmap).
+    """
+    count = len(start_lines)
+    if count < 0xFF:
+        out.write(struct.pack("<B", count))
+    else:
+        out.write(struct.pack("<BH", 0xFF, count))
+
+    CAP_MAP = {'round': 0, 'none': 1, 'square': 2}
+    JOIN_MAP = {'round': 0, 'bevel': 1, 'miter': 2}
+
+    for i in range(count):
+        sl = start_lines[i]
+        el = end_lines[i] if i < len(end_lines) else sl
+
+        sw = max(twips(sl.thickness), 0) if isinstance(sl, LineStyle) else 0
+        ew = max(twips(el.thickness), 0) if isinstance(el, LineStyle) else 0
+        out.write(struct.pack("<H", sw))  # StartWidth
+        out.write(struct.pack("<H", ew))  # EndWidth
+
+        cap_val = CAP_MAP.get(getattr(sl, 'cap', 'round'), 0)
+        join_val = JOIN_MAP.get(getattr(sl, 'join', 'round'), 0)
+        has_fill = isinstance(sl, GradientLineStyle)
+
+        # MORPHLINESTYLE2 flags (big-endian 2 bytes):
+        # StartCapStyle(2) | JoinStyle(2) | HasFillFlag(1) |
+        # NoHScaleFlag(1) | NoVScaleFlag(1) | PixelHintingFlag(1) |
+        # Reserved(5) | NoClose(1) | EndCapStyle(2)
+        flags = 0
+        flags |= (cap_val & 0x3) << 14
+        flags |= (join_val & 0x3) << 12
+        flags |= (1 if has_fill else 0) << 11
+        flags |= (cap_val & 0x3)  # EndCapStyle = StartCapStyle
+        out.write(struct.pack(">H", flags))
+
+        if join_val == 2:  # Miter → MiterLimitFactor FIXED 16.16
+            out.write(struct.pack("<I", int(getattr(sl, 'miter_limit', 3.0) * 65536)))
+
+        if has_fill:
+            # Write start fill style + end fill style for gradient stroke
+            gf = sl.gradient_fill
+            if gf.grad_type == 0:
+                out.write(struct.pack("<B", 0x10))
+            else:
+                out.write(struct.pack("<B", 0x12))
+            _write_gradient_matrix(out, gf.matrix)
+            _write_gradient(out, gf, 4)
+            # End fill style (same type, simple RGBA fallback)
+            egf = el.gradient_fill if isinstance(el, GradientLineStyle) and el.gradient_fill else gf
+            if egf.grad_type == 0:
+                out.write(struct.pack("<B", 0x10))
+            else:
+                out.write(struct.pack("<B", 0x12))
+            _write_gradient_matrix(out, egf.matrix)
+            _write_gradient(out, egf, 4)
+        else:
+            sr, sg, sb, sa = (sl.r, sl.g, sl.b, sl.a) if isinstance(sl, LineStyle) else (0, 0, 0, 0)
+            er, eg, eb, ea = (el.r, el.g, el.b, el.a) if isinstance(el, LineStyle) else (0, 0, 0, 0)
+            out.write(struct.pack("<BBBB", sr, sg, sb, sa))  # StartColor RGBA
+            out.write(struct.pack("<BBBB", er, eg, eb, ea))  # EndColor RGBA
+
+
+def _morph_collapse_fill_merge(sub_paths: List[SubPath]) -> Tuple[List[SubPath], bool]:
+    """Undo the fill_merge transformation for morph shape paths.
+
+    The _fill_merge in swf_shape_to_recodes reverses fill0 edges and merges
+    them into fill1, creating two sub_paths from one:
+      Path A: fill only (reversed edges, CW)
+      Path B: fill + line (original edges, CCW)
+    Both paths get fill1, which causes fill cancellation via winding rules
+    when rendered in Flash Player → morph appears blank.
+
+    This function detects that pattern and collapses back into a single
+    sub_path using fill0 convention (the original SWF representation).
+
+    Returns (collapsed_paths, did_collapse).
+    """
+    if len(sub_paths) < 2:
+        return sub_paths, False
+
+    result = []
+    used = set()
+    collapsed = False
+
+    for i in range(len(sub_paths)):
+        if i in used:
+            continue
+        a = sub_paths[i]
+        matched = False
+
+        # Look for the fill_merge pattern: fill-only path + line path
+        # Pattern 1 (gradient fill): both paths have same fill_style_idx
+        #   Path A: fill=N line=0; Path B: fill=N line=M
+        # Pattern 2 (solid fill with END_FILL): Path B lost its fill
+        #   Path A: fill=N line=0; Path B: fill=0 line=M
+        if a.fill_style_idx > 0 and a.line_style_idx == 0:
+            for j in range(i + 1, len(sub_paths)):
+                if j in used:
+                    continue
+                b = sub_paths[j]
+                if (b.line_style_idx > 0 and
+                        (b.fill_style_idx == a.fill_style_idx or
+                         b.fill_style_idx == 0)):
+                    # Found the pair: keep B (the line path with original
+                    # edge direction), restore fill from A, mark for fill0.
+                    new_sp = SubPath()
+                    new_sp.fill_style_idx = a.fill_style_idx
+                    new_sp.line_style_idx = b.line_style_idx
+                    new_sp.start_x = b.start_x
+                    new_sp.start_y = b.start_y
+                    new_sp.edges = b.edges
+                    new_sp._morph_use_fill0 = True  # type: ignore[attr-defined]
+                    result.append(new_sp)
+                    used.add(i)
+                    used.add(j)
+                    matched = True
+                    collapsed = True
+                    break
+
+        if not matched:
+            result.append(a)
+            used.add(i)
+
+    return result, collapsed
+
+
 def _encode_morph_shape_edges(
     fill_styles: list,
     line_styles: list,
     sub_paths: List[SubPath],
+    is_end_state: bool = False,
 ) -> bytes:
-    """Encode shape records for one half of a morph shape (start or end)."""
+    """Encode shape records for one half of a morph shape (start or end).
+
+    Per the SWF spec, end-state edges must have NumFillBits=0 and
+    NumLineBits=0 — only geometry (MoveTo + edges), no fill/line
+    style change records.  Flash Player pairs end edges with start
+    edges' style assignments implicitly.
+    """
     bw = BitWriter()
 
-    num_fill_bits = fill_styles and max(1, _nbits_unsigned(len(fill_styles))) or 0
-    num_line_bits = line_styles and max(1, _nbits_unsigned(len(line_styles))) or 0
+    if is_end_state:
+        # End state: no fill/line style references per SWF spec
+        num_fill_bits = 0
+        num_line_bits = 0
+    else:
+        num_fill_bits = fill_styles and max(1, _nbits_unsigned(len(fill_styles))) or 0
+        num_line_bits = line_styles and max(1, _nbits_unsigned(len(line_styles))) or 0
     bw.write_ub(4, num_fill_bits)
     bw.write_ub(4, num_line_bits)
 
@@ -943,9 +1214,21 @@ def _encode_morph_shape_edges(
 
     for sp in sub_paths:
         has_move = True
-        has_fill0 = sp.fill_style_idx > 0
-        has_fill1 = False
-        has_line = sp.line_style_idx > 0
+        if is_end_state:
+            # End state: geometry only, no fill/line flags
+            has_fill0 = False
+            has_fill1 = False
+            has_line = False
+        else:
+            use_fill0 = getattr(sp, '_morph_use_fill0', False)
+            if use_fill0:
+                # Collapsed fill_merge path: write as fill0 (original SWF convention)
+                has_fill0 = sp.fill_style_idx > 0
+                has_fill1 = False
+            else:
+                has_fill0 = False
+                has_fill1 = sp.fill_style_idx > 0
+            has_line = sp.line_style_idx > 0
 
         move_x, move_y = sp.start_x, sp.start_y
         if sp.edges and isinstance(sp.edges[0], MoveToEdge):
@@ -953,8 +1236,6 @@ def _encode_morph_shape_edges(
 
         move_x_tw = twips(move_x)
         move_y_tw = twips(move_y)
-        dx = move_x_tw - prev_x
-        dy = move_y_tw - prev_y
 
         bw.write_ub(1, 0)  # non-edge
         flags = 0
@@ -969,16 +1250,17 @@ def _encode_morph_shape_edges(
         bw.write_ub(5, flags)
 
         if has_move:
-            move_bits = max(_nbits_signed_list([dx, dy]), 1)
+            # SWF MoveDeltaX/Y are absolute coords (not deltas from prev)
+            move_bits = max(_nbits_signed_list([move_x_tw, move_y_tw]), 1)
             bw.write_ub(5, move_bits)
-            bw.write_sb(move_bits, dx)
-            bw.write_sb(move_bits, dy)
+            bw.write_sb(move_bits, move_x_tw)
+            bw.write_sb(move_bits, move_y_tw)
             prev_x, prev_y = move_x_tw, move_y_tw
 
         if has_fill0:
             bw.write_ub(num_fill_bits, sp.fill_style_idx)
         if has_fill1:
-            bw.write_ub(num_fill_bits, 0)
+            bw.write_ub(num_fill_bits, sp.fill_style_idx)
         if has_line:
             bw.write_ub(num_line_bits, sp.line_style_idx)
 
@@ -986,16 +1268,15 @@ def _encode_morph_shape_edges(
             if isinstance(edge, MoveToEdge):
                 ex = twips(edge.x)
                 ey = twips(edge.y)
-                edx = ex - prev_x
-                edy = ey - prev_y
-                if edx == 0 and edy == 0:
+                if ex == prev_x and ey == prev_y:
                     continue
                 bw.write_ub(1, 0)
                 bw.write_ub(5, 0x01)
-                mbits = max(_nbits_signed_list([edx, edy]), 1)
+                # SWF MoveDeltaX/Y are absolute coords (not deltas)
+                mbits = max(_nbits_signed_list([ex, ey]), 1)
                 bw.write_ub(5, mbits)
-                bw.write_sb(mbits, edx)
-                bw.write_sb(mbits, edy)
+                bw.write_sb(mbits, ex)
+                bw.write_sb(mbits, ey)
                 prev_x, prev_y = ex, ey
 
             elif isinstance(edge, LineToEdge):
@@ -1102,6 +1383,10 @@ def build_define_morph_shape(
     body.write(write_rect(exmin, exmax, eymin, eymax))  # EndBounds
 
     # Build the "offset block" (styles + start edges) to compute Offset value
+    # First, undo fill_merge for morph shapes to avoid fill cancellation
+    start_paths, _ = _morph_collapse_fill_merge(start_paths)
+    end_paths, _ = _morph_collapse_fill_merge(end_paths)
+
     offset_block = io.BytesIO()
     _write_morph_fill_style_array(offset_block, start_fills, end_fills)
     _write_morph_line_style_array(offset_block, start_lines, end_lines)
@@ -1112,8 +1397,78 @@ def build_define_morph_shape(
     body.write(struct.pack("<I", len(offset_data)))  # Offset
     body.write(offset_data)
 
-    # End edges
-    end_edges = _encode_morph_shape_edges(end_fills, end_lines, end_paths)
+    # End edges — geometry only, no fill/line references per SWF spec
+    end_edges = _encode_morph_shape_edges(end_fills, end_lines, end_paths, is_end_state=True)
     body.write(end_edges)
 
     return build_tag(TAG_DEFINE_MORPH_SHAPE, body.getvalue())
+
+
+def build_define_morph_shape2(
+    shape_id: int,
+    start_fills: list,
+    start_lines: list,
+    start_paths: List[SubPath],
+    start_bounds: Optional[dict],
+    end_fills: list,
+    end_lines: list,
+    end_paths: List[SubPath],
+    end_bounds: Optional[dict],
+) -> bytes:
+    """Build a DefineMorphShape2 tag (tag 84).
+
+    Extends DefineMorphShape with:
+      - StartEdgeBounds RECT, EndEdgeBounds RECT
+      - UI8 flags (UsesNonScalingStrokes, UsesScalingStrokes)
+      - MORPHLINESTYLE2 records (caps, joins, fill for strokes)
+    """
+    log.debug("build_define_morph_shape2: shape_id=%d start_fills=%d end_fills=%d",
+              shape_id, len(start_fills), len(end_fills))
+    from swf_writer import write_rect
+
+    if start_bounds:
+        sxmin = twips(start_bounds.get("xMin", 0))
+        sxmax = twips(start_bounds.get("xMax", 0))
+        symin = twips(start_bounds.get("yMin", 0))
+        symax = twips(start_bounds.get("yMax", 0))
+    else:
+        sxmin, symin, sxmax, symax = 0, 0, twips(100), twips(100)
+
+    if end_bounds:
+        exmin = twips(end_bounds.get("xMin", 0))
+        exmax = twips(end_bounds.get("xMax", 0))
+        eymin = twips(end_bounds.get("yMin", 0))
+        eymax = twips(end_bounds.get("yMax", 0))
+    else:
+        exmin, eymin, exmax, eymax = 0, 0, twips(100), twips(100)
+
+    body = io.BytesIO()
+    body.write(struct.pack("<H", shape_id))
+    body.write(write_rect(sxmin, sxmax, symin, symax))  # StartBounds
+    body.write(write_rect(exmin, exmax, eymin, eymax))  # EndBounds
+    body.write(write_rect(sxmin, sxmax, symin, symax))  # StartEdgeBounds (same)
+    body.write(write_rect(exmin, exmax, eymin, eymax))  # EndEdgeBounds (same)
+
+    # Flags: bit 0 = UsesNonScalingStrokes, bit 1 = UsesScalingStrokes
+    body.write(struct.pack("<B", 0x02))  # UsesScalingStrokes
+
+    # Build offset block (styles + start edges)
+    # First, undo fill_merge for morph shapes to avoid fill cancellation
+    start_paths, _ = _morph_collapse_fill_merge(start_paths)
+    end_paths, _ = _morph_collapse_fill_merge(end_paths)
+
+    offset_block = io.BytesIO()
+    _write_morph_fill_style_array(offset_block, start_fills, end_fills)
+    _write_morph_line_style2_array(offset_block, start_lines, end_lines)
+    start_edges = _encode_morph_shape_edges(start_fills, start_lines, start_paths)
+    offset_block.write(start_edges)
+
+    offset_data = offset_block.getvalue()
+    body.write(struct.pack("<I", len(offset_data)))  # Offset
+    body.write(offset_data)
+
+    # End edges — geometry only, no fill/line references per SWF spec
+    end_edges = _encode_morph_shape_edges(end_fills, end_lines, end_paths, is_end_state=True)
+    body.write(end_edges)
+
+    return build_tag(TAG_DEFINE_MORPH_SHAPE2, body.getvalue())

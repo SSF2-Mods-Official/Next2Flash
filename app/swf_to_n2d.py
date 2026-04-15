@@ -2878,6 +2878,11 @@ class N2DBuilder:
             if buffer_str:
                 decode_ok += 1
 
+            # Preserve original bitmap tag type for lossless re-encoding
+            raw_tag_type = 36  # default: DefineBitsLossless2
+            if cid in self.raw_tag_data:
+                raw_tag_type = self.raw_tag_data[cid][0]
+
             entry = {
                 'id': lid,
                 'swfCharId': cid,
@@ -2889,6 +2894,7 @@ class N2DBuilder:
                 'height': height,
                 'imageType': 'image/png',
                 'buffer': buffer_str,
+                'rawTagType': raw_tag_type,
             }
             self.libraries.append(entry)
             bitmap_count += 1
@@ -2960,6 +2966,11 @@ class N2DBuilder:
                     CMD_END_FILL,
                 ]
 
+            # Preserve original tag type for correct re-encoding
+            shape_tag_type = 32  # default: DefineShape3
+            if cid in self.raw_tag_data:
+                shape_tag_type = self.raw_tag_data[cid][0]
+
             entry = {
                 'id': lid,
                 'swfCharId': cid,
@@ -2972,6 +2983,7 @@ class N2DBuilder:
                 'inBitmap': has_bitmap_fill,
                 'recodes': recodes,
                 'bounds': bounds,
+                'rawTagType': shape_tag_type,
             }
             self.libraries.append(entry)
             shape_count += 1
@@ -2998,8 +3010,10 @@ class N2DBuilder:
             bounds = {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20}
             end_bounds = {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20}
             has_bitmap_fill = False
+            morph_tag_type = 46  # default DefineMorphShape
             if cid in self.raw_tag_data:
                 tag_type, body = self.raw_tag_data[cid]
+                morph_tag_type = tag_type
                 try:
                     recodes, bounds, end_recodes, end_bounds, has_bitmap_fill = \
                         parse_define_morph_shape_to_recodes(
@@ -3021,6 +3035,7 @@ class N2DBuilder:
                 'name': display_name,
                 'type': 'shape',
                 'isMorphShape': True,
+                'rawTagType': morph_tag_type,
                 'symbol': sym_name,
                 'folderId': self.folder_ids.get('morphShape', 0),
                 'bitmapId': 0,
@@ -3086,9 +3101,14 @@ class N2DBuilder:
 
             buffer_data = b''
             sound_fmt = 'unknown'
+            raw_sound_body = None
             if cid in sound_data_cache:
                 fmt_name, audio_bytes, swf_rate = sound_data_cache[cid]
                 sound_fmt = fmt_name
+                # Preserve raw DefineSound body for non-MP3 formats (Nellymoser, ADPCM)
+                # so export can reconstruct the original tag faithfully
+                if fmt_name in ('nellymoser', 'adpcm') and cid in self.raw_tag_data:
+                    raw_sound_body = self.raw_tag_data[cid][1]  # body after charID
                 # Use parallel-converted MP3 if available
                 if cid in nelly_results:
                     audio_bytes = nelly_results[cid]
@@ -3108,6 +3128,8 @@ class N2DBuilder:
                 'volume': 100,
                 'loopCount': 0,
             }
+            if raw_sound_body is not None:
+                entry['rawSoundBody'] = raw_sound_body
             self.libraries.append(entry)
             sound_count += 1
 

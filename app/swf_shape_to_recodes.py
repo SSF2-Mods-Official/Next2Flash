@@ -686,6 +686,7 @@ def _read_morph_fill_style_array_both(
             # Linear/radial gradient: start matrix, end matrix, paired stops
             s_style['gradientMatrix'] = _read_matrix(br)
             e_style['gradientMatrix'] = _read_matrix(br)
+            br.align()
             spread = br.read_ub(2)
             interp = br.read_ub(2)
             n_recs = br.read_ub(4)
@@ -710,6 +711,7 @@ def _read_morph_fill_style_array_both(
             # Focal radial gradient (tag 84 only)
             s_style['gradientMatrix'] = _read_matrix(br)
             e_style['gradientMatrix'] = _read_matrix(br)
+            br.align()
             spread = br.read_ub(2)
             interp = br.read_ub(2)
             n_recs = br.read_ub(4)
@@ -829,6 +831,7 @@ def _read_morph_single_fill_both(br: BitReader) -> Tuple[dict, dict]:
     elif ft in (16, 18, 19):
         s_style['gradientMatrix'] = _read_matrix(br)
         e_style['gradientMatrix'] = _read_matrix(br)
+        br.align()
         spread = br.read_ub(2)
         interp = br.read_ub(2)
         n_recs = br.read_ub(4)
@@ -866,15 +869,23 @@ def _walk_edge_records(
     line_styles: List[dict],
     equiv_tag: int,
     swf_bitmap_id_to_n2d_id: Dict[int, int],
+    morph_start_assignments: Optional[List[tuple]] = None,
 ) -> Tuple[List, dict, bool]:
     """Walk shape edge records and return (recodes, bounds, has_bitmap).
 
     This is shared between regular shape parsing, morph START edges,
     and morph END edges.
+
+    morph_start_assignments: if provided (for morph end-state), a list of
+        (fill0, fill1, line) tuples indexed by edge_group. When fill_bits=0,
+        these override the fill/line indices read from the stream.
     """
     nb = br.read_ui8()
     fill_bits = nb >> 4
     line_bits = nb & 0x0F
+    # Track fill/line assignments per edge_group for morph start-state
+    _is_morph_end = morph_start_assignments is not None
+    _fill_assignments: List[tuple] = []  # recorded during start-state
 
     cur_x = cur_y = 0
     prev_x = prev_y = 0
@@ -973,6 +984,17 @@ def _walk_edge_records(
             if has_line:
                 cur_line = br.read_ub(line_bits)
 
+            # Morph end-state: inherit fill/line from start-state
+            if _is_morph_end and edge_group <= len(morph_start_assignments):
+                sf0, sf1, sl = morph_start_assignments[edge_group - 1]
+                cur_fill0 = sf0
+                cur_fill1 = sf1
+                cur_line = sl
+
+            # Record fill/line assignments for morph start-state
+            if not _is_morph_end:
+                _fill_assignments.append((cur_fill0, cur_fill1, cur_line))
+
             if has_new:
                 # Mid-stream new styles use regular (non-morph) format
                 fill_styles = _read_fill_style_array(br, equiv_tag)
@@ -983,7 +1005,7 @@ def _walk_edge_records(
 
     recodes, has_bitmap = _stacks_to_recodes(stacks, swf_bitmap_id_to_n2d_id)
     bounds = _compute_bounds(recodes)
-    return recodes, bounds, has_bitmap
+    return recodes, bounds, has_bitmap, _fill_assignments
 
 
 def parse_define_morph_shape_to_recodes(
@@ -1037,7 +1059,7 @@ def parse_define_morph_shape_to_recodes(
 
     # ── StartEdges ──
     start_end_pos = after_offset_pos + offset
-    start_recodes, start_bounds, has_bitmap = _walk_edge_records(
+    start_recodes, start_bounds, has_bitmap, start_assignments = _walk_edge_records(
         br, start_end_pos, start_fills, start_lines,
         equiv_tag, swf_bitmap_id_to_n2d_id,
     )
@@ -1047,10 +1069,17 @@ def parse_define_morph_shape_to_recodes(
     br.byte_pos = start_end_pos
     br.bit_pos = 0
     end_end_pos = len(br.data)
-    end_recodes, end_bounds, end_has_bitmap = _walk_edge_records(
-        br, end_end_pos, end_fills, end_lines,
-        equiv_tag, swf_bitmap_id_to_n2d_id,
-    )
+    try:
+        end_recodes, end_bounds, end_has_bitmap, _ = _walk_edge_records(
+            br, end_end_pos, end_fills, end_lines,
+            equiv_tag, swf_bitmap_id_to_n2d_id,
+            morph_start_assignments=start_assignments,
+        )
+    except Exception as e:
+        log.debug("MorphShape end-edges parse error: %s — using empty end recodes", e)
+        end_recodes = []
+        end_bounds = start_bounds.copy() if start_bounds else {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20}
+        end_has_bitmap = False
 
     return start_recodes, start_bounds, end_recodes, end_bounds, (has_bitmap or end_has_bitmap)
 

@@ -62,20 +62,28 @@ from swf_writer import (
 from bitmap_converter import build_define_bits_lossless2
 from shape_converter import (
     build_define_shape3,
+    build_define_shape4,
     build_define_morph_shape,
     parse_next2d_shape_buffer,
 )
 from text_converter import build_define_edit_text
 
 
-def _decode_raw_body(s: str) -> bytes:
-    """Decode a raw binary body string — supports both base64 and latin-1 encoding.
+def _decode_raw_body(s) -> bytes:
+    """Decode a raw binary body — supports bytes, base64 strings, and latin-1 encoding.
 
-    Base64 strings contain only [A-Za-z0-9+/=] and are tried first.
+    If *s* is already bytes (e.g. from msgpack), return as-is.
+    Strings with 'b64:' prefix are base64-decoded after stripping the prefix.
+    Other strings are tried as raw base64 first.
     Falls back to latin-1 for backward compatibility with older N2D files.
     """
     if not s:
         return b''
+    if isinstance(s, (bytes, bytearray)):
+        return bytes(s)
+    # Strip 'b64:' prefix if present
+    if isinstance(s, str) and s.startswith('b64:'):
+        s = s[4:]
     try:
         return base64.b64decode(s)
     except Exception:
@@ -2871,7 +2879,15 @@ class N2DCompiler:
         h = lib.get("height", 1)
         buf_str = lib.get("buffer", "")
         pixel_data = _decode_raw_body(buf_str)
-        bmp_tag = build_define_bits_lossless2(swf_id, w, h, pixel_data)
+        raw_tag_type = lib.get("rawTagType", 36)
+        if raw_tag_type == 20:  # DefineBitsLossless (RGB, no alpha)
+            from bitmap_converter import build_define_bits_lossless
+            bmp_tag = build_define_bits_lossless(swf_id, w, h, pixel_data)
+        elif raw_tag_type == 35:  # DefineBitsJPEG3 (JPEG + alpha)
+            from bitmap_converter import build_define_bits_jpeg3
+            bmp_tag = build_define_bits_jpeg3(swf_id, w, h, pixel_data)
+        else:  # 36 (DefineBitsLossless2) or any other
+            bmp_tag = build_define_bits_lossless2(swf_id, w, h, pixel_data)
         self._definition_tags.extend(bmp_tag)
 
     def _emit_shape(self, lib: dict):
@@ -2914,21 +2930,33 @@ class N2DCompiler:
             # pixel data but no bitmap_char_id, emit a DefineBitsLossless2 tag
             # and assign the new SWF ID.
             self._resolve_bitmap_fills(fill_styles)
-            tag = build_define_shape3(swf_id, fill_styles, line_styles, sub_paths, bounds)
+            raw_tag_type = lib.get("rawTagType", 32)  # default DefineShape3
+            if raw_tag_type == 83:  # DefineShape4
+                tag = build_define_shape4(swf_id, fill_styles, line_styles, sub_paths, bounds)
+            else:
+                tag = build_define_shape3(swf_id, fill_styles, line_styles, sub_paths, bounds)
         self._definition_tags.extend(tag)
 
     def _resolve_bitmap_fills(self, fill_styles: list):
-        """For each BitmapFill with embedded pixel data but no character ID,
-        emit a DefineBitsLossless2 tag and assign the resulting SWF ID."""
+        """For each BitmapFill, resolve its bitmap_char_id.
+
+        If the fill carries a bitmap_lib_id (N2D library reference), map it
+        to the already-emitted SWF character ID.  Only allocate a NEW bitmap
+        tag when no library reference exists (e.g. user-drawn bitmap fill).
+        """
         from shape_converter import BitmapFill
         for fs in fill_styles:
             if not isinstance(fs, BitmapFill):
                 continue
             if fs.bitmap_char_id:
                 continue  # already resolved
+            # Try to resolve via N2D library ID → existing SWF charID
+            if fs.bitmap_lib_id and fs.bitmap_lib_id in self._lib_to_swf_id:
+                fs.bitmap_char_id = self._lib_to_swf_id[fs.bitmap_lib_id]
+                continue
             if not fs.pixel_data or len(fs.pixel_data) <= 4:
                 continue  # placeholder, nothing to emit
-            # Allocate a new SWF character ID for this embedded bitmap
+            # Fallback: allocate a new SWF character ID for this embedded bitmap
             new_id = self._alloc_id()
             fs.bitmap_char_id = new_id
             self._bitmap_char_ids.add(new_id)
@@ -2957,11 +2985,20 @@ class N2DCompiler:
                   f"recode parse error: {e}  — emitting empty morph")
             s_fills, s_lines, s_paths = [], [], []
             e_fills, e_lines, e_paths = [], [], []
-        tag = build_define_morph_shape(
-            swf_id,
-            s_fills, s_lines, s_paths, start_bounds,
-            e_fills, e_lines, e_paths, end_bounds,
-        )
+        raw_tag_type = lib.get("rawTagType", 46)
+        if raw_tag_type == 84:  # DefineMorphShape2
+            from shape_converter import build_define_morph_shape2
+            tag = build_define_morph_shape2(
+                swf_id,
+                s_fills, s_lines, s_paths, start_bounds,
+                e_fills, e_lines, e_paths, end_bounds,
+            )
+        else:
+            tag = build_define_morph_shape(
+                swf_id,
+                s_fills, s_lines, s_paths, start_bounds,
+                e_fills, e_lines, e_paths, end_bounds,
+            )
         self._definition_tags.extend(tag)
 
     def _emit_text(self, lib: dict):
@@ -2996,6 +3033,16 @@ class N2DCompiler:
             tag_bytes = _load_external_sound(self._project_dir, lib, swf_id)
             if tag_bytes:
                 self._definition_tags.extend(tag_bytes)
+                return
+        # If we have the original raw DefineSound body (e.g. Nellymoser, ADPCM),
+        # reconstruct the original tag directly for format fidelity
+        raw_sound = lib.get("rawSoundBody")
+        if raw_sound:
+            raw_body = _decode_raw_body(raw_sound)
+            if raw_body:
+                tag_data = struct.pack('<H', swf_id) + raw_body
+                self._definition_tags.extend(
+                    build_tag(TAG_DEFINE_SOUND, tag_data, force_long=True))
                 return
         # Rebuild from buffer (WAV or MP3)
         buf_str = lib.get("buffer", "")

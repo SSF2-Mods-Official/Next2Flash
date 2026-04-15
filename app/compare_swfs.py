@@ -98,7 +98,7 @@ def main():
     diffs = []
     
     # Size
-    print(f"  Size: {s1['size']:,} → {s2['size']:,} (ratio: {s2['size']/s1['size']:.3f})")
+    print(f"  Size: {s1['size']:,} -> {s2['size']:,} (ratio: {s2['size']/s1['size']:.3f})")
     
     # Header
     for k in ('width', 'height', 'fps', 'frameCount'):
