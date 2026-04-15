@@ -33,7 +33,7 @@ from urllib.parse import unquote
 
 log = logging.getLogger(__name__)
 
-from swf_binary_io import BitWriter
+from swf_binary_io import BitReader, BitWriter
 from swf_constants import (
     SWFTag, TAG_DEFINE_SHAPE3, TAG_DO_ABC, TAG_DEFINE_SOUND
 )
@@ -1142,6 +1142,35 @@ def to_publish(container: dict, lib_to_char_idx: Dict[int, int],
                 morph_lib_ids.add(lid)
     layers = container.get("layers", [])
     dictionary: List[dict] = []
+
+    # ── Pre-compute clip_depth for MASK layers ──
+    # N2D stores mode=1 (MASK) for masking layers and mode=2 (MASK_IN) for
+    # masked layers.  SWF uses clipDepth on the mask PlaceObject to specify
+    # the depth range it clips.  Walk layers (in N2D order, top-to-bottom)
+    # to find MASK→MASK_IN groups and compute the SWF clipDepth.
+    mask_clip_depth: Dict[int, int] = {}  # swfDepth → clipDepth
+    i_layer = 0
+    while i_layer < len(layers):
+        layer = layers[i_layer]
+        if layer.get("mode") == 1:  # MASK
+            mask_depth = layer.get("swfDepth")
+            # Find consecutive MASK_IN layers following this MASK
+            last_masked_depth = mask_depth  # fallback to own depth
+            j = i_layer + 1
+            while j < len(layers) and layers[j].get("mode") == 2:
+                d = layers[j].get("swfDepth")
+                if d is not None and d > last_masked_depth:
+                    last_masked_depth = d
+                j += 1
+            if mask_depth is not None:
+                # SWF clipDepth is typically last_masked_depth + 1 to form
+                # an exclusive range, but original SWFs use the exact depth
+                # of the last masked layer + gap.  From the OG data:
+                #   mask depth=1, MASK_IN depth=2 → clipDepth=3
+                #   mask depth=4, MASK_IN depth=5 → clipDepth=6
+                # Pattern: clipDepth = last_masked_depth + 1
+                mask_clip_depth[mask_depth] = last_masked_depth + 1
+        i_layer += 1
     # Use dicts keyed by frame to build sparse arrays
     ctrl: Dict[int, Dict[int, int]] = {}   # frame → {depth: dict_idx}
     pmap: Dict[int, Dict[int, int]] = {}   # frame → {depth: po_idx}
@@ -1178,12 +1207,19 @@ def to_publish(container: dict, lib_to_char_idx: Dict[int, int],
             sf = char["startFrame"]
             ef = char["endFrame"]
 
+            # Compute SWF clipDepth from MASK layer analysis
+            clip_depth_val = 0
+            if layer.get("mode") == 1:  # MASK layer
+                swf_d = layer.get("swfDepth")
+                if swf_d is not None and swf_d in mask_clip_depth:
+                    clip_depth_val = mask_clip_depth[swf_d]
+
             dictionary.append({
                 "name": char.get("name", ""),
                 "characterId": char_idx,
                 "startFrame": sf,
                 "endFrame": ef,
-                "clipDepth": 0,
+                "clipDepth": clip_depth_val,
                 "reinstated": char.get("reinstated", False),
             })
 
@@ -1216,7 +1252,7 @@ def to_publish(container: dict, lib_to_char_idx: Dict[int, int],
                         "matrix": place.get("matrix", [1, 0, 0, 1, 0, 0]),
                         "colorTransform": raw_ct,
                         "blendMode": place.get("blendMode", "normal"),
-                        "surfaceFilterList": None,
+                        "surfaceFilterList": place.get("filter") or None,
                     }
                     # Pass through ratio from OG PlaceObject if stored
                     if place.get("ratio") is not None:
@@ -1245,7 +1281,7 @@ def to_publish(container: dict, lib_to_char_idx: Dict[int, int],
                         "matrix": place.get("matrix", [1, 0, 0, 1, 0, 0]),
                         "colorTransform": raw_ct_m,
                         "blendMode": place.get("blendMode", "normal"),
-                        "surfaceFilterList": None,
+                        "surfaceFilterList": place.get("filter") or None,
                         "ratio": ratio_val,
                     })
 
@@ -1514,6 +1550,11 @@ def build_timeline_tags(
 
                 instance_name = tag_info.get("name") or None
 
+                # clipDepth: only set on initial placement (not move updates)
+                po_clip_depth = tag_info.get("clipDepth", 0) if not is_move else None
+                if po_clip_depth == 0:
+                    po_clip_depth = None
+
                 # Only use PO3+has_image when actually placing/changing a bitmap character,
                 # not for move-only updates (same character, different transform)
                 is_bitmap_place = (bitmap_char_ids is not None
@@ -1533,6 +1574,7 @@ def build_timeline_tags(
                         is_move=is_move,
                         ratio=po_ratio,
                         has_image=is_bitmap_place,
+                        clip_depth=po_clip_depth,
                     )
                 else:
                     tag_bytes = build_place_object2(
@@ -1543,6 +1585,7 @@ def build_timeline_tags(
                         name=instance_name if not is_move else None,
                         is_move=is_move,
                         ratio=po_ratio,
+                        clip_depth=po_clip_depth,
                     )
                 place_buf.extend(tag_bytes)
 
@@ -3005,22 +3048,24 @@ class N2DCompiler:
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_text: lib_id=%d, swf_id=%d', lib['id'], swf_id)
 
-        # If the text was originally a DefineText/DefineText2 tag, pass through
-        # the original binary with font-ID remapping to preserve glyph rendering.
-        raw_body_b64 = lib.get('rawTagBody')
-        raw_tag_type = lib.get('rawTagType')
-        if raw_body_b64 and raw_tag_type in (11, 33):  # DefineText / DefineText2
+        # Prefer raw DefineText passthrough with font ID remapping for
+        # faithful rendering (per-glyph positioning).  The N2D stores
+        # editable properties for the canvas, but at export the original
+        # DefineText binary produces identical visual output.
+        raw_body_b64 = lib.get("rawTagBody")
+        raw_tag_type = lib.get("rawTagType")
+        if raw_body_b64 and raw_tag_type in (11, 33):
             raw_body = _decode_raw_body(raw_body_b64)
-            # Build old-font-charID → new-font-charID map
-            font_id_map = self._build_font_id_map()
-            remapped = _remap_text_raw_body(raw_body, raw_tag_type, font_id_map)
-            tag_data = struct.pack('<H', swf_id) + remapped
-            self._definition_tags.extend(
-                build_tag(raw_tag_type, tag_data, force_long=True)
-            )
-            return
+            if raw_body:
+                font_id_map = self._build_font_id_map()
+                remapped = _remap_text_raw_body(raw_body, raw_tag_type, font_id_map)
+                tag_data = struct.pack('<H', swf_id) + remapped
+                self._definition_tags.extend(
+                    build_tag(raw_tag_type, tag_data, force_long=True))
+                return
 
-        # DefineEditText or no raw body: rebuild from properties
+        # Fallback: rebuild from editable properties (e.g. if text was
+        # edited in the canvas and no raw body is available).
         font_map = self._build_font_name_map()
         tag = build_define_edit_text(swf_id, lib, font_map=font_map)
         self._definition_tags.extend(tag)

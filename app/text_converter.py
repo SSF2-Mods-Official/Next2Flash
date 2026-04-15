@@ -157,7 +157,7 @@ def build_define_edit_text(
     # VariableName (always empty string)
     body.write(b"\x00")
 
-    # InitialText — for HTML text fields, use the full HTML markup for SWF
+    # InitialText
     if has_text:
         emit_text = text
         if html:

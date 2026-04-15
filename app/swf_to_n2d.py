@@ -1058,6 +1058,7 @@ def parse_define_text(tag_data: bytes, tag_type: int,
     total_advance = 0   # running x advance within current text record
     max_x = 0           # rightmost x position across all records
     current_x = 0       # x origin of current text record
+    all_glyphs = []     # collected (char, advance) tuples
 
     while True:
         flags = br.read_ui8()
@@ -1093,9 +1094,9 @@ def parse_define_text(tag_data: bytes, tag_type: int,
             total_advance += glyph_advance
             ct = font_code_tables.get(current_font_id, [])
             if glyph_idx < len(ct):
-                text_str += ct[glyph_idx]
+                all_glyphs.append((ct[glyph_idx], glyph_advance))
             else:
-                text_str += '?'
+                all_glyphs.append(('?', glyph_advance))
         br.align()
 
         # Track the rightmost point reached by this text record
@@ -1107,6 +1108,38 @@ def parse_define_text(tag_data: bytes, tag_type: int,
     # so the N2D tool renders the text field at the character origin.
     # The offset is stored separately so it can be baked into placement matrices.
     font_size = current_height / 20.0 if current_height else 12.0
+
+    # Post-process glyphs: detect inter-character spacing pattern where
+    # space glyphs are inserted between every real character (common in
+    # Flash-authored SWFs to achieve custom letter-spacing).
+    # Uses a state machine: take each glyph as a real character, then
+    # optionally consume the next glyph if it's a space (inter-char spacing).
+    # This handles real word spaces naturally (they become real chars, and
+    # the following non-space char just has no IC before it).
+    text_str = ''
+    letter_spacing_twips = 0
+    if len(all_glyphs) >= 3:
+        result_chars = []
+        spacing_advances = []
+        i = 0
+        while i < len(all_glyphs):
+            ch, adv = all_glyphs[i]
+            result_chars.append(ch)
+            i += 1
+            # Check if next glyph is a spacing space
+            if i < len(all_glyphs) and all_glyphs[i][0] in (' ', '\xa0'):
+                spacing_advances.append(all_glyphs[i][1])
+                i += 1
+        # Confirm interleaved pattern: enough IC spaces relative to text length
+        if (len(spacing_advances) >= 3
+                and len(spacing_advances) >= (len(result_chars) - 1) * 0.7
+                and len(result_chars) >= 3):
+            text_str = ''.join(result_chars)
+            letter_spacing_twips = sorted(spacing_advances)[len(spacing_advances) // 2]
+    if not text_str:
+        text_str = ''.join(ch for ch, adv in all_glyphs)
+
+    letter_spacing_px = letter_spacing_twips / 20.0
     bx = bounds_raw['xMin'] / 20.0
     by = bounds_raw['yMin'] / 20.0
     bw = (bounds_raw['xMax'] - bounds_raw['xMin']) / 20.0
@@ -1123,6 +1156,9 @@ def parse_define_text(tag_data: bytes, tag_type: int,
     # Width: use the largest of SWF bounds, glyph advance total, or a rough
     # estimate from character count × font size – then add padding.
     char_estimate_w = len(text_str) * font_size * 0.65   # rough system-font width
+    # Account for letter-spacing in width estimate
+    if letter_spacing_px > 0 and len(text_str) > 1:
+        char_estimate_w += letter_spacing_px * (len(text_str) - 1)
     padding_w = font_size * 0.5 + 8   # horizontal breathing room
     effective_w = max(bw, advance_width_px, char_estimate_w) + padding_w
 
@@ -1161,7 +1197,7 @@ def parse_define_text(tag_data: bytes, tag_type: int,
         'align': 'left',
         'color': current_color,
         'leading': 0,
-        'letterSpacing': 0,
+        'letterSpacing': letter_spacing_px,
         'leftMargin': 0,
         'rightMargin': 0,
         'multiline': False,

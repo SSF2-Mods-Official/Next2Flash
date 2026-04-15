@@ -444,6 +444,56 @@ def build_do_action_goto_and_play(frame: int) -> bytes:
 
 # ── Filters serialization (for PlaceObject3) ────────────────────────────
 
+def _normalize_filter(f: dict) -> dict:
+    """Convert import-format filter dict (name + fields) to editor format
+    (class + params) so encode_filter_list can handle both."""
+    if 'class' in f:
+        return f  # already in editor format
+    name = f.get('name', '')
+    if name == 'BlurFilter':
+        return {'class': 'BlurFilter', 'params': [
+            None, f.get('blurX', 4.0), f.get('blurY', 4.0),
+            f.get('quality', 1),
+        ]}
+    elif name == 'GlowFilter':
+        return {'class': 'GlowFilter', 'params': [
+            None, f.get('color', 0), f.get('alpha', 1.0),
+            f.get('blurX', 4.0), f.get('blurY', 4.0),
+            f.get('strength', 2.0), f.get('quality', 1),
+            f.get('inner', False), f.get('knockout', False),
+        ]}
+    elif name == 'DropShadowFilter':
+        return {'class': 'DropShadowFilter', 'params': [
+            None, f.get('distance', 4.0), f.get('angle', 45.0),
+            f.get('color', 0), f.get('alpha', 1.0),
+            f.get('blurX', 4.0), f.get('blurY', 4.0),
+            f.get('strength', 1.0), f.get('quality', 1),
+            f.get('inner', False), f.get('knockout', False),
+            f.get('hideObject', False),
+        ]}
+    elif name == 'BevelFilter':
+        btype = f.get('type', 'full')
+        return {'class': 'BevelFilter', 'params': [
+            None, f.get('distance', 4.0), f.get('angle', 45.0),
+            f.get('highlightColor', 0xFFFFFF), f.get('highlightAlpha', 1.0),
+            f.get('shadowColor', 0), f.get('shadowAlpha', 1.0),
+            f.get('blurX', 4.0), f.get('blurY', 4.0),
+            f.get('strength', 1.0), f.get('quality', 1),
+            btype, f.get('knockout', False),
+        ]}
+    elif name in ('GradientGlowFilter', 'GradientBevelFilter'):
+        gtype = f.get('type', 'full')
+        return {'class': name, 'params': [
+            None, f.get('distance', 4.0), f.get('angle', 45.0),
+            f.get('colors', [0]), f.get('alphas', [100]),
+            f.get('ratios', [0]),
+            f.get('blurX', 4.0), f.get('blurY', 4.0),
+            f.get('strength', 1.0), f.get('quality', 1),
+            gtype, f.get('knockout', False),
+        ]}
+    return f  # unknown, pass through as-is
+
+
 def encode_filter_list(filters: list) -> bytes:
     """
     Encode a list of Next2D ISurfaceFilter objects into SWF FilterList bytes.
@@ -456,6 +506,7 @@ def encode_filter_list(filters: list) -> bytes:
     buf.write(struct.pack("<B", len(filters)))  # NumberOfFilters
 
     for f in filters:
+        f = _normalize_filter(f)
         cls = f.get("class", "")
         params = f.get("params", [])
         # skip leading null
