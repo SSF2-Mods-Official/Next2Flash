@@ -32,32 +32,27 @@ def build_define_bits_lossless2(
     # Convert RGBA → premultiplied ARGB using numpy if available (100x faster)
     try:
         import numpy as np
-        px = np.frombuffer(pixel_data, dtype=np.uint8).reshape(-1, 4).copy()
+        px = np.frombuffer(pixel_data, dtype=np.uint8).reshape(-1, 4)
         r, g, b, a = px[:, 0], px[:, 1], px[:, 2], px[:, 3]
         # Premultiply: channel = channel * alpha / 255
         mask_zero = a == 0
         mask_full = a == 255
         mask_partial = ~mask_zero & ~mask_full
-        # Zero alpha → all zero
-        px[mask_zero] = 0
-        # Full alpha → just reorder to ARGB
-        # Partial alpha → premultiply
-        if mask_partial.any():
-            af = a[mask_partial].astype(np.uint16)
-            px[mask_partial, 1] = ((r[mask_partial].astype(np.uint16) * af + 127) // 255).astype(np.uint8)
-            px[mask_partial, 2] = ((g[mask_partial].astype(np.uint16) * af + 127) // 255).astype(np.uint8)
-            px[mask_partial, 3] = ((b[mask_partial].astype(np.uint16) * af + 127) // 255).astype(np.uint8)
-            px[mask_partial, 0] = a[mask_partial]
-        # Reorder RGBA → ARGB: [R,G,B,A] → [A,R,G,B]
+        # Build ARGB output directly (avoids view-aliasing bugs from mutating px)
         argb = np.empty_like(px)
+        # Alpha channel
         argb[:, 0] = a
+        # Full alpha → just copy RGB
         argb[mask_full, 1] = r[mask_full]
         argb[mask_full, 2] = g[mask_full]
         argb[mask_full, 3] = b[mask_full]
+        # Partial alpha → premultiply RGB
         if mask_partial.any():
-            argb[mask_partial, 1] = px[mask_partial, 1]
-            argb[mask_partial, 2] = px[mask_partial, 2]
-            argb[mask_partial, 3] = px[mask_partial, 3]
+            af = a[mask_partial].astype(np.uint16)
+            argb[mask_partial, 1] = ((r[mask_partial].astype(np.uint16) * af + 127) // 255).astype(np.uint8)
+            argb[mask_partial, 2] = ((g[mask_partial].astype(np.uint16) * af + 127) // 255).astype(np.uint8)
+            argb[mask_partial, 3] = ((b[mask_partial].astype(np.uint16) * af + 127) // 255).astype(np.uint8)
+        # Zero alpha → all zero
         argb[mask_zero] = 0
         argb_bytes = argb.tobytes()
     except ImportError:
