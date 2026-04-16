@@ -644,9 +644,14 @@ def encode_filter_list(filters: list) -> bytes:
             buf.write(struct.pack("<B", num_colors))
             for i in range(num_colors):
                 c = int(colors[i])
-                alph = alphas[i] if i < len(alphas) else 1.0
+                alph_raw = alphas[i] if i < len(alphas) else 1.0
                 cr, cg, cb = (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF
-                ca = int(round(alph * 255))
+                # Alphas stored as 0-100 (editor %) — convert to 0-255 byte.
+                # Guard: if somehow passed as 0-1 float, handle that too.
+                if alph_raw > 1.0:
+                    ca = max(0, min(255, int(round(alph_raw * 2.55))))
+                else:
+                    ca = max(0, min(255, int(round(alph_raw * 255))))
                 buf.write(struct.pack("<BBBB", cr, cg, cb, ca))
             for i in range(num_colors):
                 buf.write(struct.pack("<B", int(ratios[i]) if i < len(ratios) else 0))

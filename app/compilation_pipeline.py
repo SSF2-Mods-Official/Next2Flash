@@ -8,7 +8,7 @@ Principle.
 Pipeline stages (in order):
   1. LoadN2DStage        - Load and parse N2D file
   2. AllocateCharIDsStage - Assign SWF character IDs in dependency order
-  3. ParseRawTagsStage   - Parse rawGlobalTags and fontAuxTags
+  3. ParseRawTagsStage   - Parse structured global fields (abcBlocks, sceneLabels, fontAuxParsed)
   4. DefineAssetsStage   - Generate definition tags for all assets
   5. BuildTimelineStage  - Build root timeline with PlaceObject/RemoveObject
   6. CompileAS3Stage     - Compile ActionScript 3.0 bytecode
@@ -94,6 +94,10 @@ class CompilationContext:
     # ── Final output ──
     swf_bytes: bytes = b""
 
+    # ── In-memory override (skip file I/O in LoadN2DStage) ──
+    data_override: Optional[dict] = None        # pre-loaded N2D dict; skips file read
+    project_dir_override: Optional[str] = None  # project dir for external asset lookup
+
     # ── Progress reporting ──
     progress_callback: Optional[Callable[[str, int], None]] = None
     start_time: float = field(default_factory=time.time)
@@ -163,7 +167,22 @@ class LoadN2DStage(PipelineStage):
         return "Load N2D"
 
     def execute(self, ctx: CompilationContext) -> None:
-        from compile_n2d import load_n2d
+        from compile_n2d import load_n2d, _overlay_external_scripts
+
+        if ctx.data_override is not None:
+            # Fast path: N2D data provided directly — skip file I/O
+            log.info("LoadN2DStage: using in-memory data override")
+            print("Loading: (in-memory override)")
+            ctx.data = ctx.data_override
+            ctx.project_dir = ctx.project_dir_override
+            if ctx.project_dir:
+                _overlay_external_scripts(ctx.data, ctx.project_dir)
+                print(f"  Project folder mode: {ctx.project_dir}")
+            ctx.stage = ctx.data.get("stage", {})
+            ctx.libs = ctx.data.get("libraries", [])
+            ctx.id_to_lib = {lib["id"]: lib for lib in ctx.libs}
+            print(f"  {len(ctx.libs)} libraries loaded (in-memory)")
+            return
 
         log.info("LoadN2DStage: loading %s", ctx.n2d_path)
         print(f"Loading: {ctx.n2d_path}")
@@ -389,6 +408,40 @@ def _rebuild_sound_stream_head(data: dict) -> bytes:
     return bytes(buf)
 
 
+def _rebuild_font_align_zones(data: dict) -> bytes:
+    """Rebuild DefineFontAlignZones (tag 73) body after charID from structured dict."""
+    buf = bytearray()
+    buf.append((data.get('tableHint', 0) & 0x03) << 6)
+    for zone_data in data.get('zones', []):
+        buf.append(len(zone_data))
+        for zd in zone_data:
+            coord = int(round(zd.get('alignmentCoord', 0.0) * 256.0)) & 0xFFFF
+            rng   = int(round(zd.get('range', 0.0) * 256.0)) & 0xFFFF
+            buf.extend(struct.pack('<HH', coord, rng))
+        buf.append(0x03)  # zoneMask: HasX=1, HasY=1 (safe default)
+    return bytes(buf)
+
+
+def _rebuild_csm_text_settings(data: dict) -> bytes:
+    """Rebuild CSMTextSettings (tag 74) body after charID from structured dict."""
+    buf = bytearray()
+    use_flash = data.get('useFlashType', 0) & 0x03
+    grid_fit  = data.get('gridFit', 0) & 0x07
+    buf.append((use_flash << 6) | (grid_fit << 3))
+    buf.extend(struct.pack('<f', float(data.get('thickness', 0.0))))
+    buf.extend(struct.pack('<f', float(data.get('sharpness', 0.0))))
+    buf.append(0)  # reserved
+    return bytes(buf)
+
+
+def _rebuild_font_name(data: dict) -> bytes:
+    """Rebuild DefineFontName (tag 88) body after charID from structured dict."""
+    buf = bytearray()
+    buf.extend(data.get('fontName', '').encode('utf-8') + b'\x00')
+    buf.extend(data.get('copyright', '').encode('utf-8') + b'\x00')
+    return bytes(buf)
+
+
 def _rebuild_import_assets(data: dict) -> bytes:
     """Rebuild ImportAssets (57) or ImportAssets2 (71) from structured dict."""
     buf = bytearray()
@@ -450,51 +503,22 @@ class ParseRawTagsStage(PipelineStage):
             tag_type = 71 if ia.get('version', 1) == 2 else 57
             ctx.raw_aux_tags.extend(build_tag(tag_type, body, force_long=True))
 
-        # ── LEGACY: Fall back to rawGlobalTags for backward compat ──
-        raw_global = ctx.data.get("rawGlobalTags", [])
-        has_structured_abc = bool(abc_blocks)
-        has_structured_aux = bool(ctx.data.get('protectFromImport') or scene_labels or sound_stream)
-
-        for rgt in raw_global:
-            tag_type = rgt["tagType"]
-            body = _decode_raw_body(rgt["body"])
-            if tag_type in (72, 82) and not has_structured_abc:
-                ctx.raw_doabc_tags.extend(build_tag(tag_type, body))
-            elif tag_type == 76:  # SymbolClass
-                ctx.raw_aux_map[76] = body
-            elif tag_type in (73, 74, 88):  # FontAlignZones, CSMTextSettings, FontName
-                ref_cid = struct.unpack_from('<H', body, 0)[0] if len(body) >= 2 else 0
-                target_lib_id = None
-                for lib in ctx.libs:
-                    if lib.get('swfCharId') == ref_cid:
-                        target_lib_id = lib['id']
-                        break
-                new_swf_id = ctx.lib_to_swf_id.get(target_lib_id) if target_lib_id is not None else None
-                if new_swf_id is not None and len(body) >= 2:
-                    body = struct.pack('<H', new_swf_id) + body[2:]
-                    ctx.font_aux_tags.setdefault(new_swf_id, []).append((tag_type, body))
-                else:
-                    log.warning('Font aux tag %d references unknown charId %d — skipped', tag_type, ref_cid)
-            elif tag_type in (24, 45, 86) and not has_structured_aux:
-                ctx.raw_aux_tags.extend(build_tag(tag_type, body, force_long=(tag_type == 86)))
-            elif tag_type in (57, 71) and not import_assets:
-                ctx.raw_aux_tags.extend(build_tag(tag_type, body, force_long=True))
-
-        # Load font aux tags from library entries
+        # Load font aux tags from library entries (fontAuxParsed structured format only).
         for lib in ctx.libs:
-            if not lib.get("fontAuxTags"):
-                continue
             lib_id = lib["id"]
             new_swf_id = ctx.lib_to_swf_id.get(lib_id)
             if new_swf_id is None:
                 continue
-            for fat in lib["fontAuxTags"]:
-                tag_type = fat["tagType"]
-                body = _decode_raw_body(fat["body"])
-                if len(body) >= 2:
-                    body = struct.pack('<H', new_swf_id) + body[2:]
-                if new_swf_id not in ctx.font_aux_tags:
-                    ctx.font_aux_tags.setdefault(new_swf_id, []).append((tag_type, body))
+            aux = lib.get("fontAuxParsed") or {}
+            if aux.get("fontAlignZones"):
+                body = struct.pack('<H', new_swf_id) + _rebuild_font_align_zones(aux["fontAlignZones"])
+                ctx.font_aux_tags.setdefault(new_swf_id, []).append((73, body))
+            if aux.get("csmTextSettings"):
+                body = struct.pack('<H', new_swf_id) + _rebuild_csm_text_settings(aux["csmTextSettings"])
+                ctx.font_aux_tags.setdefault(new_swf_id, []).append((74, body))
+            if aux.get("fontName"):
+                body = struct.pack('<H', new_swf_id) + _rebuild_font_name(aux["fontName"])
+                ctx.font_aux_tags.setdefault(new_swf_id, []).append((88, body))
 
 
 class DefineAssetsStage(PipelineStage):

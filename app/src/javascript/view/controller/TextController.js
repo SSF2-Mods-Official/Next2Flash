@@ -415,9 +415,10 @@ class TextController extends BaseController
     changeFontInputSelect (value)
     {
         value |= 0;
+        const inputTypes = ["static", "dynamic", "input"];
         this.updateText({
             "name": "inputType",
-            "value": value ? "input" : "static"
+            "value": inputTypes[Util.$clamp(value, 0, 2)]
         });
     }
 

@@ -157,13 +157,10 @@ def build_define_edit_text(
     # VariableName (always empty string)
     body.write(b"\x00")
 
-    # InitialText
+    # InitialText — always use 'text' (the field the user edits).
+    # htmlText is intentionally ignored: it holds the original import value
+    # and is never updated when the user edits the text in the canvas tool.
     if has_text:
-        emit_text = text
-        if html:
-            ht = tf.get('htmlText', '')
-            if ht:
-                emit_text = ht
-        body.write(emit_text.encode("utf-8") + b"\x00")
+        body.write(text.encode("utf-8") + b"\x00")
 
     return build_tag(TAG_DEFINE_EDIT_TEXT, body.getvalue())

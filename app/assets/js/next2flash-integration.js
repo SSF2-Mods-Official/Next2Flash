@@ -875,35 +875,57 @@
     // to the project folder, then compile from there.
     if (_currentProjectDir) {
 
-      // ── ELECTRON PATH: compile from disk + editor text patches ──
-      // _captureToolBlob() can't be used — JSON.stringify throws uncatchable
-      // RangeError for 225 MB+ projects.  Instead we collect only the small
-      // text-field objects from the editor (< 1 KB each) and send them as
-      // patches alongside the compile-disk request.  The server applies them
-      // to the on-disk project.n2d before compiling.
+      // ── ELECTRON PATH: try full editor blob capture, fall back to disk-only ──
       if (window.n2fElectron) {
-        var textPatches = _collectTextPatches();
-        _log.info('Electron — compile from disk with ' + textPatches.length + ' text patches');
+        _log.info('Electron — attempting full export via editorBlob');
         window.n2fElectron.showSaveSWFDialog(name + '.swf').then(function (outputPath) {
           if (!outputPath) { hideProgress(); return; }
-          updateProgress('Compiling SWF from disk...');
-          return fetch(API_BASE + '/api/compile-disk', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              projectDir: _currentProjectDir,
-              outputPath: outputPath,
-              textPatches: textPatches
-            }),
-          })
-            .then(function (r) {
-              if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Compilation failed'); });
-              return r.json();
+
+          function _electronDiskOnlyFallback() {
+            updateProgress('Compiling SWF from disk...');
+            var textPatches = _collectTextPatches();
+            _log.info('Electron disk-only fallback with ' + textPatches.length + ' text patches');
+            return fetch(API_BASE + '/api/compile-disk', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                projectDir: _currentProjectDir,
+                outputPath: outputPath,
+                textPatches: textPatches
+              }),
             })
-            .then(function (result) {
-              hideProgress();
-              _log.info('SWF compiled to:', result.swfPath, formatBytes(result.size));
-              toast('Exported: ' + outputPath.split(/[\\/]/).pop() + ' (' + formatBytes(result.size) + ')');
+              .then(function (r) {
+                if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Compilation failed'); });
+                return r.json();
+              })
+              .then(function (result) {
+                hideProgress();
+                _log.info('SWF compiled to:', result.swfPath, formatBytes(result.size));
+                toast('Exported: ' + outputPath.split(/[\\/]/).pop() + ' (' + formatBytes(result.size) + ')');
+              });
+          }
+
+          updateProgress('Capturing editor state...');
+          _captureToolBlob()
+            .then(function (rawBlob) {
+              updateProgress('Compiling SWF...');
+              var form = new FormData();
+              form.append('editorBlob', rawBlob, 'editor.bin');
+              form.append('outputPath', outputPath);
+              return fetch(API_BASE + '/api/save-and-compile', { method: 'POST', body: form })
+                .then(function (r) {
+                  if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Compilation failed'); });
+                  return r.json();
+                })
+                .then(function (result) {
+                  hideProgress();
+                  _log.info('SWF compiled to:', result.swfPath, formatBytes(result.size));
+                  toast('Exported: ' + outputPath.split(/[\\/]/).pop() + ' (' + formatBytes(result.size) + ')');
+                });
+            })
+            .catch(function (captureErr) {
+              _log.warn('editorBlob capture failed (' + captureErr.message + '), falling back to disk-only');
+              return _electronDiskOnlyFallback();
             });
         }).catch(function (err) {
           hideProgress();
@@ -1021,36 +1043,69 @@
    * Capture the raw tool save blob without any processing.
    * Returns the zlib-compressed blob straight from the tool's save pipeline.
    * This is fast because it avoids decompress/parse/merge/stringify/recompress.
+   *
+   * For large projects the tool's internal save may call encodeURIComponent on
+   * Capture the current editor state as a lightweight zlib-compressed blob.
+   *
+   * Uses workspace.toJSON(true) — "light mode" — which serialises all layout
+   * data (timelines, placeObjects, color transforms, new pencil shapes/recodes)
+   * but OMITS bitmap/sound pixel buffers (the server already has those on disk).
+   * This bypasses the tool's save pipeline entirely, avoiding:
+   *   - The "Generating JSON" progress popup
+   *   - The multi-second JSON.stringify of all bitmap pixel arrays
+   *   - The zlib web-worker round-trip
+   *
+   * The resulting blob is zlib-compressed (deflate with zlib header) to match
+   * what Python's zlib.decompress() expects on the server side.
+   *
+   * If the workspace API is unavailable, rejects so callers can fall back.
    */
   function _captureToolBlob() {
     return new Promise(function (resolve, reject) {
-      var anchor = document.getElementById('save-anchor');
-      if (!anchor) return reject(new Error('save-anchor not found'));
+      var Util = window.Util;
+      if (!Util || typeof Util.$currentWorkSpace !== 'function') {
+        return reject(new Error('Next2D Util not available'));
+      }
+      var ws = Util.$currentWorkSpace();
+      if (!ws || typeof ws.toJSON !== 'function') {
+        return reject(new Error('No active workspace'));
+      }
 
-      var origClick = anchor.click;
-      anchor.click = function () {
-        var blobUrl = this.href;
-        anchor.click = origClick;
+      // If a previous save left the progress dialog open/stuck, dismiss it
+      // so that the progress overlay doesn't block the UI after export.
+      if (Util.$saveProgress && Util.$saveProgress.active) {
+        _log.warn('[N2F] dismissing stuck save-progress dialog before capture');
+        try { Util.$saveProgress.end(); } catch (e) { /* ignore */ }
+      }
 
-        if (!blobUrl || !blobUrl.startsWith('blob:')) {
-          return reject(new Error('No blob URL available'));
-        }
+      // Serialise: light=true → full layout data but no bitmap/sound pixel buffers.
+      // The server preserves disk buffers via roundtrip_keys so nothing is lost.
+      var jsonStr;
+      try {
+        jsonStr = ws.toJSON(true);
+      } catch (ex) {
+        _log.error('[N2F] workspace.toJSON(true) threw:', ex.message);
+        return reject(ex);
+      }
 
-        fetch(blobUrl)
-          .then(function (r) { return r.blob(); })
-          .then(function (blob) {
-            _log.info('[PERF] captured tool blob: ' + (blob.size / 1048576).toFixed(1) + 'MB');
+      // Compress: 'deflate' = zlib-wrapped DEFLATE understood by Python zlib.decompress()
+      try {
+        var bytes = new TextEncoder().encode(jsonStr);
+        var cs = new CompressionStream('deflate');
+        var writer = cs.writable.getWriter();
+        writer.write(bytes);
+        writer.close();
+        new Response(cs.readable).arrayBuffer()
+          .then(function (buf) {
+            var blob = new Blob([buf], { type: 'application/octet-stream' });
+            _log.info('[PERF] captured editor state (light): ' +
+              (blob.size / 1024).toFixed(0) + 'KB  (json: ' +
+              (jsonStr.length / 1024).toFixed(0) + 'KB)');
             resolve(blob);
           })
           .catch(reject);
-      };
-
-      var saveBtn = document.getElementById('tools-save');
-      if (saveBtn) {
-        saveBtn.click();
-      } else {
-        anchor.click = origClick;
-        reject(new Error('tools-save button not found'));
+      } catch (ex) {
+        reject(ex);
       }
     });
   }

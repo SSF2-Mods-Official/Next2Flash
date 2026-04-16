@@ -1111,6 +1111,29 @@ def _load_external_sound(project_dir: str, lib: dict, swf_id: int) -> Optional[b
 
 # ── toPublish equivalent ─────────────────────────────────────────────────
 
+def _compute_total_frames(lib: dict) -> int:
+    """Compute the total frame count from layer character spans.
+
+    MovieClip.totalFrame in Next2D is a computed getter (max endFrame − 1).
+    It is NOT serialised by toObject(), so after _merge_editor_into_disk the
+    'totalFrame' key is absent and must be re-derived from the layer data.
+
+    endFrame values in N2D are *exclusive* (character on frames 1-10 has
+    endFrame=11), so the correct count is  max(endFrame) − 1.
+    """
+    max_end = 2  # sentinel: endFrame=2 → 1 frame (the minimum useful clip)
+    for layer in lib.get('layers', []):
+        for char in layer.get('characters', []):
+            ef = char.get('endFrame', 2)
+            if ef > max_end:
+                max_end = ef
+        for char in layer.get('emptyCharacters', []):
+            ef = char.get('endFrame', 2)
+            if ef > max_end:
+                max_end = ef
+    return max(1, max_end - 1)
+
+
 def _get_place(places_list: List[dict], frame: int) -> Optional[dict]:
     """Return the place data for `frame` (nearest earlier keyframe)."""
     best = None
@@ -2729,7 +2752,7 @@ class N2DCompiler:
             if lib.get("isFont") and not lib.get("fontData"):
                 return (f"Font '{name}' (id={lib_id}) has no"
                         " fontData -- skipping")
-            # Button shapes need buttonData
+            # Legacy button shapes (pre-container) need buttonData
             if lib.get("isButton") and not lib.get("buttonData"):
                 return (f"Button '{name}' (id={lib_id}) has no"
                         " buttonData -- skipping")
@@ -2739,7 +2762,7 @@ class N2DCompiler:
                         " binaryDataBody -- skipping")
 
         elif ltype == "container":
-            # Containers always rebuild from layers; no hard requirement
+            # Button containers use layers, not buttonData — no extra requirement
             pass
 
         return None
@@ -2922,15 +2945,8 @@ class N2DCompiler:
         h = lib.get("height", 1)
         buf_str = lib.get("buffer", "")
         pixel_data = _decode_raw_body(buf_str)
-        raw_tag_type = lib.get("rawTagType", 36)
-        if raw_tag_type == 20:  # DefineBitsLossless (RGB, no alpha)
-            from bitmap_converter import build_define_bits_lossless
-            bmp_tag = build_define_bits_lossless(swf_id, w, h, pixel_data)
-        elif raw_tag_type == 35:  # DefineBitsJPEG3 (JPEG + alpha)
-            from bitmap_converter import build_define_bits_jpeg3
-            bmp_tag = build_define_bits_jpeg3(swf_id, w, h, pixel_data)
-        else:  # 36 (DefineBitsLossless2) or any other
-            bmp_tag = build_define_bits_lossless2(swf_id, w, h, pixel_data)
+        # Always emit DefineBitsLossless2 (tag 36) — best quality, supports alpha
+        bmp_tag = build_define_bits_lossless2(swf_id, w, h, pixel_data)
         self._definition_tags.extend(bmp_tag)
 
     def _emit_shape(self, lib: dict):
@@ -2969,15 +2985,10 @@ class N2DCompiler:
                 tag = build_define_shape3(swf_id, [], [], [], bounds)
                 self._definition_tags.extend(tag)
                 return
-            # Resolve bitmap fill character IDs: if a BitmapFill has embedded
-            # pixel data but no bitmap_char_id, emit a DefineBitsLossless2 tag
-            # and assign the new SWF ID.
+            # Resolve bitmap fill character IDs
             self._resolve_bitmap_fills(fill_styles)
-            raw_tag_type = lib.get("rawTagType", 32)  # default DefineShape3
-            if raw_tag_type == 83:  # DefineShape4
-                tag = build_define_shape4(swf_id, fill_styles, line_styles, sub_paths, bounds)
-            else:
-                tag = build_define_shape3(swf_id, fill_styles, line_styles, sub_paths, bounds)
+            # Always emit DefineShape3 (tag 32) — full colour/alpha support
+            tag = build_define_shape3(swf_id, fill_styles, line_styles, sub_paths, bounds)
         self._definition_tags.extend(tag)
 
     def _resolve_bitmap_fills(self, fill_styles: list):
@@ -3028,44 +3039,24 @@ class N2DCompiler:
                   f"recode parse error: {e}  — emitting empty morph")
             s_fills, s_lines, s_paths = [], [], []
             e_fills, e_lines, e_paths = [], [], []
-        raw_tag_type = lib.get("rawTagType", 46)
-        if raw_tag_type == 84:  # DefineMorphShape2
-            from shape_converter import build_define_morph_shape2
-            tag = build_define_morph_shape2(
-                swf_id,
-                s_fills, s_lines, s_paths, start_bounds,
-                e_fills, e_lines, e_paths, end_bounds,
-            )
-        else:
-            tag = build_define_morph_shape(
-                swf_id,
-                s_fills, s_lines, s_paths, start_bounds,
-                e_fills, e_lines, e_paths, end_bounds,
-            )
+        # Always emit DefineMorphShape2 (tag 84) — supports DefineShape4 fill/line styles
+        from shape_converter import build_define_morph_shape2
+        tag = build_define_morph_shape2(
+            swf_id,
+            s_fills, s_lines, s_paths, start_bounds,
+            e_fills, e_lines, e_paths, end_bounds,
+        )
         self._definition_tags.extend(tag)
 
     def _emit_text(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_text: lib_id=%d, swf_id=%d', lib['id'], swf_id)
 
-        # Prefer raw DefineText passthrough with font ID remapping for
-        # faithful rendering (per-glyph positioning).  The N2D stores
-        # editable properties for the canvas, but at export the original
-        # DefineText binary produces identical visual output.
-        raw_body_b64 = lib.get("rawTagBody")
-        raw_tag_type = lib.get("rawTagType")
-        if raw_body_b64 and raw_tag_type in (11, 33):
-            raw_body = _decode_raw_body(raw_body_b64)
-            if raw_body:
-                font_id_map = self._build_font_id_map()
-                remapped = _remap_text_raw_body(raw_body, raw_tag_type, font_id_map)
-                tag_data = struct.pack('<H', swf_id) + remapped
-                self._definition_tags.extend(
-                    build_tag(raw_tag_type, tag_data, force_long=True))
-                return
-
-        # Fallback: rebuild from editable properties (e.g. if text was
-        # edited in the canvas and no raw body is available).
+        # Always rebuild text from structured editable properties so that
+        # any text edits the user makes in the canvas tool are reflected
+        # in the exported SWF.  The old raw-passthrough path (rawTagBody +
+        # rawTagType 11/33) is intentionally removed: it silently ignored
+        # every text edit because it replayed the original import bytes.
         font_map = self._build_font_name_map()
         tag = build_define_edit_text(swf_id, lib, font_map=font_map)
         self._definition_tags.extend(tag)
@@ -3079,19 +3070,10 @@ class N2DCompiler:
             if tag_bytes:
                 self._definition_tags.extend(tag_bytes)
                 return
-        # If we have the original raw DefineSound body (e.g. Nellymoser, ADPCM),
-        # reconstruct the original tag directly for format fidelity
-        raw_sound = lib.get("rawSoundBody")
-        if raw_sound:
-            raw_body = _decode_raw_body(raw_sound)
-            if raw_body:
-                tag_data = struct.pack('<H', swf_id) + raw_body
-                self._definition_tags.extend(
-                    build_tag(TAG_DEFINE_SOUND, tag_data, force_long=True))
-                return
         # Rebuild from buffer (WAV or MP3)
         buf_str = lib.get("buffer", "")
         if not buf_str:
+            print(f"  WARNING: Sound '{lib.get('name','?')}' has no audio buffer — skipping")
             return
         audio_bytes = _decode_raw_body(buf_str)
         if not audio_bytes:
@@ -3122,52 +3104,194 @@ class N2DCompiler:
         """Emit DefineBinaryData (tag 87) from binaryDataBody field."""
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_binary_data: lib_id=%d, swf_id=%d', lib['id'], swf_id)
-        body_data = lib.get("binaryDataBody") or lib.get("rawTagBody")
+        body_data = lib.get("binaryDataBody")
         if body_data:
             raw_body = _decode_raw_body(body_data)
             tag_data = struct.pack('<H', swf_id) + raw_body
             self._definition_tags.extend(build_tag(87, tag_data, force_long=True))
 
+    def _emit_button_from_container(self, lib: dict):
+        """Emit DefineButton2 from a button stored as an editable 4-frame container.
+
+        Frame 1=up, 2=over, 3=down, 4=hit.  Each layer in the container
+        represents one SWF button depth; characters placed on those frames
+        map back to ButtonRecords with the appropriate state-bit masks.
+        """
+        swf_id = self._lib_to_swf_id[lib["id"]]
+        log.debug('_emit_button_from_container: lib_id=%d, swf_id=%d', lib['id'], swf_id)
+
+        # Fall back to raw buttonData if layers are missing (old-format N2D file)
+        if not lib.get("layers") and lib.get("buttonData"):
+            self._emit_button(lib)
+            return
+
+        track_as_menu = lib.get('buttonTrackAsMenu', False)
+
+        # Build frame→state_bit from labels (works for both 4-frame and 12-frame formats)
+        _state_name_to_bit = {'up': 0x01, 'over': 0x02, 'down': 0x04, 'hit': 0x08}
+        _total = lib.get('totalFrame', 4)
+        _labels = sorted(lib.get('labels', []), key=lambda l: l['frame'])
+        if _labels:
+            frame_to_bit: Dict[int, int] = {}
+            for _i, _lbl in enumerate(_labels):
+                _bit = _state_name_to_bit.get(_lbl['name'].lower(), 0)
+                if not _bit:
+                    continue
+                _end = _labels[_i + 1]['frame'] if _i + 1 < len(_labels) else _total + 1
+                for _f in range(_lbl['frame'], _end):
+                    frame_to_bit[_f] = _bit
+        else:
+            frame_to_bit = {1: 0x01, 2: 0x02, 3: 0x04, 4: 0x08}  # legacy fallback
+
+        # Collect what character+transform is placed at each (depth, frame)
+        depth_frame: Dict[int, Dict[int, dict]] = {}
+        for layer in lib.get("layers", []):
+            depth = layer.get("swfDepth", 0)
+            if depth not in depth_frame:
+                depth_frame[depth] = {}
+            for char in layer.get("characters", []):
+                lib_id = char.get("libraryId", 0)
+                char_swf_id = self._lib_to_swf_id.get(lib_id)
+                if char_swf_id is None:
+                    continue
+                for frame in range(1, _total + 1):
+                    if char["startFrame"] <= frame < char["endFrame"]:
+                        if frame in depth_frame[depth]:
+                            continue  # first (topmost) character wins at this frame+depth
+                        # Find active place at this frame (last keyframe <= frame)
+                        places = sorted(char.get("places", []), key=lambda p: p["frame"])
+                        active = None
+                        for p in places:
+                            if p["frame"] <= frame:
+                                active = p
+                            else:
+                                break
+                        if active is None and places:
+                            active = places[0]
+                        if active is not None:
+                            depth_frame[depth][frame] = {
+                                'char_swf_id': char_swf_id,
+                                'matrix': active.get('matrix', [1, 0, 0, 1, 0, 0]),
+                                'cxform': active.get('colorTransform', [1, 1, 1, 1, 0, 0, 0, 0]),
+                                'filters': active.get('filter', []),
+                                'blend': active.get('blendMode', 'normal'),
+                            }
+
+        # Build merged ButtonRecords per depth: merge state bits for identical placements
+        button_records: List[dict] = []
+        for depth in sorted(depth_frame.keys()):
+            merged: List[dict] = []
+            for frame in sorted(frame_to_bit.keys()):
+                if frame not in depth_frame[depth]:
+                    continue
+                rec = depth_frame[depth][frame]
+                bit = frame_to_bit[frame]
+                found = False
+                for m in merged:
+                    if (m['char_swf_id'] == rec['char_swf_id']
+                            and m['matrix'] == rec['matrix']
+                            and m['cxform'] == rec['cxform']):
+                        m['state_bits'] |= bit
+                        found = True
+                        break
+                if not found:
+                    merged.append({
+                        'state_bits': bit,
+                        'char_swf_id': rec['char_swf_id'],
+                        'depth': depth,
+                        'matrix': list(rec['matrix']),
+                        'cxform': list(rec['cxform']),
+                        'filters': list(rec.get('filters', [])),
+                        'blend': rec.get('blend', 'normal'),
+                    })
+            button_records.extend(merged)
+
+        # Serialize ButtonRecord structs
+        records_buf = bytearray()
+        for brec in button_records:
+            state_flags = brec['state_bits']
+            blend_name = brec.get('blend', 'normal')
+            blend_code = 0
+            for k, v in NEXT2D_BLEND_MAP.items():
+                if v == blend_name:
+                    blend_code = k
+                    break
+            has_filters = bool(brec.get('filters'))
+            has_blend = blend_code not in (0, 1)
+            if has_filters:
+                state_flags |= 0x10
+            if has_blend:
+                state_flags |= 0x20
+
+            a, b, c, d, tx, ty = brec['matrix']
+            cx = brec['cxform']
+            records_buf += bytes([state_flags])
+            records_buf += struct.pack('<H', brec['char_swf_id'])
+            records_buf += struct.pack('<H', brec['depth'])
+            records_buf += write_matrix(a=a, b=b, c=c, d=d, tx=tx, ty=ty)
+            records_buf += write_cxform_alpha(
+                cx[0], cx[1], cx[2], cx[3], cx[4], cx[5], cx[6], cx[7])
+            if has_filters:
+                records_buf += encode_filter_list(brec['filters'])
+            if has_blend:
+                records_buf += bytes([blend_code])
+
+        # Serialize ButtonCondActions (ActionScript)
+        button_actions = lib.get('buttonActions', [])
+        actions_buf = bytearray()
+        for i, ba in enumerate(button_actions):
+            action_bytes = _decode_raw_body(ba.get('actionBytes', ''))
+            cond_flags = ba.get('conditions', 0)
+            is_last = (i == len(button_actions) - 1)
+            size_field = 0 if is_last else (4 + len(action_bytes))
+            actions_buf += struct.pack('<HH', size_field, cond_flags)
+            actions_buf += action_bytes
+
+        # Build tag body: [trackFlags][actionOffset2][records][0x00][actions]
+        track_flags = 0x01 if track_as_menu else 0x00
+        action_offset = (2 + len(records_buf) + 1) if actions_buf else 0
+        body = (bytes([track_flags])
+                + struct.pack('<H', action_offset)
+                + bytes(records_buf) + b'\x00'
+                + bytes(actions_buf))
+        tag_data = struct.pack('<H', swf_id) + body
+        self._definition_tags.extend(build_tag(34, tag_data, force_long=True))
+
     def _emit_button(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_button: lib_id=%d, swf_id=%d', lib['id'], swf_id)
         # Emit button from buttonData field
-        body_data = lib.get("buttonData") or lib.get("rawTagBody")
+        body_data = lib.get("buttonData")
         if body_data:
             raw_body = _decode_raw_body(body_data)
             # Remap charID references inside ButtonRecords
             raw_body = _remap_button_raw_body(raw_body, self._orig_to_new_id)
             tag_data = struct.pack('<H', swf_id) + raw_body
             self._definition_tags.extend(build_tag(34, tag_data, force_long=True))
-        # Emit button auxiliary tags (DefineButtonSound, DefineButtonCxform)
-        btn_aux = lib.get("buttonAuxTags", [])
-        for aux in btn_aux:
-            aux_type = aux.get('tagType')
-            aux_body = _decode_raw_body(aux.get('body', ''))
-            if aux_body and len(aux_body) >= 2:
-                # Remap the button charID reference in the first 2 bytes
-                orig_btn_cid = struct.unpack_from('<H', aux_body, 0)[0]
-                new_btn_cid = self._orig_to_new_id.get(orig_btn_cid, swf_id)
-                remapped = struct.pack('<H', new_btn_cid) + aux_body[2:]
-                self._definition_tags.extend(
-                    build_tag(aux_type, remapped, force_long=True))
 
     def _emit_container(self, lib: dict):
+        # Buttons imported from SWF are stored as 4-frame containers
+        if lib.get("isButton"):
+            self._emit_button_from_container(lib)
+            return
         swf_id = self._lib_to_swf_id[lib["id"]]
         log.debug('_emit_container: lib_id=%d, swf_id=%d, name=%s', lib['id'], swf_id, lib.get('name', '?'))
         # Always rebuild containers from JSON so that editor placement edits
         # (position, colorTransform, filters, etc.) are compiled into the SWF.
         tp = to_publish(lib, self._lib_to_char_idx, self.id_to_lib)
-        total_frames = lib.get("totalFrame", 1)
+        # totalFrame is NOT serialised by MovieClip.toObject() (it's a computed
+        # getter), so it can be absent after _merge_editor_into_disk.  Fall back
+        # to computing it from layer character endpoints.
+        total_frames = lib.get("totalFrame") or _compute_total_frames(lib)
         labels = lib.get("labels", [])
         actions = lib.get("actions", [])
 
-        # SoundStreamHead2 tag passthrough
-        ssh_raw = lib.get("rawSoundStreamHead")
+        # SoundStreamHead2 tag — rebuild from structured dict
         ssh_prefix = b""
-        if ssh_raw:
-            ssh_bytes = _decode_raw_body(ssh_raw)
-            ssh_prefix = build_tag(45, ssh_bytes)
+        ssh_parsed = lib.get("soundStreamParsed")
+        if ssh_parsed:
+            from compilation_pipeline import _rebuild_sound_stream_head
+            ssh_prefix = build_tag(45, _rebuild_sound_stream_head(ssh_parsed))
 
         inner_tags = ssh_prefix + build_timeline_tags(
             total_frames, tp, labels, actions, self._char_idx_to_swf_id,
@@ -3258,7 +3382,7 @@ class N2DCompiler:
             return build_tag_show_frame() + build_tag_end()
 
         tp = to_publish(main, self._lib_to_char_idx, self.id_to_lib)
-        total_frames = main.get("totalFrame", 1)
+        total_frames = main.get("totalFrame") or _compute_total_frames(main)
         labels = main.get("labels", [])
         actions = main.get("actions", [])
 
@@ -3363,7 +3487,7 @@ class N2DCompiler:
         fps = self.stage.get("fps", 24)
         bg_color = self.stage.get("bgColor", "#ffffff")
         main = self.id_to_lib.get(0, {})
-        total_frames = main.get("totalFrame", 1)
+        total_frames = main.get("totalFrame") or _compute_total_frames(main)
         swf_version = self.data.get("swfVersion", 14)
         swf_compressed = self.data.get("swfCompressed", True)
 

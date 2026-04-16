@@ -173,17 +173,34 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
             disk_libs.append(elib)
             continue
 
-        # Preserve asset/roundtrip fields from disk that the editor doesn't carry
+        # Preserve asset/roundtrip fields from disk that the editor doesn't carry.
+        # Also preserve totalFrame: MovieClip.toObject() omits it (it's a
+        # computed getter), so without this the compiler would default to 1 frame.
+        # rawSoundBody / rawSoundStreamHead are raw binary blobs the editor never
+        # touches; without them Nellymoser/ADPCM sounds and stream-audio are lost.
         roundtrip_keys = ('swfCharId',
-                          'fontAuxTags', 'externalFile', 'buttonAuxTags',
+                          'externalFile',
                           'fontData', 'fontTagType',
                           'buttonData', 'binaryDataBody', 'soundFormat',
                           'isBinaryData', 'isFont', 'isButton', 'isMorphShape',
-                          'html')
+                          'fontAuxParsed', # structured font-aux data (align zones, CSM, name)
+                          'buffer',        # bitmap/sound pixel data (absent in light-mode editor blobs)
+                          'buttonTrackAsMenu',  # SWF button track-as-menu flag
+                          'buttonActions',      # SWF ButtonCondActions (ActionScript)
+                          )
         saved = {}
         for k in roundtrip_keys:
             if k in dlib:
                 saved[k] = dlib[k]
+
+        # Save swfDepth per-layer by name so we can restore it after the merge.
+        # Layer.toObject() does not include swfDepth, so it's lost otherwise,
+        # causing layer depths to be reassigned sequentially on the next compile.
+        disk_layer_depths: dict = {}
+        for dl in dlib.get('layers', []):
+            lname = dl.get('name')
+            if lname and 'swfDepth' in dl:
+                disk_layer_depths[lname] = dl['swfDepth']
 
         # Take all fields from editor (has updated positions etc.)
         dlib.clear()
@@ -193,6 +210,15 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
         for k, v in saved.items():
             if k not in dlib or not dlib[k]:
                 dlib[k] = v
+
+        # Restore swfDepth on layers that match by name (existing layers).
+        # New layers (e.g. a freshly drawn pencil shape layer) won't match and
+        # will fall back to sequential depth assignment at compile time.
+        if disk_layer_depths:
+            for el in dlib.get('layers', []):
+                lname = el.get('name')
+                if lname and lname in disk_layer_depths and 'swfDepth' not in el:
+                    el['swfDepth'] = disk_layer_depths[lname]
 
 
 def _apply_text_patches_to_n2d(n2d_path: str, text_patches: list,
@@ -239,10 +265,10 @@ def _apply_text_patches_to_n2d(n2d_path: str, text_patches: list,
 
     # Apply patches
     roundtrip_keys = frozenset((
-        'swfCharId', 'fontAuxTags', 'externalFile', 'buttonAuxTags',
+        'swfCharId', 'externalFile',
         'fontData', 'fontTagType', 'buttonData', 'binaryDataBody',
         'soundFormat', 'isBinaryData', 'isFont', 'isButton',
-        'isMorphShape', 'html',
+        'isMorphShape',
     ))
     patched = 0
     for lib in data.get('libraries', []):
@@ -311,10 +337,10 @@ def _apply_text_patches_inline(data: dict, text_patches: list) -> int:
         return 0
 
     roundtrip_keys = frozenset((
-        'swfCharId', 'fontAuxTags', 'externalFile', 'buttonAuxTags',
+        'swfCharId', 'externalFile',
         'fontData', 'fontTagType', 'buttonData', 'binaryDataBody',
         'soundFormat', 'isBinaryData', 'isFont', 'isButton',
-        'isMorphShape', 'html',
+        'isMorphShape',
     ))
     patched = 0
     for lib in data.get('libraries', []):
@@ -1099,6 +1125,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             n2d_data, _ = self._extract_upload(body, 'n2d')
             # disk-only flag: compile from existing project.n2d without any editor overlay
             disk_only = b'diskOnly' in body and not editor_blob and not n2d_data
+            # Optional: write SWF to a specific file path (Electron mode) instead of HTTP response
+            output_path_override = self._extract_form_field(body, 'outputPath') or ''
 
             n2d_path = os.path.join(project_dir, 'project.n2d')
 
@@ -1195,38 +1223,55 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             else:
                 return self._error_response(400, 'No editorBlob or n2d field')
 
-            # Save project
+            # Compile SWF from in-memory merged data (skip save_project_folder)
             _t3 = _time.perf_counter()
-            mod_swf = _get_swf_to_n2d()
-            mod_swf.save_project_folder(n2d_json, project_dir)
-            _t3a = _time.perf_counter()
-            print(f"[PERF] save project: {(_t3a-_t3)*1000:.0f}ms")
-
-            # Compile from saved project
-            if not os.path.isfile(n2d_path):
-                return self._error_response(400, 'No project.n2d after save')
-
             name = os.path.basename(project_dir)
-            mod_compile = _get_compile_n2d()
+            shared_dir = os.path.join(SERVER_DIR, "..", "shared")
 
+            import compilation_pipeline as _cp
             with tempfile.TemporaryDirectory() as tmpdir:
                 swf_path = os.path.join(tmpdir, f"{name}.swf")
-                shared_dir = os.path.join(SERVER_DIR, "..", "shared")
                 if not os.path.isdir(shared_dir):
                     shared_dir = tmpdir
 
-                compiler = mod_compile.N2DCompiler(
+                ctx = _cp.CompilationContext(
                     n2d_path=n2d_path,
                     shared_dir=shared_dir,
                     output_path=swf_path,
+                    data_override=n2d_json,
+                    project_dir_override=project_dir,
                 )
-                compiler.compile()
+                pipeline = _cp.create_default_pipeline()
+                pipeline.execute(ctx)
                 _t4 = _time.perf_counter()
-                print(f"[PERF] compile: {(_t4-_t3a)*1000:.0f}ms")
+                print(f"[PERF] compile (in-memory): {(_t4-_t3)*1000:.0f}ms")
 
                 with open(swf_path, "rb") as f:
                     swf_bytes = f.read()
 
+            # Persist project state to disk (fast: skips bitmaps already on disk)
+            _t4b = _time.perf_counter()
+            mod_swf = _get_swf_to_n2d()
+            mod_swf.save_project_folder(n2d_json, project_dir)
+            _t4c = _time.perf_counter()
+            print(f"[PERF] save project (post-compile): {(_t4c-_t4b)*1000:.0f}ms")
+
+            if output_path_override:
+                # Electron mode: write SWF to the requested file path
+                out_dir = os.path.dirname(output_path_override)
+                if out_dir:
+                    os.makedirs(out_dir, exist_ok=True)
+                with open(output_path_override, 'wb') as f_out:
+                    f_out.write(swf_bytes)
+                resp_json = json.dumps({'ok': True, 'swfPath': output_path_override, 'size': len(swf_bytes)}).encode('utf-8')
+                self.send_response(200)
+                self._cors_headers()
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(resp_json)))
+                self.end_headers()
+                self.wfile.write(resp_json)
+            else:
+                # Browser mode: stream SWF bytes directly
                 self.send_response(200)
                 self._cors_headers()
                 self.send_header("Content-Type", "application/octet-stream")
@@ -1234,8 +1279,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(swf_bytes)))
                 self.end_headers()
                 self.wfile.write(swf_bytes)
-                _t5 = _time.perf_counter()
-                print(f"[PERF] save-and-compile total: {(_t5-_t0)*1000:.0f}ms")
+            _t5 = _time.perf_counter()
+            print(f"[PERF] save-and-compile total: {(_t5-_t0)*1000:.0f}ms")
 
         except Exception as e:
             traceback.print_exc()
@@ -2303,9 +2348,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
         """Build sidecar metadata dictionary."""
         sidecar = {}
         rt_fields = ("swfCharId", "inBitmap", "grid", "bitmapId",
-                      "fontData", "fontTagType", "fontAuxTags",
-                      "buttonData", "binaryDataBody", "soundFormat",
-                      "buttonAuxTags")
+                      "fontData", "fontTagType", "fontAuxParsed",
+                      "buttonData", "binaryDataBody", "soundFormat")
         lib_meta = {}
         for lib in n2d_json.get("libraries", []):
             meta = {}
@@ -2317,7 +2361,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
         if lib_meta:
             sidecar["libraries"] = lib_meta
 
-        for key in ("rawGlobalTags", "swfVersion", "swfCompressed",
+        for key in ("swfVersion", "swfCompressed",
                      "rootTimelineDefIds", "characterId", "scripts"):
             if key in n2d_json:
                 sidecar[key] = n2d_json[key]

@@ -272,7 +272,7 @@ class TextField extends Instance
             .getElementById("font-input-select");
 
         fontInputSelect.children[
-            this._$inputType === "static" ? 0 : 1
+            this._$inputType === "static" ? 0 : this._$inputType === "dynamic" ? 1 : 2
         ].selected = true;
 
         document
@@ -435,7 +435,15 @@ class TextField extends Instance
     set inputType (input_type)
     {
         input_type = `${input_type}`.toLowerCase();
-        this._$inputType = input_type === "static" ? input_type : "input";
+        switch (input_type) {
+            case "static":
+            case "dynamic":
+                this._$inputType = input_type;
+                break;
+            default:
+                this._$inputType = "input";
+                break;
+        }
     }
 
     /**

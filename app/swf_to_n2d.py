@@ -1192,7 +1192,7 @@ def parse_define_text(tag_data: bytes, tag_type: int,
         'text': text_str,
         'font': font_name,
         'fontType': font_type,
-        'inputType': 'dynamic',  # static text → read-only dynamic
+        'inputType': 'static',  # DefineText is always static glyph text
         'size': font_size,
         'align': 'left',
         'color': current_color,
@@ -1619,7 +1619,7 @@ def parse_define_edit_text(tag_data: bytes, font_names: Dict[int, str],
 
     # Determine inputType
     if read_only:
-        input_type = "dynamic"
+        input_type = "static" if was_static else "dynamic"
     else:
         input_type = "input"
 
@@ -2746,7 +2746,9 @@ class N2DBuilder:
             # FilterList
             filters = []
             if has_filter:
-                filters, off = _read_swf_filter_list(data_after_cid, off)
+                _br_f = BitReader(data_after_cid, off)
+                filters = [f for f in read_filter_list(_br_f) if f is not None]
+                off = _br_f.byte_pos
             blend_mode = 0
             if has_blend and off < len(data_after_cid):
                 blend_mode = data_after_cid[off]; off += 1
@@ -3137,15 +3139,10 @@ class N2DBuilder:
 
             buffer_data = b''
             sound_fmt = 'unknown'
-            raw_sound_body = None
             if cid in sound_data_cache:
                 fmt_name, audio_bytes, swf_rate = sound_data_cache[cid]
                 sound_fmt = fmt_name
-                # Preserve raw DefineSound body for non-MP3 formats (Nellymoser, ADPCM)
-                # so export can reconstruct the original tag faithfully
-                if fmt_name in ('nellymoser', 'adpcm') and cid in self.raw_tag_data:
-                    raw_sound_body = self.raw_tag_data[cid][1]  # body after charID
-                # Use parallel-converted MP3 if available
+                # Use parallel-converted MP3 if available (Nellymoser → MP3)
                 if cid in nelly_results:
                     audio_bytes = nelly_results[cid]
                     sound_fmt = 'mp3'
@@ -3164,8 +3161,6 @@ class N2DBuilder:
                 'volume': 100,
                 'loopCount': 0,
             }
-            if raw_sound_body is not None:
-                entry['rawSoundBody'] = raw_sound_body
             self.libraries.append(entry)
             sound_count += 1
 
@@ -3214,11 +3209,8 @@ class N2DBuilder:
                             self.font_names, self.font_attrs,
                             self.font_code_tables
                         )
-                        # Preserve raw tag body so export can emit the original
-                        # DefineText binary (with font-ID remapping) instead of
-                        # converting to DefineEditText which garbles glyph rendering.
-                        parsed_props['rawTagBody'] = base64.b64encode(body).decode('ascii')
-                        parsed_props['rawTagType'] = tag_type
+                        # rawTagBody intentionally NOT stored — _emit_text always
+                        # rebuilds from structured fields as DefineEditText.
                         text_parsed += 1
                     except Exception as e:
                         print(f"    Warning: Could not parse DefineText {cid}: {e}")
@@ -3299,20 +3291,15 @@ class N2DBuilder:
                 # Store font body as fontData for compilation
                 entry['fontData'] = base64.b64encode(body).decode('ascii')
                 entry['fontTagType'] = tag_type
-            # Attach font auxiliary tags — use structured parsed data when available
+            # Attach font auxiliary tags as structured fields only
             if cid in self.parsed_font_aux:
                 entry['fontAuxParsed'] = self.parsed_font_aux[cid]
-            if cid in _font_aux_by_cid:
-                entry['fontAuxTags'] = [
-                    {'tagType': tt, 'body': base64.b64encode(body).decode('ascii')}
-                    for tt, body in _font_aux_by_cid[cid]
-                ]
             self.libraries.append(entry)
             font_count += 1
 
         step(f"Built {font_count} font entries")
 
-        # Phase 7a: Build button entries (DefineButton2) — stored as buttonData
+        # Phase 7a: Build button entries (DefineButton2) — editable 4-frame containers
         button_count = 0
         for cid in all_char_ids:
             if self.char_types[cid] != 'button':
@@ -3320,41 +3307,29 @@ class N2DBuilder:
             lid = self.swf_to_n2d[cid]
             sym_name = self.symbol_names.get(cid, '')
             display_name = sym_name.split('.')[-1] if sym_name else f"Button_{cid}"
-            entry = {
-                'id': lid,
-                'swfCharId': cid,
-                'name': display_name,
-                'type': 'shape',
-                'isButton': True,
-                'symbol': sym_name,
-                'folderId': self.folder_ids.get('button', 0),
-                'bitmapId': 0,
-                'grid': self.scaling_grids.get(cid),
-                'inBitmap': False,
-                'recodes': [],
-                'bounds': self._compute_button_bounds(cid),
-            }
+            bounds = self._compute_button_bounds(cid)
+
+            # Parse button data into structured form
+            button_parsed = {}
+            button_data_b64 = None
             if cid in self.raw_tag_data:
-                tag_type, body = self.raw_tag_data[cid]
-                entry['buttonData'] = base64.b64encode(body).decode('ascii')
-                # Add structured button parse
+                _, body = self.raw_tag_data[cid]
+                button_data_b64 = base64.b64encode(body).decode('ascii')
                 try:
-                    # body starts after charID in raw_tag_data, but DefineButton2
-                    # raw_tag_data stores the full body after charID
-                    entry['buttonParsed'] = self._parse_button2(body)
+                    button_parsed = self._parse_button2(body)
                 except Exception as e:
                     log.warning("Could not parse button %d: %s", cid, e)
-            # Attach button auxiliary tags (DefineButtonSound, DefineButtonCxform)
-            if cid in self.button_aux_tags:
-                entry['buttonAuxTags'] = [
-                    {'tagType': tt, 'body': base64.b64encode(body).decode('ascii')}
-                    for tt, body in self.button_aux_tags[cid]
-                ]
+
+            # Store as editable container (4 frames: up/over/down/hit)
+            entry = self._button_as_container(
+                lid, cid, display_name, sym_name, bounds, button_parsed)
+            # Persist button actions (ActionScript) separately — editor won't touch them
+            entry['buttonActions'] = button_parsed.get('buttonActions', [])
             self.libraries.append(entry)
             button_count += 1
 
         if button_count:
-            step(f"Built {button_count} button entries")
+            step(f"Built {button_count} button entries (editable containers)")
 
         # Phase 7a.5: Build binary data entries (DefineBinaryData, tag 87)
         bindata_count = 0
@@ -3402,10 +3377,9 @@ class N2DBuilder:
             container = self._build_container(lid, display_name, sym_name,
                                               frame_count, frames)
             container['swfCharId'] = cid
-            # Capture SoundStreamHead (tag 18) and SoundStreamHead2 (tag 45) for roundtrip
+            # Capture SoundStreamHead (tag 18/45) as structured fields only
             for ntag in nested_tags:
                 if ntag.tag_type in (18, 45):
-                    container['rawSoundStreamHead'] = base64.b64encode(ntag.data).decode('ascii')
                     container['soundStreamParsed'] = self._parse_sound_stream_head(bytes(ntag.data))
                     break
             self.libraries.append(container)
@@ -3991,6 +3965,175 @@ class N2DBuilder:
             result['reinstated'] = True
         return result
 
+    def _button_as_container(self, lid: int, cid: int, display_name: str,
+                             sym_name: str, bounds: dict,
+                             button_parsed: dict) -> dict:
+        """Convert parsed DefineButton2 data into an editable 4-frame N2D container.
+
+        Frame mapping: 1=up, 2=over, 3=down, 4=hit.
+        Each SWF depth becomes one layer; characters are placed on the frames
+        corresponding to the button states they appear in.
+        """
+        # 3 frames per state → labels are wide enough to read in the timeline
+        _FPS = 3  # frames per state
+        state_to_frame_start = {'up': 1, 'over': 1 + _FPS, 'down': 1 + 2 * _FPS, 'hit': 1 + 3 * _FPS}
+        _TOTAL = 4 * _FPS  # 12 total frames
+
+        # Collect per-depth, per-frame placements.
+        # depth → {frame_no: {char_swf_id, matrix, cxform, filters, blend}}
+        depth_frames: dict = {}
+        for state_name, frame_start in state_to_frame_start.items():
+            for rec in button_parsed.get('buttonStates', {}).get(state_name, []):
+                depth = rec['placeDepth']
+                if depth not in depth_frames:
+                    depth_frames[depth] = {}
+                m = rec['matrix']
+                cx = rec['colorTransform']
+                # _read_swf_matrix returns dict with tx/ty in twips → convert to pixels
+                matrix_list = [
+                    m.get('scaleX', 1.0),
+                    m.get('rotateSkew0', 0.0),
+                    m.get('rotateSkew1', 0.0),
+                    m.get('scaleY', 1.0),
+                    m.get('translateX', 0) / 20.0,
+                    m.get('translateY', 0) / 20.0,
+                ]
+                # _read_swf_cxform_alpha returns raw integers → normalize to N2D format
+                cxform_list = [
+                    cx.get('redMultTerm', 256) / 256.0,
+                    cx.get('greenMultTerm', 256) / 256.0,
+                    cx.get('blueMultTerm', 256) / 256.0,
+                    cx.get('alphaMultTerm', 256) / 256.0,
+                    float(cx.get('redAddTerm', 0)),
+                    float(cx.get('greenAddTerm', 0)),
+                    float(cx.get('blueAddTerm', 0)),
+                    float(cx.get('alphaAddTerm', 0)),
+                ]
+                fd = {
+                    'char_swf_id': rec['characterId'],
+                    'matrix': matrix_list,
+                    'cxform': cxform_list,
+                    'filters': rec.get('filters', []),
+                    'blend': rec.get('blendMode', 0),
+                }
+                # Fill all frames in this state's range with the same placement
+                for f in range(frame_start, frame_start + _FPS):
+                    if f not in depth_frames[depth]:  # first state wins for shared frames
+                        depth_frames[depth][f] = fd
+
+        # Build one layer per depth — highest depth first (N2D renders layers[0] on top)
+        layers = []
+        for depth_idx, depth in enumerate(sorted(depth_frames.keys(), reverse=True)):
+            frames_at_depth = depth_frames[depth]
+            all_frame_nos = sorted(frames_at_depth.keys())
+
+            # Group frames into contiguous spans of the same characterId
+            characters = []
+            i = 0
+            while i < len(all_frame_nos):
+                span_f0 = all_frame_nos[i]
+                span_cid_swf = frames_at_depth[span_f0]['char_swf_id']
+                span_lib_id = self.swf_to_n2d.get(span_cid_swf, 0)
+                # Extend span while contiguous frames and same characterId
+                j = i + 1
+                while (j < len(all_frame_nos)
+                       and all_frame_nos[j] == all_frame_nos[j - 1] + 1
+                       and frames_at_depth[all_frame_nos[j]]['char_swf_id'] == span_cid_swf):
+                    j += 1
+                span_frames = all_frame_nos[i:j]
+
+                # Build place entries (only emit a new keyframe when transform changes)
+                places = []
+                prev_key = None
+                for f in span_frames:
+                    fd = frames_at_depth[f]
+                    blend_name = BLEND_MODE_MAP.get(fd['blend'], 'normal') if fd['blend'] else 'normal'
+                    key = (tuple(fd['matrix']), tuple(fd['cxform']),
+                           blend_name, str(fd.get('filters', [])))
+                    if key != prev_key:
+                        places.append({
+                            'frame': f,
+                            'depth': 0,
+                            'blendMode': blend_name,
+                            'filter': fd.get('filters', []),
+                            'matrix': fd['matrix'],
+                            'colorTransform': fd['cxform'],
+                        })
+                        prev_key = key
+
+                reinstated = (i > 0)
+                self.next_char_id += 1
+                char_entry = {
+                    'id': self.next_char_id,
+                    'name': '',
+                    'libraryId': span_lib_id,
+                    'startFrame': span_frames[0],
+                    'endFrame': span_frames[-1] + 1,
+                    'tween': [],
+                    'places': places,
+                }
+                if reinstated:
+                    char_entry['reinstated'] = True
+                characters.append(char_entry)
+                i = j
+
+            # Compute empty frame ranges (gaps in the _TOTAL-frame window)
+            occupied = set()
+            for ch in characters:
+                for f in range(ch['startFrame'], ch['endFrame']):
+                    occupied.add(f)
+            empty = []
+            gap_start = None
+            for f in range(1, _TOTAL + 2):  # sentinel = _TOTAL+1
+                if f not in occupied:
+                    if gap_start is None:
+                        gap_start = f
+                else:
+                    if gap_start is not None:
+                        empty.append({'startFrame': gap_start, 'endFrame': f})
+                        gap_start = None
+            if gap_start is not None:
+                empty.append({'startFrame': gap_start, 'endFrame': _TOTAL + 1})
+
+            layer_color = LAYER_COLORS[depth_idx % len(LAYER_COLORS)]
+            layers.append({
+                'name': f"depth_{depth}",
+                'swfDepth': depth,
+                'light': False,
+                'disable': False,
+                'lock': False,
+                'mode': 0,
+                'maskId': None,
+                'guideId': None,
+                'color': layer_color,
+                'characters': characters,
+                'emptyCharacters': empty,
+            })
+
+        return {
+            'id': lid,
+            'swfCharId': cid,
+            'name': display_name,
+            'type': 'container',
+            'isButton': True,
+            'buttonTrackAsMenu': button_parsed.get('trackAsMenu', False),
+            'symbol': sym_name,
+            'folderId': self.folder_ids.get('button', 0),
+            'bounds': bounds,
+            'totalFrame': _TOTAL,
+            'currentFrame': 1,
+            'leftFrame': 1,
+            'labels': [
+                {'frame': 1,            'name': 'up'},
+                {'frame': 1 + _FPS,     'name': 'over'},
+                {'frame': 1 + 2 * _FPS, 'name': 'down'},
+                {'frame': 1 + 3 * _FPS, 'name': 'hit'},
+            ],
+            'actions': [],
+            'sounds': [],
+            'layers': layers,
+        }
+
     def _compute_button_bounds(self, cid: int) -> dict:
         """Compute bounds for a DefineButton2 by unioning referenced character bounds."""
         fallback = {'xMin': 0, 'xMax': 20, 'yMin': 0, 'yMax': 20}
@@ -4208,14 +4351,7 @@ class N2DBuilder:
                 'rulerY': [],
             },
         }
-        # Include raw SWF global tags as base64 for 1:1 roundtrip passthrough
-        if self.global_raw_tags:
-            result['rawGlobalTags'] = [
-                {'tagType': tt, 'body': base64.b64encode(body).decode('ascii')}
-                for tt, body in self.global_raw_tags
-            ]
-
-        # ── Structured global tag fields (replace raw passthrough) ──
+        # ── Structured global tag fields (no rawGlobalTags passthrough) ──
         if self.parsed_abc_blocks:
             result['abcBlocks'] = self.parsed_abc_blocks
         if self.parsed_protect:
@@ -4351,6 +4487,11 @@ def save_project_folder(data: dict, folder_path: str):
 
         fname = f"{cid}_{name}.png"
         fpath = os.path.join(bitmaps_dir, fname)
+
+        # Skip re-encoding if the file already exists (unchanged bitmap)
+        if os.path.isfile(fpath):
+            lib['externalFile'] = f'bitmaps/{fname}'
+            return 1
 
         if buf.startswith('b64:'):
             rgba = base64.b64decode(buf[4:])
