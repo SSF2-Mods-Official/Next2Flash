@@ -1,8 +1,6 @@
 @echo off
-title Next2Flash (Electron)
-echo.
-echo  Starting Next2Flash Desktop...
-echo.
+:: Launch Next2Flash Desktop without a console window.
+:: Invokes electron.exe directly — no cmd/npx intermediary.
 
 set "ELECTRON_EXE=%~dp0electron\node_modules\electron\dist\electron.exe"
 set "ELECTRON_DIR=%~dp0electron"
@@ -16,11 +14,3 @@ if not exist "%ELECTRON_EXE%" (
 
 start "" "%ELECTRON_EXE%" "%ELECTRON_DIR%"
 exit
-
-if errorlevel 1 (
-    echo.
-    echo  ERROR: Electron app failed to start.
-    echo  Make sure you ran "npm install" in the electron folder.
-    echo.
-    pause
-)

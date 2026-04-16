@@ -4,13 +4,17 @@ echo.
 echo  Starting Next2Flash...
 echo.
 
-:: Kill any existing server on port 5000
+:: Check if a server is already running on port 5000
 echo  Checking for existing server on port 5000...
 for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr ":5000 " ^| findstr "LISTENING"') do (
-    echo  Stopping old server PID %%p...
-    taskkill /F /PID %%p >nul 2^>^&1
+    echo  Next2Flash is already running. Opening browser...
+    start "" "http://localhost:5000"
+    echo.
+    echo  Brought existing instance to front.
+    echo.
+    timeout /t 3 /nobreak >nul
+    exit /b 0
 )
-timeout /t 2 /nobreak >nul
 
 python "%~dp0app\server.py" %*
 

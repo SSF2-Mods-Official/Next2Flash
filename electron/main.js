@@ -44,11 +44,29 @@ app.commandLine.appendSwitch('use-angle', 'd3d11');
 // Enable GPU process scheduling priority for smoother frame delivery
 app.commandLine.appendSwitch('enable-features', 'GpuScheduling');
 
+// ── Single-instance lock ───────────────────────────────────────────────────
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  // Another instance is already running — quit immediately.
+  app.quit();
+}
+
 let mainWindow = null;
+let splashWindow = null;
 let profilerWindow = null;
+let serverConsoleWindow = null;
 let pythonProcess = null;
 let profilerLogPath = null;
 let profilerLogStream = null;
+const consoleLogBuffer = [];  // buffer all server output so Console window can replay history
+
+app.on('second-instance', () => {
+  // Someone tried to run a second instance — focus our window instead.
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
 
 // ── Python server management ───────────────────────────────────────────────
 
@@ -61,14 +79,17 @@ function startPythonServer() {
       cwd: APP_DIR,
       env: { ...process.env, N2F_PORT: String(SERVER_PORT), N2F_ELECTRON: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     });
 
     pythonProcess.stdout.on('data', (data) => {
       process.stdout.write(`[PY] ${data}`);
+      sendConsoleLog(data.toString(), 'stdout');
     });
 
     pythonProcess.stderr.on('data', (data) => {
       process.stderr.write(`[PY] ${data}`);
+      sendConsoleLog(data.toString(), 'stderr');
     });
 
     pythonProcess.on('error', (err) => {
@@ -79,6 +100,8 @@ function startPythonServer() {
     pythonProcess.on('exit', (code) => {
       console.log(`[N2F] Python server exited with code ${code}`);
       pythonProcess = null;
+      sendConsoleLog(`Server exited with code ${code}`, 'system');
+      sendConsoleStatus('stopped', `Exited (code ${code})`);
     });
 
     // Poll until the server responds
@@ -170,6 +193,91 @@ function createWindow() {
     if (url.startsWith('http')) shell.openExternal(url);
     return { action: 'deny' };
   });
+}
+
+// ── Splash window ──────────────────────────────────────────────────────────
+
+function createSplashWindow() {
+  splashWindow = new BrowserWindow({
+    width: 380,
+    height: 220,
+    frame: false,
+    transparent: false,
+    resizable: false,
+    alwaysOnTop: true,
+    center: true,
+    title: 'Next2Flash',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  splashWindow.loadFile(path.join(__dirname, 'splash.html'));
+
+  splashWindow.on('closed', () => {
+    splashWindow = null;
+  });
+}
+
+function closeSplash() {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.close();
+    splashWindow = null;
+  }
+}
+
+// ── Server Console window ──────────────────────────────────────────────────
+
+function createServerConsoleWindow() {
+  if (serverConsoleWindow) {
+    serverConsoleWindow.focus();
+    return;
+  }
+
+  serverConsoleWindow = new BrowserWindow({
+    width: 700,
+    height: 500,
+    minWidth: 400,
+    minHeight: 250,
+    title: 'N2F Server Console',
+    webPreferences: {
+      preload: path.join(__dirname, 'server-console-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  serverConsoleWindow.loadFile(path.join(__dirname, 'server-console.html'));
+
+  // Replay buffered log history and send current status once the window is ready
+  serverConsoleWindow.webContents.once('did-finish-load', () => {
+    for (const entry of consoleLogBuffer) {
+      serverConsoleWindow.webContents.send('console:log', entry);
+    }
+    const state = pythonProcess ? 'running' : 'stopped';
+    const text = pythonProcess ? `Running on port ${SERVER_PORT}` : 'Stopped';
+    serverConsoleWindow.webContents.send('console:status', state, text);
+  });
+
+  serverConsoleWindow.on('closed', () => {
+    serverConsoleWindow = null;
+  });
+}
+
+function sendConsoleLog(text, stream) {
+  const entry = { text, stream };
+  consoleLogBuffer.push(entry);
+  if (serverConsoleWindow && !serverConsoleWindow.isDestroyed()) {
+    serverConsoleWindow.webContents.send('console:log', entry);
+  }
+}
+
+function sendConsoleStatus(state, text) {
+  if (serverConsoleWindow && !serverConsoleWindow.isDestroyed()) {
+    serverConsoleWindow.webContents.send('console:status', state, text);
+  }
 }
 
 // ── Profiler window ────────────────────────────────────────────────────────
@@ -290,6 +398,11 @@ function buildMenu() {
           label: 'Performance Profiler',
           accelerator: 'CmdOrCtrl+Shift+P',
           click: () => createProfilerWindow(),
+        },
+        {
+          label: 'Server Console',
+          accelerator: 'CmdOrCtrl+Shift+L',
+          click: () => createServerConsoleWindow(),
         },
         { type: 'separator' },
         { role: 'reload' },
@@ -427,9 +540,13 @@ const userDataPath = path.join(app.getPath('appData'), 'Next2Flash');
 app.setPath('userData', userDataPath);
 
 app.whenReady().then(async () => {
+  createSplashWindow();
+
   try {
     await startPythonServer();
+    sendConsoleStatus('running', `Running on port ${SERVER_PORT}`);
   } catch (err) {
+    closeSplash();
     dialog.showErrorBox(
       'Failed to start Python server',
       `${err.message}\n\nMake sure Python 3.10+ is installed and on PATH.\nOr set the N2F_PYTHON environment variable.`
@@ -440,7 +557,7 @@ app.whenReady().then(async () => {
 
   buildMenu();
   createWindow();
-  createProfilerWindow();
+  closeSplash();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
