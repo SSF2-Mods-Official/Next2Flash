@@ -64,6 +64,16 @@ header button:hover { background: #505050; }
 .log-stdout { color: #d4d4d4; }
 .log-stderr { color: #f48771; }
 .log-system { color: #4fc3f7; font-style: italic; }
+.log-error-highlight {
+  background: rgba(244, 67, 54, 0.2);
+  border-left: 3px solid #f44336;
+  padding-left: 8px;
+  animation: error-flash 1s ease-out;
+}
+@keyframes error-flash {
+  0% { background: rgba(244, 67, 54, 0.5); }
+  100% { background: rgba(244, 67, 54, 0.2); }
+}
 </style>
 </head>
 <body>
@@ -95,9 +105,8 @@ function appendLine(text, cls) {
     logEl.removeChild(logEl.firstChild);
     lineCount--;
   }
-  // Auto-scroll if near bottom
-  const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 80;
-  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  // Always auto-scroll to bottom when new content arrives
+  logEl.scrollTop = logEl.scrollHeight;
 }
 
 function setStatus(state, text) {
@@ -118,6 +127,26 @@ window.n2fConsole.onLog((data) => {
 
 window.n2fConsole.onStatus((state, text) => {
   setStatus(state, text);
+});
+
+window.n2fConsole.onScrollToError(() => {
+  // Scroll to bottom
+  logEl.scrollTop = logEl.scrollHeight;
+  // Find and highlight stderr lines (errors)
+  const lines = logEl.querySelectorAll('.log-stderr');
+  // Remove old highlights
+  logEl.querySelectorAll('.log-error-highlight').forEach(el => {
+    el.classList.remove('log-error-highlight');
+  });
+  if (lines.length > 0) {
+    // Highlight the last few error lines
+    const start = Math.max(0, lines.length - 5);
+    for (let i = start; i < lines.length; i++) {
+      lines[i].classList.add('log-error-highlight');
+    }
+    // Scroll the first highlighted error into view
+    lines[start].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
 });
 
 setStatus('starting', 'Starting...');

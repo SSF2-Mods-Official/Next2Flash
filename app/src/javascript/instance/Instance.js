@@ -452,9 +452,8 @@ class Instance
             return Promise.resolve(canvas);
         }
 
-        // During playback, use 1x DPR to reduce GPU work for large shapes
         const isPlayback = !Util.$timelinePlayer.stopFlag;
-        const dpr = (isPlayback && !preview) ? 1 : window.devicePixelRatio;
+        const dpr = window.devicePixelRatio;
 
         const _dbgT0 = isPlayback ? performance.now() : 0;
 

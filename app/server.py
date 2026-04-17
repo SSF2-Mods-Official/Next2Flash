@@ -174,19 +174,25 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
             continue
 
         # Preserve asset/roundtrip fields from disk that the editor doesn't carry.
-        # Also preserve totalFrame: MovieClip.toObject() omits it (it's a
-        # computed getter), so without this the compiler would default to 1 frame.
-        # rawSoundBody / rawSoundStreamHead are raw binary blobs the editor never
-        # touches; without them Nellymoser/ADPCM sounds and stream-audio are lost.
+        # MovieClip.toObject() omits totalFrame (computed getter) — without it
+        # the compiler falls back to _compute_total_frames() which works, but
+        # can miss trailing empty frames.  Morph shapes need endRecodes/endBounds
+        # for the interpolation end-state.  rawSoundBody / rawSoundStreamHead
+        # are raw binary blobs the editor never touches.
         roundtrip_keys = ('swfCharId',
                           'externalFile',
-                          'fontData', 'fontTagType',
+                          'fontData', 'fontTagType', 'fontFaceName',
                           'buttonData', 'binaryDataBody', 'soundFormat',
                           'isBinaryData', 'isFont', 'isButton', 'isMorphShape',
                           'fontAuxParsed', # structured font-aux data (align zones, CSM, name)
                           'buffer',        # bitmap/sound pixel data (absent in light-mode editor blobs)
                           'buttonTrackAsMenu',  # SWF button track-as-menu flag
                           'buttonActions',      # SWF ButtonCondActions (ActionScript)
+                          'totalFrame',    # MovieClip frame count (computed getter, not serialized)
+                          'endRecodes',    # morph shape end-state drawing commands
+                          'endBounds',     # morph shape end-state bounds
+                          'rawTagType',    # original SWF tag type (for metadata)
+                          'soundStreamParsed', # SoundStreamHead2 inside sprites
                           )
         saved = {}
         for k in roundtrip_keys:
@@ -196,11 +202,23 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
         # Save swfDepth per-layer by name so we can restore it after the merge.
         # Layer.toObject() does not include swfDepth, so it's lost otherwise,
         # causing layer depths to be reassigned sequentially on the next compile.
+        # Also save per-character reinstated flags (the editor doesn't serialize them).
         disk_layer_depths: dict = {}
+        disk_layer_char_reinstated: dict = {}  # layer_name → [bool, ...]
         for dl in dlib.get('layers', []):
             lname = dl.get('name')
             if lname and 'swfDepth' in dl:
                 disk_layer_depths[lname] = dl['swfDepth']
+            if lname:
+                ri_flags = []
+                has_any = False
+                for ch in dl.get('characters', []):
+                    ri = ch.get('reinstated')
+                    ri_flags.append(ri)
+                    if ri:
+                        has_any = True
+                if has_any:
+                    disk_layer_char_reinstated[lname] = ri_flags
 
         # Take all fields from editor (has updated positions etc.)
         dlib.clear()
@@ -214,11 +232,21 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
         # Restore swfDepth on layers that match by name (existing layers).
         # New layers (e.g. a freshly drawn pencil shape layer) won't match and
         # will fall back to sequential depth assignment at compile time.
-        if disk_layer_depths:
+        if disk_layer_depths or disk_layer_char_reinstated:
             for el in dlib.get('layers', []):
                 lname = el.get('name')
-                if lname and lname in disk_layer_depths and 'swfDepth' not in el:
+                if not lname:
+                    continue
+                if lname in disk_layer_depths and 'swfDepth' not in el:
                     el['swfDepth'] = disk_layer_depths[lname]
+                # Restore reinstated flags on characters by index
+                ri_flags = disk_layer_char_reinstated.get(lname)
+                if ri_flags:
+                    chars = el.get('characters', [])
+                    if len(chars) == len(ri_flags):
+                        for ci, ri in enumerate(ri_flags):
+                            if ri and 'reinstated' not in chars[ci]:
+                                chars[ci]['reinstated'] = ri
 
 
 def _apply_text_patches_to_n2d(n2d_path: str, text_patches: list,
@@ -821,7 +849,11 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 swf_data = body
                 filename = "upload.swf"
 
-            name = os.path.splitext(filename)[0] if filename else "converted"
+            # Use client-provided project name if available, else derive from filename
+            client_name = self._extract_form_field(body, "projectName")
+            name = client_name or (os.path.splitext(filename)[0] if filename else "converted")
+            # Sanitize: strip path separators and dangerous characters
+            name = os.path.basename(name).replace('..', '').strip('. ') or 'converted'
             log.info('_handle_swf_to_project: converting %s (%d bytes)', filename, len(swf_data))
 
             _t0 = time.time()
@@ -1411,7 +1443,11 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 print(f"[IMPORT {time.time()-_t0:6.2f}s] {label}", flush=True)
 
             swf_data = None  # defer reading
-            name = os.path.splitext(os.path.basename(swf_path))[0]
+            # Use client-provided project name if available, else derive from filename
+            client_name = req.get('projectName', '').strip()
+            name = client_name or os.path.splitext(os.path.basename(swf_path))[0]
+            # Sanitize: strip path separators and dangerous characters
+            name = os.path.basename(name).replace('..', '').strip('. ') or 'converted'
 
             # Check for cached conversion on disk
             project_dir = os.path.join(SERVER_DIR, 'converted', name)
@@ -2317,6 +2353,44 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             return file_data, filename
 
         return None, None
+
+    def _extract_form_field(self, body: bytes, field_name: str):
+        """Extract a plain text field value from multipart/form-data. Returns str or None."""
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            return None
+
+        for part in content_type.split(";"):
+            part = part.strip()
+            if part.startswith("boundary="):
+                boundary = part[9:].strip('"')
+                break
+        else:
+            return None
+
+        boundary_bytes = f"--{boundary}".encode()
+        parts = body.split(boundary_bytes)
+
+        target = f'name="{field_name}"'.encode()
+        for part in parts:
+            if target not in part:
+                continue
+            # Skip file fields (they have filename=)
+            if b'filename=' in part:
+                continue
+            header_end = part.find(b"\r\n\r\n")
+            if header_end < 0:
+                continue
+            val = part[header_end + 4:]
+            if val.endswith(b"\r\n"):
+                val = val[:-2]
+            if val.endswith(b"--"):
+                val = val[:-2]
+            if val.endswith(b"\r\n"):
+                val = val[:-2]
+            return val.decode("utf-8", errors="replace").strip()
+
+        return None
 
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")

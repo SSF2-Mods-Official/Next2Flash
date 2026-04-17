@@ -11,4 +11,7 @@ contextBridge.exposeInMainWorld('n2fConsole', {
   onStatus: (callback) => {
     ipcRenderer.on('console:status', (_event, state, text) => callback(state, text));
   },
+  onScrollToError: (callback) => {
+    ipcRenderer.on('console:scroll-to-error', () => callback());
+  },
 });

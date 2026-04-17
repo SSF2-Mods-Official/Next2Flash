@@ -43,7 +43,8 @@ contextBridge.exposeInMainWorld('n2fElectron', {
 
   // ── Debug logging (renderer → main process stdout) ────────────────────
   logDebug: (msg) => ipcRenderer.send('debug:log', msg),
-
+  // ── Server console ────────────────────────────────────────────────
+  showServerConsole: () => ipcRenderer.send('show-server-console'),
   // ── Profiler bridge ───────────────────────────────────────────────────
   sendProfilerEvent: (event) => {
     ipcRenderer.send('profiler:send-event', event);

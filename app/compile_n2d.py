@@ -1548,9 +1548,9 @@ def build_timeline_tags(
                     prev_dict, prev_char, prev_po = prev_display[swf_depth]
                     # The 'reinstated' flag means the OG SWF used
                     # RemoveObject2 + PlaceObject (new instance) at this span start.
-                    is_reinstated = tag_info.get("reinstated", False)
                     # Only trigger remove+place on the FIRST frame of a reinstated
                     # span (when dict_idx changes), not on every frame within it.
+                    is_reinstated = tag_info.get("reinstated", False)
                     dict_changed = (prev_dict != dict_idx)
 
                     if is_reinstated and dict_changed:
@@ -1559,8 +1559,8 @@ def build_timeline_tags(
                         is_move = False
                         place_char_id = swf_char_id
                     elif prev_char != swf_char_id:
-                        # Different character at same depth → swap in-place
-                        # OG SWF uses PlaceObject with MOVE + character_id.
+                        # Different character at same depth — swap in-place
+                        # using PlaceObject with MOVE + character_id.
                         is_move = True
                         place_char_id = swf_char_id
                     else:
@@ -2585,16 +2585,17 @@ class N2DCompiler:
                 self._emission_order.append(lib_id)
                 emitted.add(lib_id)
 
-        # 2e. Reverse the non-sound portion of the emission order.
-        #     The N2D libraries are alphabetical, but the original SWF
-        #     emits them in roughly reverse order within each dependency
-        #     group.  Reversing brings the chIDs much closer to the OG.
-        sound_part = [lid for lid in self._emission_order
-                      if all_non_folder[lid]["type"] == "sound"]
-        non_sound_part = [lid for lid in self._emission_order
-                          if all_non_folder[lid]["type"] != "sound"]
-        non_sound_part.reverse()
-        self._emission_order = sound_part + non_sound_part
+        # 2e. Keep the topological (leaves-first) emission order intact.
+        #     Previous code reversed the non-sound portion to bring charIDs
+        #     closer to the OG ordering, but that reversal put parents before
+        #     children.  When IDs were then assigned sequentially and re-sorted
+        #     ascending, parents ended up with LOWER IDs than their children,
+        #     creating thousands of forward references (PlaceObject tags that
+        #     reference sprites that haven't been defined yet).  Flash Player
+        #     silently fails to instantiate such sprites, which breaks all
+        #     MovieClip frame scripts and causes animation looping.
+        #     Removing the reversal keeps children defined before parents,
+        #     eliminating forward references.
 
         # ── 3. Assign SWF character IDs in emission order ──
         #    Always assign fresh sequential IDs.  Original swfCharId values
@@ -2996,7 +2997,8 @@ class N2DCompiler:
 
         If the fill carries a bitmap_lib_id (N2D library reference), map it
         to the already-emitted SWF character ID.  Only allocate a NEW bitmap
-        tag when no library reference exists (e.g. user-drawn bitmap fill).
+        tag when no library reference exists AND the pixel content doesn't
+        match any known bitmap library entry (deduplication).
         """
         from shape_converter import BitmapFill
         for fs in fill_styles:
@@ -3010,6 +3012,12 @@ class N2DCompiler:
                 continue
             if not fs.pixel_data or len(fs.pixel_data) <= 4:
                 continue  # placeholder, nothing to emit
+            # Try to match against known bitmap libraries by content hash
+            # (handles bitmapId=0 from JS roundtrip losing the reference)
+            matched = self._match_bitmap_by_content(fs.width, fs.height, fs.pixel_data)
+            if matched:
+                fs.bitmap_char_id = matched
+                continue
             # Fallback: allocate a new SWF character ID for this embedded bitmap
             new_id = self._alloc_id()
             fs.bitmap_char_id = new_id
@@ -3017,6 +3025,41 @@ class N2DCompiler:
             # Emit the bitmap definition tag
             bmp_tag = build_define_bits_lossless2(new_id, fs.width, fs.height, fs.pixel_data)
             self._definition_tags.extend(bmp_tag)
+            # Cache for future dedup
+            import hashlib
+            key = (fs.width, fs.height, hashlib.md5(fs.pixel_data).digest())
+            self._bitmap_content_cache[key] = new_id
+
+    def _match_bitmap_by_content(self, width: int, height: int, pixel_data: bytes) -> int:
+        """Try to find a matching bitmap SWF char ID by pixel content hash.
+
+        Lazily builds a cache mapping (width, height, md5) → SWF char ID
+        from all bitmap library entries on first call.
+        Returns the SWF char ID if found, else 0.
+        """
+        import hashlib
+        if not hasattr(self, '_bitmap_content_cache'):
+            self._bitmap_content_cache = {}
+            for lib in self.libs:
+                if lib.get('type') != 'bitmap':
+                    continue
+                lid = lib['id']
+                swf_id = self._lib_to_swf_id.get(lid)
+                if not swf_id:
+                    continue
+                w = lib.get('width', 0)
+                h = lib.get('height', 0)
+                buf = lib.get('buffer', '')
+                if not buf:
+                    continue
+                rgba = _decode_raw_body(buf)
+                if not rgba:
+                    continue
+                key = (w, h, hashlib.md5(rgba).digest())
+                self._bitmap_content_cache[key] = swf_id
+
+        key = (width, height, hashlib.md5(pixel_data).digest())
+        return self._bitmap_content_cache.get(key, 0)
 
     def _emit_morph_shape(self, lib: dict):
         swf_id = self._lib_to_swf_id[lib["id"]]
@@ -3562,6 +3605,16 @@ class N2DCompiler:
                 swf_id = self._lib_to_swf_id.get(lib_id)
                 if swf_id is not None:
                     symbol_pairs.append((swf_id, fla_fqn))
+
+            # Preserve original SymbolClass entry order from the OG SWF.
+            # Flash Player may depend on the order for class initialization.
+            og_order = self.data.get('symbolClassOrder', [])
+            if og_order:
+                order_map = {name: idx for idx, name in enumerate(og_order)}
+                # Sort: entries present in OG order come first (in OG order),
+                # any new entries are appended at the end.
+                sentinel = len(og_order)
+                symbol_pairs.sort(key=lambda p: order_map.get(p[1], sentinel))
 
             if symbol_pairs:
                 all_tags.extend(build_symbol_class(symbol_pairs))

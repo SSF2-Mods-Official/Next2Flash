@@ -730,7 +730,7 @@ class Character
         // Transform-signature cache: reuse canvas when only tx/ty changed
         const m = place.matrix;
         const ct = place.colorTransform;
-        const effectiveDpr = isPlayback ? 1 : window.devicePixelRatio;
+        const effectiveDpr = window.devicePixelRatio;
         const tfKey = `${m[0]},${m[1]},${m[2]},${m[3]},${frame},${hydrationVersion},${Util.$zoomScale},${effectiveDpr},${ct[0]},${ct[1]},${ct[2]},${ct[3]},${ct[4]},${ct[5]},${ct[6]},${ct[7]},${place.blendMode}`;
         if (this._$transformCache && this._$transformCacheKey === tfKey) {
             if (canvas instanceof HTMLCanvasElement) {
@@ -1092,6 +1092,10 @@ class Character
 
             if (place.tweenFrame) {
                 object.tweenFrame = place.tweenFrame;
+            }
+
+            if (place.ratio !== undefined) {
+                object.ratio = place.ratio;
             }
 
             if (instance.type === InstanceType.MOVIE_CLIP) {

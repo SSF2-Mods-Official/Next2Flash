@@ -474,7 +474,10 @@ ipcMain.handle('dialog:save-swf', async (_event, defaultName) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     title: 'Export SWF',
     defaultPath: defaultName || 'output.swf',
-    filters: [{ name: 'SWF Files', extensions: ['swf'] }],
+    filters: [
+      { name: 'SWF Files', extensions: ['swf'] },
+      { name: 'SSF Files', extensions: ['ssf'] },
+    ],
   });
   return result.canceled ? null : result.filePath;
 });
@@ -518,6 +521,19 @@ ipcMain.on('debug:log', (_event, msg) => {
   const line = msg + '\n';
   process.stdout.write(line);
   debugLogStream.write(line);
+});
+
+// IPC: open server console from renderer (e.g. on error)
+ipcMain.on('show-server-console', () => {
+  createServerConsoleWindow();
+  // Send a signal to scroll to bottom and highlight last error
+  if (serverConsoleWindow && !serverConsoleWindow.isDestroyed()) {
+    serverConsoleWindow.webContents.once('did-finish-load', () => {
+      serverConsoleWindow.webContents.send('console:scroll-to-error');
+    });
+    // If already loaded, send immediately too
+    serverConsoleWindow.webContents.send('console:scroll-to-error');
+  }
 });
 
 // IPC: profiler events from renderer → profiler window + log file

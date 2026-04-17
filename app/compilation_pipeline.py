@@ -303,13 +303,15 @@ class AllocateCharIDsStage(PipelineStage):
                 emission_order.append(lib_id)
                 emitted.add(lib_id)
 
-        # 2e. Reverse the non-sound portion
-        sound_part = [lid for lid in emission_order
-                      if all_non_folder[lid]["type"] == "sound"]
-        non_sound_part = [lid for lid in emission_order
-                          if all_non_folder[lid]["type"] != "sound"]
-        non_sound_part.reverse()
-        emission_order = sound_part + non_sound_part
+        # 2e. Keep the topological (leaves-first) emission order intact.
+        #     Previous code reversed the non-sound portion to bring charIDs
+        #     closer to the OG ordering, but that reversal put parents before
+        #     children.  When IDs were then assigned sequentially and re-sorted
+        #     ascending, parents ended up with LOWER IDs than their children,
+        #     creating thousands of forward references (PlaceObject tags that
+        #     reference sprites not yet defined).  Flash Player silently fails
+        #     to instantiate such sprites, breaking all MovieClip frame scripts
+        #     and causing animation looping.
 
         # ── 3. Assign SWF character IDs in emission order ──
         for lib_id in emission_order:

@@ -2317,6 +2317,8 @@ class N2DBuilder:
         self.char_types: Dict[int, str] = {}
         # Symbol names from SymbolClass or CSV
         self.symbol_names: Dict[int, str] = {}
+        # Ordered list of class names from original SymbolClass (preserves entry order)
+        self.symbol_class_order: List[str] = []
         # Shape bounds from SWF
         self.shape_bounds: Dict[int, dict] = {}
         # DefineScalingGrid: swf_char_id → {x, y, w, h} in pixels
@@ -2507,6 +2509,8 @@ class N2DBuilder:
             elif tag.tag_type == TAG_SYMBOL_CLASS:
                 sc = parse_symbol_class(tag.data)
                 self.symbol_names.update(sc)
+                # Preserve original entry order (list of class names)
+                self.symbol_class_order = list(sc.values())
                 past_symbol_class = True
 
             elif tag.tag_type == TAG_DEFINE_SCALING_GRID:
@@ -3735,7 +3739,8 @@ class N2DBuilder:
                         entry.get('cxform') != prev_entry.get('cxform') or
                         entry.get('blend_mode') != prev_entry.get('blend_mode') or
                         entry.get('filters') != prev_entry.get('filters') or
-                        entry.get('name') != prev_entry.get('name')):
+                        entry.get('name') != prev_entry.get('name') or
+                        entry.get('ratio') != prev_entry.get('ratio')):
                         span_places.append((frame_num, entry))
             else:
                 if span_start is not None:
@@ -3832,7 +3837,8 @@ class N2DBuilder:
                         state.get('cxform') != prev_entry.get('cxform') or
                         state.get('blend_mode') != prev_entry.get('blend_mode') or
                         state.get('filters') != prev_entry.get('filters') or
-                        state.get('name') != prev_entry.get('name')):
+                        state.get('name') != prev_entry.get('name') or
+                        state.get('ratio') != prev_entry.get('ratio')):
                         span_places.append((frame_num, state))
 
         # Close final span
@@ -4372,6 +4378,8 @@ class N2DBuilder:
         # section during compilation — they go in the root timeline instead.
         if self.root_timeline_def_ids:
             result['rootTimelineDefIds'] = self.root_timeline_def_ids
+        if self.symbol_class_order:
+            result['symbolClassOrder'] = self.symbol_class_order
         # Include AS3 source scripts if any were loaded
         if self.scripts:
             result['scripts'] = self.scripts

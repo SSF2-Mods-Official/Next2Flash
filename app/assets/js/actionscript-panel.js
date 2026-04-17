@@ -765,7 +765,8 @@
     'inBitmap', 'grid', 'bitmapId',
     'rawSoundStreamHead', 'mode', 'totalFrame',
     'fontData', 'fontTagType', 'fontAuxTags',
-    'buttonData', 'binaryDataBody', 'soundFormat', 'buttonAuxTags'
+    'buttonData', 'binaryDataBody', 'soundFormat', 'buttonAuxTags',
+    'soundStreamParsed'
   ];
 
   /**
@@ -778,6 +779,7 @@
     grid: true,
     bitmapId: true,
     rawSoundStreamHead: true,
+    soundStreamParsed: true,
     mode: true,
     currentFrame: true,
     leftFrame: true,

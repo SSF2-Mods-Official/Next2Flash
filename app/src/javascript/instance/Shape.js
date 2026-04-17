@@ -261,7 +261,8 @@ class Shape extends Instance
             recodes[idx] = {
                 "buffer": Array.from(value._$buffer),
                 "width": value.width,
-                "height": value.height
+                "height": value.height,
+                "bitmapId": value._$bitmapLibId || 0
             };
         }
 
@@ -293,6 +294,9 @@ class Shape extends Instance
                     value.width, value.height, true, 0
                 );
                 bitmapData._$buffer = new Uint8Array(value.buffer);
+                if (value.bitmapId !== undefined) {
+                    bitmapData._$bitmapLibId = value.bitmapId;
+                }
 
                 this._$recodes[idx] = bitmapData;
             }
