@@ -217,11 +217,14 @@ def build_tag_end() -> bytes:
 
 # ── FileAttributes tag ──────────────────────────────────────────────────
 
-def build_file_attributes(has_as3: bool = True) -> bytes:
+def build_file_attributes(has_as3: bool = True, raw_flags: int = 0) -> bytes:
     """FileAttributes (tag 69) — required as the first tag in SWF 8+."""
-    flags = 0
-    if has_as3:
-        flags |= (1 << 3)  # UseAS3
+    if raw_flags:
+        flags = raw_flags
+    else:
+        flags = 0
+        if has_as3:
+            flags |= (1 << 3)  # UseAS3
     return build_tag(TAG_FILE_ATTRIBUTES, struct.pack("<I", flags))
 
 

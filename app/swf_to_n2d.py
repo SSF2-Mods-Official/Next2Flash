@@ -2347,6 +2347,8 @@ class N2DBuilder:
         self.parsed_scene_labels: Optional[dict] = None  # SceneAndFrameLabel (tag 86)
         self.parsed_sound_stream: Optional[dict] = None  # SoundStreamHead2 (tag 45) global
         self.parsed_import_assets: List[dict] = []     # ImportAssets / ImportAssets2
+        self.parsed_bg_color: Optional[str] = None     # SetBackgroundColor (tag 9) as "#rrggbb"
+        self.parsed_file_attributes: int = 0           # FileAttributes (tag 69) raw flags
         # Font aux: swf_char_id → {fontAlignZones, csmTextSettings, fontNameRecord}
         self.parsed_font_aux: Dict[int, dict] = {}
         # AS3 source scripts: [{name, path, source}]
@@ -2551,6 +2553,13 @@ class N2DBuilder:
             # ── Structured parsing of global tags (replaces raw passthrough) ──
             if tag.tag_type == 24:  # Protect
                 self.parsed_protect = True
+
+            elif tag.tag_type == 9 and len(tag.data) >= 3:  # SetBackgroundColor
+                r, g, b = tag.data[0], tag.data[1], tag.data[2]
+                self.parsed_bg_color = f"#{r:02x}{g:02x}{b:02x}"
+
+            elif tag.tag_type == 69 and len(tag.data) >= 4:  # FileAttributes
+                self.parsed_file_attributes = struct.unpack_from('<I', tag.data, 0)[0]
 
             elif tag.tag_type == 77:  # Metadata
                 try:
@@ -4344,7 +4353,7 @@ class N2DBuilder:
                 'width': stage_w,
                 'height': stage_h,
                 'fps': self.header['fps'],
-                'bgColor': '#333333',
+                'bgColor': self.parsed_bg_color or '#333333',
                 'lock': False,
             },
             'libraries': self.libraries,
@@ -4373,6 +4382,9 @@ class N2DBuilder:
         # Include SWF version and compression format for matching
         result['swfVersion'] = self.header.get('version', 14)
         result['swfCompressed'] = self.header.get('compressed', True)
+        # Include FileAttributes flags for roundtrip
+        if self.parsed_file_attributes:
+            result['fileAttributeFlags'] = self.parsed_file_attributes
         # Store which charIds are defined inline in the root timeline section
         # (after SymbolClass). These must NOT be emitted in the definition
         # section during compilation — they go in the root timeline instead.

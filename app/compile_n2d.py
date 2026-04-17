@@ -1266,10 +1266,15 @@ def to_publish(container: dict, lib_to_char_idx: Dict[int, int],
                 # If exact keyframe, create new placeObject
                 if _has_exact_place(places_list, frame):
                     last_po_idx = len(place_objects)
-                    # Only include colorTransform when actually present and
-                    # non-identity so the PlaceObject has_cx flag matches OG.
+                    # Only strip identity colorTransform on the FIRST
+                    # keyframe (initial placement).  On later keyframes the
+                    # identity CXFORM may be deliberately resetting a
+                    # non-identity CXFORM from an earlier frame.
                     raw_ct = place.get("colorTransform")
-                    if raw_ct == [1, 1, 1, 1, 0, 0, 0, 0] or raw_ct == [1.0, 1.0, 1.0, 1.0, 0, 0, 0, 0]:
+                    if frame == sf and (
+                        raw_ct == [1, 1, 1, 1, 0, 0, 0, 0]
+                        or raw_ct == [1.0, 1.0, 1.0, 1.0, 0, 0, 0, 0]
+                    ):
                         raw_ct = None
                     po_entry = {
                         "matrix": place.get("matrix", [1, 0, 0, 1, 0, 0]),
@@ -1298,7 +1303,10 @@ def to_publish(container: dict, lib_to_char_idx: Dict[int, int],
                     ratio_val = int(65536 * frame_in_tween / morph_dur)
                     last_po_idx = len(place_objects)
                     raw_ct_m = place.get("colorTransform")
-                    if raw_ct_m == [1, 1, 1, 1, 0, 0, 0, 0] or raw_ct_m == [1.0, 1.0, 1.0, 1.0, 0, 0, 0, 0]:
+                    if frame == sf and (
+                        raw_ct_m == [1, 1, 1, 1, 0, 0, 0, 0]
+                        or raw_ct_m == [1.0, 1.0, 1.0, 1.0, 0, 0, 0, 0]
+                    ):
                         raw_ct_m = None
                     place_objects.append({
                         "matrix": place.get("matrix", [1, 0, 0, 1, 0, 0]),
@@ -3542,8 +3550,9 @@ class N2DCompiler:
 
         all_tags = bytearray()
 
-        # 1. FileAttributes (AS3)
-        all_tags.extend(build_file_attributes(has_as3=True))
+        # 1. FileAttributes (AS3) — use stored OG flags if available
+        file_attr_flags = self.data.get("fileAttributeFlags", 0)
+        all_tags.extend(build_file_attributes(has_as3=True, raw_flags=file_attr_flags))
 
         # 2. SetBackgroundColor (before non-definition metadata, matching OG)
         all_tags.extend(build_set_background_color(r, g, b))
