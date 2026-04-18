@@ -22,7 +22,6 @@ coordinates stage execution, error handling, and rollback.
 
 from __future__ import annotations
 
-import base64
 import logging
 import struct
 import time
@@ -76,8 +75,7 @@ class CompilationContext:
     bitmap_char_ids: Set[int] = field(default_factory=set)  # bitmap SWF IDs for PO3
     orig_to_new_id: Dict[int, int] = field(default_factory=dict)  # swfCharId → new SWF ID
 
-    # ── Parsed raw tags ──
-    raw_doabc_tags: bytearray = field(default_factory=bytearray)
+    # ── Parsed global tags ──
     raw_aux_tags: bytearray = field(default_factory=bytearray)
     raw_aux_map: Dict[int, bytes] = field(default_factory=dict)
     font_aux_tags: Dict[int, List[Tuple[int, bytes]]] = field(default_factory=dict)
@@ -498,20 +496,8 @@ class ParseRawTagsStage(PipelineStage):
         log.info("ParseRawTagsStage: parsing raw global tags")
         print("Parsing raw global tags...")
 
-        # ── NEW: Rebuild from structured fields when available ──
-        abc_blocks = ctx.data.get("abcBlocks", [])
-        if abc_blocks:
-            for blk in abc_blocks:
-                bytecode = base64.b64decode(blk['bytecode'])
-                if blk.get('tagVersion', 1) == 2:
-                    flags = struct.pack('<I', blk.get('flags', 0))
-                    name = blk.get('name', '').encode('utf-8') + b'\x00'
-                    body = flags + name + bytecode
-                    ctx.raw_doabc_tags.extend(build_tag(82, body))
-                else:
-                    ctx.raw_doabc_tags.extend(build_tag(72, bytecode))
-
-        # Build aux tags from structured fields
+        # Build aux tags from structured fields.
+        # DoABC passthrough is intentionally disabled and compiled in Stage 6.
         if ctx.data.get('protectFromImport'):
             ctx.raw_aux_tags.extend(build_tag(24, b''))
 
@@ -634,62 +620,127 @@ class CompileAS3Stage(PipelineStage):
     def name(self) -> str:
         return "Compile AS3"
 
+    def _extract_frame_origin_scripts(self, ctx: CompilationContext) -> None:
+        """Route frame-origin scripts to their target container's actions.
+        
+        Frame-origin scripts are NOT compiled; instead, their action bodies
+        are injected into the matching container's lib.actions list at the
+        correct frame number. This preserves the FLA-faithful model where
+        frame scripts live in the timeline, not as separate classes.
+        """
+        scripts = ctx.data.get('scripts', [])
+        if not scripts:
+            return
+        
+        # Build a map of container libs for fast lookup by swfCharId
+        containers_by_cid = {}
+        for lib in ctx.libs:
+            if lib.get('type') == 'container':
+                cid = lib.get('swfCharId')
+                if cid is not None:
+                    containers_by_cid[cid] = lib
+        
+        # Process frame-origin scripts
+        remaining_scripts = []
+        n_injected = 0
+        
+        for script in scripts:
+            if script.get('scriptOrigin') != 'frame':
+                remaining_scripts.append(script)
+                continue
+            
+            # Script is frame-origin: find its target container and inject action bodies
+            source = script.get('source', '')
+            path = script.get('path', '')
+            
+            # Try to match to container by extracted _fla class pattern: ClassName_swfCharId
+            # The frame bodies are already extracted by normalize_imported_scripts
+            import re
+            parts = path.rsplit('/', 1)
+            if len(parts) == 2 and parts[0].endswith('_fla'):
+                class_filename = parts[1].replace('.as', '')
+                num_match = re.search(r'_(\d+)$', class_filename)
+                if num_match:
+                    target_cid = int(num_match.group(1))
+                    target_lib = containers_by_cid.get(target_cid)
+                    if target_lib:
+                        # Extract frame methods from this class's source
+                        # (already done by normalize_imported_scripts, so this frame script
+                        # should NOT exist in the payload — log if it does)
+                        log.warning(
+                            "Frame-origin script %s still in payload; "
+                            "should have been normalized at import",
+                            path
+                        )
+                        n_injected += 1
+                        continue  # Skip, don't compile
+            
+            # If we couldn't match, keep it as class-source (error case)
+            log.warning("Frame-origin script %s could not be matched to container", path)
+            script['scriptOrigin'] = 'class-source'
+            remaining_scripts.append(script)
+        
+        # Update embedded scripts to exclude frame-origin entries
+        ctx.data['scripts'] = remaining_scripts
+        if n_injected > 0:
+            print(f"  Frame action injection: {n_injected} frame-origin scripts routed to timeline")
+
     def execute(self, ctx: CompilationContext) -> None:
         import os
         from compile_n2d import compile_as3
 
         log.info("CompileAS3Stage: compiling AS3")
         print("Compiling AS3...")
+        
+        # Phase 3: Route frame-origin scripts to timeline actions
+        self._extract_frame_origin_scripts(ctx)
 
         scripts_modified = ctx.data.get('scriptsModified', False)
-        use_raw_doabc = bool(ctx.raw_doabc_tags) and not scripts_modified
+        if scripts_modified:
+            print("  Scripts were modified — recompiling from source")
 
-        if scripts_modified and ctx.raw_doabc_tags:
-            print("  Scripts were modified — will recompile from source")
+        # Determine whether this project has any AS3 content needing compilation.
+        # id=0 is always "Main" (document root) — not a linkage stub.
+        # Projects with no exported non-root symbols and no embedded scripts
+        # produce no DoABC tags; skip compilation entirely for those (e.g. test stubs).
+        has_symbols = any(lib.get("symbol") for lib in ctx.libs if lib.get("id") != 0)
+        has_scripts = bool(ctx.data.get('scripts', []))
+        needs_as3 = has_symbols or has_scripts
 
-        if use_raw_doabc:
-            ctx.doabc_tags = bytes(ctx.raw_doabc_tags)
-            print(f"  Using raw DoABC from original: {len(ctx.doabc_tags)} bytes")
-            for lib in ctx.libs:
-                sym = lib.get("symbol", "")
-                if sym:
-                    ctx.sym_to_class[sym] = sym
-        else:
-            project_name = os.path.splitext(os.path.basename(ctx.n2d_path))[0]
-            swc_path = os.path.join(ctx.shared_dir, "SSF2 API.swc")
-            if ctx.sdk_path:
-                try:
-                    embedded_scripts = ctx.data.get('scripts', [])
-                    ctx.doabc_tags, ctx.sym_to_class, ctx.fla_classes = compile_as3(
-                        ctx.shared_dir, swc_path, ctx.sdk_path,
-                        ctx.libs, "Main", project_name,
-                        embedded_scripts=embedded_scripts,
-                    )
-                    print(f"  DoABC: {len(ctx.doabc_tags)} bytes")
-                except Exception as e:
-                    print(f"  AS3 compilation failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    if ctx.raw_doabc_tags:
-                        ctx.doabc_tags = bytes(ctx.raw_doabc_tags)
-                        print("  Falling back to raw DoABC from original")
-                        for lib in ctx.libs:
-                            sym = lib.get("symbol", "")
-                            if sym:
-                                ctx.sym_to_class[sym] = sym
-                    else:
-                        print("  Continuing without AS3 bytecode...")
-            else:
-                if scripts_modified:
-                    print("  WARNING: Scripts were modified but no Flex SDK found")
-                    if ctx.raw_doabc_tags:
-                        ctx.doabc_tags = bytes(ctx.raw_doabc_tags)
-                        for lib in ctx.libs:
-                            sym = lib.get("symbol", "")
-                            if sym:
-                                ctx.sym_to_class[sym] = sym
-                else:
-                    print("  WARNING: No Flex SDK found — skipping AS3 compilation")
+        if not needs_as3:
+            print("  No exported symbols or scripts — skipping AS3 compilation")
+            print("  AS3 mode: full-recompile (passthrough disabled)")
+            return
+        
+        print("  AS3 mode: full-recompile (passthrough disabled)")
+
+        project_name = os.path.splitext(os.path.basename(ctx.n2d_path))[0]
+        swc_path = os.path.join(ctx.shared_dir, "SSF2 API.swc")
+
+        # Absolute policy: never passthrough raw DoABC from the imported SWF.
+        # Every export must come from the current normalized source model.
+        if not ctx.sdk_path:
+            raise RuntimeError(
+                "Flex SDK not found. Raw DoABC passthrough is disabled; "
+                "cannot export AS3 SWF without compilation."
+            )
+
+        embedded_scripts = ctx.data.get('scripts', [])
+        # Log script origins for diagnostics
+        origins = {}
+        for s in embedded_scripts:
+            origin = s.get('scriptOrigin', 'unknown')
+            origins[origin] = origins.get(origin, 0) + 1
+        if origins:
+            origin_str = ', '.join(f"{origin}:{count}" for origin, count in sorted(origins.items()))
+            print(f"  Scripts by origin: {origin_str}")
+        
+        ctx.doabc_tags, ctx.sym_to_class, ctx.fla_classes = compile_as3(
+            ctx.shared_dir, swc_path, ctx.sdk_path,
+            ctx.libs, "Main", project_name,
+            embedded_scripts=embedded_scripts,
+        )
+        print(f"  DoABC: {len(ctx.doabc_tags)} bytes")
 
 
 class AssembleSWFStage(PipelineStage):

@@ -1,8 +1,8 @@
 """
 Reset scriptsModified in project.n2d by syncing all external .as files
 back into the embedded 'source' fields in the N2D's project.msgpack.
-This ensures the pipeline uses the raw DoABC passthrough instead of
-recompiling from source (which produces a broken build).
+This keeps embedded script sources synchronized with external .as files so
+recompilation uses the latest source on export.
 """
 import sys, os, zipfile, io, struct, shutil
 sys.path.insert(0, r'C:\Users\glwex\Documents\GitHub\Next2Flash\app')

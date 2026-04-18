@@ -160,10 +160,31 @@ class ConversionService:
             with Profiler.timer("to_n2d_json"):
                 n2d_json = builder.to_n2d_json()
             
+            # ── Phase 2: Normalize imported scripts ──
+            # Drop linkage stubs (regenerated at export), extract frame bodies,
+            # mark scripts with scriptOrigin for later filtering
+            _progress("Normalizing scripts...")
+            try:
+                from swf_to_n2d import normalize_imported_scripts
+                libs = n2d_json.get('libraries', [])
+                scripts = n2d_json.get('scripts', [])
+                if scripts:
+                    log.info(f"ConversionService: normalizing {len(scripts)} scripts...")
+                    normalized = normalize_imported_scripts(scripts, libs)
+                    n2d_json['scripts'] = normalized
+                    Profiler.count("scripts_after_normalize", len(normalized))
+                    _progress(f"Scripts normalized: {len(scripts)} -> {len(normalized)}")
+                    log.info(f"ConversionService: scripts after normalization: {len(normalized)}")
+            except Exception as e:
+                log.error(f"Script normalization failed (CRITICAL): {e}", exc_info=True)
+                _progress(f"ERROR: Script normalization failed: {e}")
+                raise  # Don't silently continue - this is a critical error
+            
             elapsed = time.time() - t0
             Profiler.count("output_libraries", len(n2d_json.get('libraries', [])))
             _progress(f"Conversion complete in {elapsed:.2f}s: "
-                     f"{len(n2d_json.get('libraries', []))} library entries")
+                     f"{len(n2d_json.get('libraries', []))} library entries, "
+                     f"{len(n2d_json.get('scripts', []))} scripts")
             
             report = Profiler.end_session("swf-import")
             if report:

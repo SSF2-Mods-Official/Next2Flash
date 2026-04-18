@@ -819,37 +819,32 @@ class TestStartSound(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Test 28: DoABC Passthrough
+#  Test 28: DoABC Recompile Policy
 # ══════════════════════════════════════════════════════════════════════════
 
-class TestDoABCPassthrough(unittest.TestCase):
-    def test_doabc_passthrough(self):
+class TestDoABCRecompilePolicy(unittest.TestCase):
+    def test_doabc_present_after_roundtrip(self):
         swf_path = _find_real_swf()
         if not swf_path:
             self.skipTest("No real SWF found")
         with open(swf_path, "rb") as f:
             swf_bytes = f.read()
+
         orig_tags = parse_swf_tags(swf_bytes)
-        # Find DoABC2 (82) bodies
         orig_abc = [body for tt, body in orig_tags if tt == 82]
         if not orig_abc:
             self.skipTest("No DoABC2 tags")
+
         _, rt_tags = roundtrip(swf_bytes)
         rt_abc = [body for tt, body in rt_tags if tt == 82]
-        # At least one DoABC tag should survive
-        self.assertGreaterEqual(len(rt_abc), 1,
-            f"DoABC2 tags: orig={len(orig_abc)}, rt={len(rt_abc)}")
-        # The ABC bytecode should be preserved (after the name header)
-        # Extract ABC data from DoABC2: skip flags(4) + null-terminated name
-        def extract_abc(body):
-            pos = 4  # skip flags
-            while pos < len(body) and body[pos] != 0:
-                pos += 1
-            pos += 1  # skip null terminator
-            return body[pos:]
-        if orig_abc and rt_abc:
-            self.assertEqual(extract_abc(orig_abc[0]), extract_abc(rt_abc[0]),
-                "ABC bytecode differs after roundtrip")
+
+        # Policy check: DoABC must be present after roundtrip, but byte-for-byte
+        # identity is not required because exports always recompile from source.
+        self.assertGreaterEqual(
+            len(rt_abc),
+            1,
+            f"DoABC2 tags: orig={len(orig_abc)}, rt={len(rt_abc)}",
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════

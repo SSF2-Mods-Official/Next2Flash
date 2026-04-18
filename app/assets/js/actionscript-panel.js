@@ -31,6 +31,7 @@
   /*  State                                                              */
   /* ================================================================== */
   var scripts = []; // {name, path, source}  — editable
+  var _projectScriptsLoaded = false; // true once scripts are loaded from current project
   var abcClasses = []; // {name, pkg, superName, tagIdx} — parsed from DoABC
   var rawGlobalTags = []; // raw from N2D (legacy)
   var structuredGlobals = {}; // new structured fields: abcBlocks, protectFromImport, etc.
@@ -42,6 +43,9 @@
   var activeScript = null; // index into scripts[]
   var searchQuery = '';
   var floatingWindows = {};
+  var scriptPollTimer = null;
+  var importInterceptionInstalled = false;
+  var editorDragState = null;
 
   /* ================================================================== */
   /*  DOM refs                                                           */
@@ -106,7 +110,20 @@
     });
     elAddBtn.addEventListener('click', showNewScriptDialog);
     if (elEditorClose) elEditorClose.addEventListener('click', closeEditor);
-    if (elEditorExpand) elEditorExpand.addEventListener('click', onExpandToTab);
+    var editorHeader = document.getElementById('as-editor-header');
+    if (editorHeader) editorHeader.addEventListener('mousedown', beginEditorDrag);
+    if (elEditorContainer) {
+      elEditorContainer.addEventListener('keydown', onEditorKeyCapture, true);
+      elEditorContainer.addEventListener('keypress', onEditorKeyCapture, true);
+      elEditorContainer.addEventListener('keyup', onEditorKeyCapture, true);
+    }
+    document.addEventListener('mousemove', onEditorDragMove);
+    document.addEventListener('mouseup', endEditorDrag);
+    // Keep editing inside the ActionScript panel to avoid split-state issues.
+    if (elEditorExpand) {
+      elEditorExpand.style.display = 'none';
+      elEditorExpand.removeAttribute('title');
+    }
 
     injectStyles();
     interceptN2DLoads();
@@ -159,7 +176,9 @@
       '.as-section-header{padding:4px 8px;font:bold 10px/1.4 Arial,sans-serif;color:#888;text-transform:uppercase;letter-spacing:.5px;background:#222;border-bottom:1px solid #333}' +
       '#as-editor-container{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}' +
       '#as-editor-container.none{display:none}' +
+      '#as-editor-container.as-floating-window{position:fixed!important;left:56px;top:184px;width:58vw;height:58vh;z-index:9999;background:#1f1f1f;border:1px solid #4a4a4a;box-shadow:0 12px 40px rgba(0,0,0,.5);display:flex!important}' +
       '#as-editor-header{display:flex;align-items:center;padding:4px 8px;background:#2a2a2a;border-bottom:1px solid #444;flex-shrink:0}' +
+      '#as-editor-container.as-floating-window #as-editor-header{cursor:move}' +
       '#as-editor-filename{flex:1;font:bold 11px/1.4 Arial,sans-serif;color:#90caf9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '#as-editor-close{cursor:pointer;color:#888;font-size:18px;line-height:1;padding:0 4px;margin-left:8px}' +
       '#as-editor-close:hover{color:#fff}' +
@@ -188,6 +207,43 @@
       '#as-new-script-dialog .btn-create{background:#3a6;color:#fff}' +
       '#as-new-script-dialog .btn-create:hover{background:#4b7}';
     document.head.appendChild(s);
+  }
+
+  function onEditorKeyCapture(e) {
+    if (!elEditorContainer || elEditorContainer.classList.contains('none')) return;
+    // Prevent timeline/canvas global shortcuts from consuming editor keys.
+    e.stopPropagation();
+  }
+
+  function beginEditorDrag(e) {
+    if (!elEditorContainer || !elEditorContainer.classList.contains('as-floating-window')) return;
+    if (e.button !== 0) return;
+    if (e.target && (e.target.id === 'as-editor-close' || e.target.id === 'as-editor-expand')) return;
+    var rect = elEditorContainer.getBoundingClientRect();
+    editorDragState = {
+      dx: e.clientX - rect.left,
+      dy: e.clientY - rect.top
+    };
+    e.preventDefault();
+  }
+
+  function onEditorDragMove(e) {
+    if (!editorDragState || !elEditorContainer) return;
+    var vw = window.innerWidth || document.documentElement.clientWidth || 0;
+    var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    var w = elEditorContainer.offsetWidth || 0;
+    var h = elEditorContainer.offsetHeight || 0;
+    var left = e.clientX - editorDragState.dx;
+    var top = e.clientY - editorDragState.dy;
+    left = Math.max(8, Math.min(left, Math.max(8, vw - w - 8)));
+    top = Math.max(8, Math.min(top, Math.max(8, vh - h - 8)));
+    elEditorContainer.style.left = left + 'px';
+    elEditorContainer.style.top = top + 'px';
+    e.preventDefault();
+  }
+
+  function endEditorDrag() {
+    editorDragState = null;
   }
 
   /* ================================================================== */
@@ -579,36 +635,105 @@
   /*  Intercept N2D file loads                                           */
   /* ================================================================== */
   function interceptN2DLoads() {
+    if (importInterceptionInstalled) return;
+    importInterceptionInstalled = true;
+    // Use delegated listener so interception still works when inputs are
+    // created after this panel initializes.
+    document.addEventListener('change', onAnyFileInputChange, true);
     hookFileInput('tools-load-file-input');
     hookFileInput('library-menu-import-swf-timeline-input');
+    _log.info('Import interception installed');
+  }
+
+  function onAnyFileInputChange(e) {
+    var target = e && e.target;
+    if (!target || (target.id !== 'tools-load-file-input' &&
+      target.id !== 'library-menu-import-swf-timeline-input')) {
+      return;
+    }
+    onImportInputChange(target);
   }
 
   function hookFileInput(inputId) {
     var input = document.getElementById(inputId);
-    if (!input) return;
+    if (!input) {
+      _log.debug('Import input not found at init:', inputId);
+      return;
+    }
     input.addEventListener('change', function () {
-      if (!input.files || !input.files.length) return;
-      var file = input.files[0];
-      if (!file.name.toLowerCase().endsWith('.n2d')) return;
-      _log.info('Intercepting N2D load:', file.name);
-      parseN2DFile(file);
+      onImportInputChange(input);
     }, true);
   }
 
-  function parseN2DFile(file) {
-    // Clear previous state immediately when loading a new file
+  function onImportInputChange(input) {
+    if (!input || !input.files || !input.files.length) return;
+    var file = input.files[0];
+    var lower = (file.name || '').toLowerCase();
+    if (lower.endsWith('.swf')) {
+      _log.info('Detected SWF import start:', file.name);
+      beginProjectLoad('swf:' + file.name);
+      return;
+    }
+    if (!lower.endsWith('.n2d')) return;
+    _log.info('Intercepting N2D load:', file.name);
+    parseN2DFile(file);
+  }
+
+  function beginProjectLoad(reason) {
+    _log.info('Project load reset:', reason || 'unknown');
     scripts = [];
+    _projectScriptsLoaded = false;
     abcClasses = [];
     rawGlobalTags = [];
     structuredGlobals = {};
     roundtripData = null;
-    // Keep previousOriginal for merging rootTimelineDefIds on tool reloads
-    var previousOriginal = originalN2DJson;
     scriptsModified = false;
     activeScript = null;
     if (elEditorContainer) elEditorContainer.classList.add('none');
     saveScriptsToStorage();
     renderScriptList();
+    clearNext2dToolData();
+  }
+
+  function clearNext2dToolData() {
+    try {
+      var req = indexedDB.open('next2d-tool');
+      req.onsuccess = function (e) {
+        var db = e.target.result;
+        var stores = Array.from(db.objectStoreNames || []);
+        if (!stores.length) {
+          db.close();
+          return;
+        }
+        var tx = db.transaction(stores, 'readwrite');
+        stores.forEach(function (sn) {
+          try {
+            tx.objectStore(sn).clear();
+          } catch (ex) {
+            _log.warn('Skipping clear for store:', sn, ex);
+          }
+        });
+        tx.oncomplete = function () {
+          _log.info('Cleared next2d-tool IndexedDB stores:', stores.length);
+          db.close();
+        };
+        tx.onerror = function () {
+          _log.warn('Failed clearing next2d-tool IndexedDB');
+          db.close();
+        };
+      };
+      req.onerror = function () {
+        _log.warn('Unable to open next2d-tool IndexedDB for clear');
+      };
+    } catch (e) {
+      _log.warn('IndexedDB clear failed:', e);
+    }
+  }
+
+  function parseN2DFile(file) {
+    beginProjectLoad('n2d:' + file.name);
+    // Keep previousOriginal for merging rootTimelineDefIds on tool reloads
+    var previousOriginal = originalN2DJson;
 
     var reader = new FileReader();
     reader.onload = function (e) {
@@ -652,6 +777,7 @@
             };
           });
           saveScriptsToStorage();
+          _projectScriptsLoaded = true;
         }
         if (Array.isArray(json.rawGlobalTags) && json.rawGlobalTags.length > 0) {
           _log.info('Found', json.rawGlobalTags.length, 'rawGlobalTags');
@@ -1404,7 +1530,8 @@
   /* ================================================================== */
   function monitorProjectLoad() {
     loadScriptsFromStorage();
-    setInterval(checkForScripts, 5000);
+    if (scriptPollTimer) clearInterval(scriptPollTimer);
+    scriptPollTimer = setInterval(checkForScripts, 5000);
   }
 
   function saveScriptsToStorage() {
@@ -1426,10 +1553,12 @@
   }
 
   function checkForScripts() {
+    if (_projectScriptsLoaded) return;
     try {
       var req = indexedDB.open('next2d-tool');
       req.onsuccess = function (e) {
         var db = e.target.result;
+        _log.debug('Polling next2d-tool stores:', db.objectStoreNames.length);
         Array.from(db.objectStoreNames).forEach(function (sn) {
           try {
             var tx = db.transaction(sn, 'readonly');
@@ -1438,6 +1567,7 @@
                 if (rec && typeof rec === 'object') {
                   if (Array.isArray(rec.scripts)) mergeScripts(rec.scripts);
                   if (Array.isArray(rec.rawGlobalTags) && rec.rawGlobalTags.length) {
+                    _log.info('Loaded rawGlobalTags from IDB poll:', rec.rawGlobalTags.length);
                     rawGlobalTags = rec.rawGlobalTags;
                     extractAbcClasses();
                     renderScriptList();
@@ -1455,6 +1585,12 @@
   }
 
   function mergeScripts(newScripts) {
+    // Once a project's scripts are loaded (from file or first IDB poll),
+    // block any further IDB polling from adding stale data from other projects.
+    if (_projectScriptsLoaded) {
+      _log.debug('Skipping mergeScripts because project scripts already loaded');
+      return;
+    }
     var existing = {};
     scripts.forEach(function (s) {
       existing[s.path] = true;
@@ -1472,6 +1608,8 @@
       }
     });
     if (added) {
+      _log.info('Merged scripts from IDB poll:', added, 'added from', newScripts.length);
+      _projectScriptsLoaded = true;
       saveScriptsToStorage();
       renderScriptList();
     }
@@ -1488,7 +1626,10 @@
     var hasResults = false;
 
     // ─── Source Scripts (editable) ───
+    // Filter: only show scripts that aren't linkage-generated
     var filtered = scripts.filter(function (s) {
+      // POLICY: never show linkage-generated scripts in the GUI
+      if (s.scriptOrigin === 'linkage-generated') return false;
       if (!q) return true;
       return (s.name + ' ' + s.path + ' ' + (s.source || '')).toLowerCase().indexOf(q) >= 0;
     });
@@ -1497,10 +1638,12 @@
       filtered.forEach(function (s) {
         var idx = scripts.indexOf(s);
         var ac = (activeScript === idx) ? ' active' : '';
+        var originTag = s.scriptOrigin ? ' [' + s.scriptOrigin + ']' : '';
         html += '<div class="as-script-item' + ac + '" data-type="source" data-index="' + idx + '">' +
           '<div class="as-script-icon source"></div>' +
           '<span class="as-script-name" title="' + esc(s.path) + '">' + esc(s.name) + '</span>' +
           '<span class="as-script-tag">AS3</span>' +
+          (s.scriptOrigin ? '<span class="as-script-note">' + esc(originTag) + '</span>' : '') +
           '<span class="as-script-delete" data-index="' + idx + '" title="Delete">&times;</span></div>';
         hasResults = true;
       });
@@ -1516,7 +1659,9 @@
       filteredAbc.forEach(function (c, i) {
         var fullName = c.pkg ? c.pkg + '.' + c.name : c.name;
         var extendsText = c.superName ? ' extends ' + c.superName : '';
-        html += '<div class="as-script-item" data-type="abc" data-index="' + i + '">' +
+        // FIX: Use abcClasses.indexOf(c) instead of i to get correct index in full array
+        var actualIndex = abcClasses.indexOf(c);
+        html += '<div class="as-script-item" data-type="abc" data-index="' + actualIndex + '">' +
           '<div class="as-script-icon bytecode"></div>' +
           '<span class="as-script-name" title="' + esc(fullName + extendsText) + '">' + esc(fullName) +
           '</span>' +
@@ -1618,8 +1763,9 @@
     var idx = parseInt(el.getAttribute('data-index'), 10);
 
     if (type === 'source' && !isNaN(idx) && idx < scripts.length) {
-      _log.debug('Double-click opening script in new tab:', scripts[idx].name, 'index:', idx);
-      openScriptInNewTab(idx);
+      // Double-click should still stay in-panel.
+      _log.debug('Double-click opening script in panel:', scripts[idx].name, 'index:', idx);
+      openScriptInEditor(idx);
     }
   }
 
@@ -1867,6 +2013,30 @@
 
   function openScriptInEditor(index) {
     _log.trace('Opening script in editor:', scripts[index] ? scripts[index].name : index);
+    if (index < 0 || index >= scripts.length) return;
+
+    // Unified path: use the same core editor modal as frame scripts.
+    if (window.__N2F_EditorBridge && typeof window.__N2F_EditorBridge.openSourceScript === 'function') {
+      activeScript = index;
+      var unifiedScript = scripts[index];
+      var opened = window.__N2F_EditorBridge.openSourceScript(unifiedScript, function (newSource) {
+        if (index >= 0 && index < scripts.length) {
+          scripts[index].source = newSource;
+          scriptsModified = true;
+          saveScriptsToStorage();
+          renderScriptList();
+        }
+      });
+      if (opened) {
+        if (elEditorContainer) {
+          elEditorContainer.classList.add('none');
+          elEditorContainer.classList.remove('as-floating-window');
+        }
+        renderScriptList();
+        return;
+      }
+    }
+
     // Save current before switching
     if (activeScript !== null && activeScript < scripts.length) {
       scripts[activeScript].source = getEditorValue();
@@ -1875,6 +2045,9 @@
 
     activeScript = index;
     var script = scripts[index];
+
+    // Keep source scripts in an in-page floating editor window.
+    elEditorContainer.classList.add('as-floating-window');
 
     // Show container FIRST so editor has dimensions
     elEditorContainer.classList.remove('none');
@@ -1892,51 +2065,23 @@
     renderScriptList();
   }
 
-  /** Open a script by index in a real browser tab using editor.html */
+  /** External-tab mode is disabled; keep everything in the panel editor. */
   function openScriptInNewTab(index) {
-    var script = scripts[index];
-    if (!script) return;
-    _log.trace('Opening script in new tab:', script.name);
-
-    // If already open, just focus
-    if (floatingWindows[script.path] && !floatingWindows[script.path].closed) {
-      floatingWindows[script.path].focus();
-      return;
-    }
-
-    // Save latest content so editor.html can read it from localStorage
-    if (activeScript !== null && activeScript < scripts.length) {
-      scripts[activeScript].source = getEditorValue();
-    }
-    saveScriptsToStorage();
-
-    // Open the real editor.html page
-    var url = 'editor.html?index=' + index;
-    var win = window.open(url, 'as_editor_' + script.path);
-
-    if (!win) {
-      // Popup blocked (common in Electron) — fall back to inline editor
-      openScriptInEditor(index);
-      return;
-    }
-    floatingWindows[script.path] = win;
-
-    var poll = setInterval(function () {
-      if (win.closed) {
-        clearInterval(poll);
-        delete floatingWindows[script.path];
-      }
-    }, 500);
-    toast('Opened in tab: ' + script.name);
+    _log.info('External editor tab disabled; opening in panel instead');
+    openScriptInEditor(index);
   }
 
   function closeEditor() {
     _log.trace('Closing editor');
+    if (window.__N2F_EditorBridge && typeof window.__N2F_EditorBridge.closeEditor === 'function') {
+      window.__N2F_EditorBridge.closeEditor();
+    }
     if (activeScript !== null && activeScript < scripts.length) {
       scripts[activeScript].source = getEditorValue();
       saveScriptsToStorage();
     }
     activeScript = null;
+    elEditorContainer.classList.remove('as-floating-window');
     elEditorContainer.classList.add('none');
     renderScriptList();
   }
@@ -1949,9 +2094,8 @@
       toast('No script open to expand', true);
       return;
     }
-    scripts[activeScript].source = getEditorValue();
-    saveScriptsToStorage();
-    openScriptInNewTab(activeScript);
+    openScriptInEditor(activeScript);
+    toast('Editor is pinned to ActionScript panel');
   }
 
   function getAceBasePath() {

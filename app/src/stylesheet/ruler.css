@@ -6,6 +6,7 @@
     left             : 0;
     background-color : #0dcaf0;
     z-index          : 9900;
+    display          : none;
 }
 
 #screen .ruler-border-x:hover
@@ -21,6 +22,7 @@
     left             : 0;
     background-color : #0dcaf0;
     z-index          : 9900;
+    display          : none;
 }
 
 #screen .ruler-border-y:hover

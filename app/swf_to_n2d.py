@@ -1835,7 +1835,167 @@ def bytes_to_binstr(data: bytes) -> str:
     return data.decode('latin-1')
 
 
-def extract_frame_scripts_from_abc(global_raw_tags: list) -> Dict[str, Dict[int, str]]:
+# ─── Script normalization helpers ───────────────────────────────────────────
+
+# Detects simple BitmapData / Sound linkage stubs.
+_LINKAGE_EXTENDS_RE = re.compile(
+    r'public\s+(?:dynamic\s+)?class\s+\w+\s+extends\s+(?:BitmapData|Sound)\b'
+)
+
+def _is_linkage_stub(source: str) -> bool:
+    """Return True if *source* is a synthetic linkage stub.
+
+    A stub is a class that extends BitmapData or Sound with only a
+    constructor that calls super().  These are regenerated at compile
+    time and must not be persisted as editable scripts.
+    """
+    if not _LINKAGE_EXTENDS_RE.search(source):
+        return False
+    # Strip comments then look for method bodies beyond the constructor
+    stripped = re.sub(r'/\*.*?\*/', '', source, flags=re.DOTALL)
+    stripped = re.sub(r'//[^\n]*', '', stripped)
+    # Remove known boilerplate patterns
+    stripped = re.sub(r'package\s*\{[^}]*}', '', stripped)            # package
+    stripped = re.sub(r'import\s+[\w.]+;', '', stripped)             # imports
+    stripped = re.sub(r'public\s+(?:dynamic\s+)?class\s+\w+[^{]*\{', '', stripped)  # class decl
+    stripped = re.sub(r'public\s+function\s+\w+\s*\([^)]*\)\s*\{', '', stripped)   # constructor
+    stripped = re.sub(r'super\s*\([^)]*\)\s*;', '', stripped)        # super()
+    stripped = re.sub(r'[{}]', '', stripped).strip()
+    return not stripped
+
+
+def _extract_frame_methods_from_fla_class(source: str) -> Dict[int, str]:
+    """Parse a _fla-package class source and return {1-based frame: body} dict.
+
+    Frame method names are discovered from addFrameScript() calls; the
+    corresponding method bodies are then extracted by brace-matching.
+    """
+    result: Dict[int, str] = {}
+    # Find addFrameScript(0, frame1, 6, frame7, ...)
+    args_m = re.search(r'addFrameScript\s*\(([^)]+)\)', source)
+    if not args_m:
+        return result
+    args = [a.strip() for a in args_m.group(1).split(',')]
+    frame_methods: Dict[int, str] = {}
+    for i in range(0, len(args) - 1, 2):
+        try:
+            frame_0 = int(args[i])
+            meth = args[i + 1].strip()
+            # Flash decompiler emits "this.frameN" — strip the "this." prefix
+            if meth.startswith('this.'):
+                meth = meth[5:]
+            frame_methods[frame_0 + 1] = meth  # convert to 1-based
+        except (ValueError, IndexError):
+            continue
+    for frame_num, meth_name in frame_methods.items():
+        pat = (r'(?:internal\s+|public\s+|private\s+|protected\s+)?'
+               r'function\s+' + re.escape(meth_name) +
+               r'\s*\([^)]*\)\s*(?::\s*\*\s*)?\{')
+        mm = re.search(pat, source)
+        if not mm:
+            continue
+        start = mm.end()
+        depth = 1
+        pos = start
+        while pos < len(source) and depth > 0:
+            if source[pos] == '{':
+                depth += 1
+            elif source[pos] == '}':
+                depth -= 1
+            pos += 1
+        body = source[start:pos - 1].strip()
+        if body:
+            result[frame_num] = body
+    return result
+
+
+def normalize_imported_scripts(scripts: List[dict], libs: List[dict]) -> List[dict]:
+    """Normalize decompiled AS3 scripts after import.
+
+    Three categories are identified and handled:
+
+    1. ``linkage-generated`` — Simple BitmapData/Sound stubs.  Dropped; they
+       are regenerated at compile time from current library metadata.
+
+    2. ``frame`` — ``*_fla`` package frame-aggregate classes.  Frame bodies
+       are extracted and injected into the matching container lib's
+       ``actions`` list.  The script is marked ``scriptOrigin: 'frame'`` so it
+       will be excluded from compilation; it persists in the N2D for reference.
+
+    3. ``class-source`` — All remaining scripts.  Kept and marked for
+       compilation from source.
+
+    Returns the list of normalized scripts (linkage stubs removed; frame and
+    class-source scripts marked with ``scriptOrigin`` field).
+    """
+    log.info('normalize_imported_scripts: starting with %d scripts', len(scripts))
+    
+    # index containers by swfCharId for fast _fla class matching
+    swf_cid_to_lib: Dict[int, dict] = {}
+    for lib in libs:
+        if lib.get('type') == 'container':
+            cid = lib.get('swfCharId')
+            if cid is not None:
+                swf_cid_to_lib[cid] = lib
+
+    kept: List[dict] = []
+    n_linkage = n_frame = 0
+
+    for idx, script in enumerate(scripts):
+        source = script.get('source', '')
+        path = script.get('path', '')
+        parts = path.rsplit('/', 1)
+        pkg_dir = parts[0] if len(parts) == 2 else ''
+        class_filename = parts[-1].replace('.as', '')
+
+        # ── 1. Linkage stub ───────────────────────────────────────────
+        if _is_linkage_stub(source):
+            n_linkage += 1
+            log.debug('  [%d] LINKAGE STUB: %s', idx, path)
+            continue  # discard — regenerated at export
+
+        # ── 2. _fla frame aggregate ───────────────────────────────────
+        if pkg_dir.endswith('_fla'):
+            # Flash IDE names: ClassName_swfCharId  e.g. dkrun_18
+            num_match = re.search(r'_(\d+)$', class_filename)
+            target_lib = None
+            if num_match:
+                target_lib = swf_cid_to_lib.get(int(num_match.group(1)))
+
+            if target_lib is not None:
+                frame_bodies = _extract_frame_methods_from_fla_class(source)
+                if frame_bodies:
+                    existing = {a['frame']: a for a in target_lib.get('actions', [])}
+                    for fnum, body in frame_bodies.items():
+                        if fnum not in existing:
+                            target_lib.setdefault('actions', []).append(
+                                {'frame': fnum, 'action': body}
+                            )
+                    target_lib['actions'] = sorted(
+                        target_lib.get('actions', []), key=lambda a: a['frame']
+                    )
+                n_frame += 1
+                log.debug('  [%d] FRAME AGGREGATE: %s -> container %d', idx, path, target_lib.get('id'))
+                
+            # Mark as frame-origin (whether matched or not) so it won't be compiled
+            script['scriptOrigin'] = 'frame'
+            kept.append(script)
+            continue
+
+        # ── 3. Class-source ───────────────────────────────────────────
+        script['scriptOrigin'] = 'class-source'
+        kept.append(script)
+        log.debug('  [%d] CLASS-SOURCE: %s', idx, path)
+
+    log.info(
+        'normalize_imported_scripts: %d linkage stubs dropped, %d frame aggregates injected, %d scripts kept',
+        n_linkage, n_frame, len(kept),
+    )
+    print(f"  Script normalization: {n_linkage} linkage stubs dropped, "
+          f"{n_frame} frame aggregates -> timeline, {len(kept)} scripts kept")
+    return kept
+
+
     """Extract frame scripts from DoABC/DoABC2 tags using as3_decompiler.
 
     Parses the ABC bytecode, decompiles every class, and looks for
@@ -4693,6 +4853,12 @@ def main():
     # 3. Save
     step("Generating .n2d output...")
     n2d = builder.to_n2d_json()
+
+    # 3a. Normalize imported scripts: drop linkage stubs, inject _fla frame
+    #     aggregates into timeline actions, keep only class-source scripts.
+    if n2d.get('scripts'):
+        step("Normalizing imported AS3 scripts...")
+        n2d['scripts'] = normalize_imported_scripts(n2d['scripts'], n2d['libraries'])
 
     lib_summary = {}
     for lib in n2d['libraries']:

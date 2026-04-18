@@ -96,45 +96,41 @@ Additional recommended fields:
 
 ## Phased Implementation Plan
 
-### Phase 1: Remove Passthrough From Compile Policy
+### Phase 1: Remove Passthrough From Compile Policy ✅ DONE
 
-- Delete/disable raw DoABC passthrough branches in compile pipeline.
-- Enforce single path: compile from normalized script model.
-- Add startup compile log:
-  - `AS3 mode: full-recompile`
+- [x] Delete/disable raw DoABC passthrough branches in compile pipeline.
+- [x] Enforce single path: compile from normalized script model.
+- [x] Missing SDK now raises hard error for AS3 projects.
+- [x] Projects with no non-root exported symbols skip AS3 compilation (test safety).
+- [ ] Add startup compile log: `AS3 mode: full-recompile`
 
-### Phase 2: Add Intent Markers
+### Phase 2: Add Intent Markers 🔄 IN PROGRESS
 
-- Add `scriptOrigin` and ownership fields to script structures.
-- Backfill existing projects during load:
-  - infer frame scripts from timeline placement/context.
-  - infer linkage-generated scripts from symbol linkage patterns.
-  - remaining scripts default to class-source with warning log.
-- Add normalization pass to collapse decompiled frame-aggregate class scripts back into frame-owned script records.
-- Remove synthetic linkage/frame-aggregate artifacts from external script list after normalization.
+- [ ] Add `scriptOrigin` field to script structures (`frame` / `linkage-generated` / `class-source`).
+- [ ] Add normalization pass on import (`normalize_imported_scripts`):
+  - [ ] Detect and drop linkage-generated stubs (simple `extends BitmapData/Sound/MovieClip`, constructor = super() only).
+  - [ ] Detect `*_fla` package frame-aggregate classes; extract frame bodies → inject into matching container `lib.actions`.
+  - [ ] Tag remaining scripts as `class-source`.
+- [ ] Remove synthetic linkage/frame-aggregate artifacts from persisted external script list.
+- [ ] Backfill existing loaded projects during open (normalize on load).
 
 ### Phase 3: Frame Action Roundtrip
 
-- Ensure frame action scripts are attached to exact frame/timeline owner during export.
-- Add conflict handling if frame indices changed:
-  - resolve by label+frame mapping, then fallback by nearest frame.
-- Ensure imported frame-origin code is editable only through timeline/frame surfaces.
+- [ ] Ensure frame action scripts export as frame actions on the correct timeline frame.
+- [ ] Add conflict handling if frame indices changed (label+frame mapping, nearest-frame fallback).
+- [ ] Frame-origin scripts editable only through timeline/frame surfaces.
 
 ### Phase 4: Linkage Regeneration Path
 
-- Make linkage-generated classes export-time only and always regenerated on export.
-- For bitmap linkage classes:
-  - constructor defaults read current `library.width` and `library.height`.
-  - never consume stale source/body from imported legacy script.
-- Do not save generated linkage class files as external project scripts.
+- [ ] Linkage-generated classes are export-time only, always regenerated.
+- [ ] Bitmap linkage constructor defaults come from current `library.width` / `library.height`.
+- [ ] Never consume stale source/body from imported legacy script for linkage classes.
+- [ ] Do not save generated linkage class files as external project scripts.
 
 ### Phase 5: Diagnostics and Failsafes
 
-- Add debug output (toggleable):
-  - script counts by origin.
-  - frame script reattachment map.
-  - linkage class regeneration map with emitted dimensions.
-- Hard fail export if a script has unknown origin and cannot be normalized.
+- [ ] Add debug output (toggleable): script counts by origin, frame script reattachment map, linkage class regeneration map.
+- [ ] Hard fail export if a script has unknown origin and cannot be normalized.
 
 ## Regression Test Matrix
 

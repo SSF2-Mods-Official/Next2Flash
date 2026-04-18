@@ -1056,6 +1056,26 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 _overlay_external_bitmaps(n2d_json, project_dir)
                 scripts_refreshed = _read_scripts_from_disk(n2d_json, project_dir)
                 log.info('_handle_open_project: refreshed %d scripts from disk', scripts_refreshed)
+                
+                # ── Backfill & normalize scripts (Phase 2 + Phase 4) ──
+                # For existing projects without scriptOrigin field, infer based on source.
+                # Drop linkage stubs, extract frame bodies, mark remaining.
+                try:
+                    from swf_to_n2d import normalize_imported_scripts
+                    libs = n2d_json.get('libraries', [])
+                    scripts = n2d_json.get('scripts', [])
+                    if scripts:
+                        # Backfill: mark scripts that already have scriptOrigin,
+                        # for those that don't, normalization will infer
+                        for s in scripts:
+                            if 'scriptOrigin' not in s:
+                                # Will be classified during normalize
+                                pass
+                        normalized = normalize_imported_scripts(scripts, libs)
+                        n2d_json['scripts'] = normalized
+                        log.info('_handle_open_project: normalized scripts; %d kept', len(normalized))
+                except Exception as e:
+                    log.warning('_handle_open_project: script normalization failed (continuing): %s', e)
             else:
                 project_dir = None
 

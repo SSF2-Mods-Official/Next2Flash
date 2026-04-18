@@ -68,6 +68,13 @@ class JavaScriptEditor extends BaseTimeline
          * @private
          */
         this._$mouseUp = null;
+
+        /**
+         * @type {?object}
+         * @default null
+         * @private
+         */
+        this._$externalScriptSession = null;
     }
 
     /**
@@ -191,7 +198,7 @@ class JavaScriptEditor extends BaseTimeline
             "enableLiveAutocompletion": true
         });
         this._$editor.setTheme("ace/theme/monokai");
-        this._$editor.session.setMode("ace/mode/javascript");
+        this._$editor.session.setMode("ace/mode/actionscript");
 
         const words = [
             { "word": "next2d", "meta": "window.next2d" },
@@ -503,6 +510,10 @@ class JavaScriptEditor extends BaseTimeline
     {
         Util.$keyLock = true;
         this._$active = true;
+        const main = document.getElementById("main");
+        if (main) {
+            main.classList.add("editor-modal-active");
+        }
 
         // 追加対象のフレーム番号をセット
         this._$frame = frame || Util.$timelineFrame.currentFrame;
@@ -552,9 +563,15 @@ class JavaScriptEditor extends BaseTimeline
         this._$editor.setValue("", 0);
         this._$frame  = -1;
         this._$scene  = null;
+        this._$externalScriptSession = null;
         this._$active = false;
         Util.$keyLock = false;
         Util.$endMenu();
+
+        const main = document.getElementById("main");
+        if (main) {
+            main.classList.remove("editor-modal-active");
+        }
     }
 
     /**
@@ -568,6 +585,17 @@ class JavaScriptEditor extends BaseTimeline
     {
         if (this._$frame === -1) {
             return ;
+        }
+
+        // External source-script session path (unified editor modal).
+        if (this._$externalScriptSession && this._$scene) {
+            const script = this._$editor.getValue(0);
+            if (script) {
+                this._$scene.setAction(this._$frame, script);
+            } else {
+                this._$scene.deleteAction(this._$frame);
+            }
+            return;
         }
 
         const leftFrame = Util.$timelineHeader.leftFrame;
@@ -598,6 +626,87 @@ class JavaScriptEditor extends BaseTimeline
             }
         }
     }
+
+    /**
+     * @description Open a source script using the same core editor modal.
+     *
+     * @param  {object} script
+     * @param  {function} onSave
+     * @return {void}
+     * @method
+     * @public
+     */
+    openExternalScript (script, onSave)
+    {
+        if (!script) {
+            return;
+        }
+
+        this._$externalScriptSession = {
+            script,
+            onSave: typeof onSave === "function" ? onSave : null
+        };
+
+        const adapter = {
+            "name": script.path || script.name || "Source Script",
+            "__$n2fExternalScript": true,
+            "hasAction": (frame) =>
+            {
+                return frame === 1;
+            },
+            "getAction": (frame) =>
+            {
+                return frame === 1 ? (script.source || "") : "";
+            },
+            "setAction": (frame, value) =>
+            {
+                if (frame !== 1) {
+                    return;
+                }
+                script.source = value;
+                if (this._$externalScriptSession
+                    && this._$externalScriptSession.onSave
+                ) {
+                    this._$externalScriptSession.onSave(value);
+                }
+            },
+            "deleteAction": (frame) =>
+            {
+                if (frame !== 1) {
+                    return;
+                }
+                script.source = "";
+                if (this._$externalScriptSession
+                    && this._$externalScriptSession.onSave
+                ) {
+                    this._$externalScriptSession.onSave("");
+                }
+            }
+        };
+
+        this.show(null, 1, adapter);
+    }
 }
 
 Util.$javaScriptEditor = new JavaScriptEditor();
+
+// Bridge used by actionscript-panel.js so source scripts open in the same modal
+// implementation as frame scripts.
+window.__N2F_EditorBridge = {
+    "openSourceScript": (script, onSave) =>
+    {
+        if (!Util.$javaScriptEditor) {
+            return false;
+        }
+        Util.$javaScriptEditor.openExternalScript(script, onSave);
+        return true;
+    },
+    "closeEditor": () =>
+    {
+        if (!Util.$javaScriptEditor || !Util.$javaScriptEditor.active) {
+            return false;
+        }
+        Util.$javaScriptEditor.hide();
+        return true;
+    }
+};

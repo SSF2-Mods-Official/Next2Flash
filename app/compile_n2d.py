@@ -730,14 +730,22 @@ def find_sdk() -> Optional[str]:
 
 def _overlay_external_scripts(data: dict, project_dir: str) -> None:
     """Read .as files from the project folder and overlay them onto the
-    embedded scripts in *data*.  If any script source differs from what is
-    embedded, set ``data['scriptsModified'] = True`` so the compiler will
-    recompile from source instead of using the raw DoABC passthrough."""
+    embedded scripts in *data*. If any script source differs from what is
+    embedded, mark ``data['scriptsModified'] = True`` so downstream stages
+    can report that script sources changed before recompilation.
+
+    POLICY: linkage-generated scripts are never updated from disk; they are
+    always regenerated at compile time from current library metadata.
+    """
     scripts = data.get('scripts')
     if not scripts:
         return
     modified = False
     for script in scripts:
+        # POLICY: never read source for linkage-generated scripts.
+        # These are always regenerated from library metadata at compile time.
+        if script.get('scriptOrigin') == 'linkage-generated':
+            continue
         ext = script.get('externalFile', '')
         if not ext:
             continue
@@ -2251,12 +2259,20 @@ def compile_as3(
         embedded_dir = os.path.join(tmp_dir, "embedded")
         os.makedirs(embedded_dir, exist_ok=True)
         skipped_swc = 0
+        skipped_linkage = 0
         if embedded_scripts:
             for script in embedded_scripts:
                 spath = script.get('path', '')
                 source = script.get('source', '')
                 if not spath or not source:
                     continue
+                
+                # POLICY: never compile linkage-generated scripts.
+                # These are always regenerated from library metadata at compile time.
+                if script.get('scriptOrigin') == 'linkage-generated':
+                    skipped_linkage += 1
+                    continue
+                
                 # Skip top-level scripts that the SWC already provides.
                 # Sub-package scripts (e.g. gameandwatch_fla/Idle_3.as) are
                 # never in the SWC so they're always written.
@@ -2269,8 +2285,10 @@ def compile_as3(
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
                 with open(fpath, 'w', encoding='utf-8') as sf:
                     sf.write(source)
-            written = len(embedded_scripts) - skipped_swc
+            written = len(embedded_scripts) - skipped_swc - skipped_linkage
             msg = f"  Wrote {written} embedded scripts to temp dir"
+            if skipped_linkage:
+                msg += f" (skipped {skipped_linkage} linkage-generated)"
             if skipped_swc:
                 msg += f" (skipped {skipped_swc} SWC-provided)"
             print(msg)

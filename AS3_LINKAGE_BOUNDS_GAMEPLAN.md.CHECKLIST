@@ -1,0 +1,52 @@
+# AS3 Gameplan Checklist — All Phases
+
+## GUI Changes Note
+Add to next2flash UI roadmap (out of scope for backend):
+- Frame-origin scripts: editable only through timeline/frame surfaces (not external script list)
+- Linkage-generated scripts: never appear in external script UI
+- Frame script injection UI: show extracted frame methods on target timeline
+- Script origin indicator: visual badge showing origin category
+
+---
+
+## Phase 1 — Passthrough Removal ✅ COMPLETE
+- [x] Remove raw DoABC passthrough branch  
+- [x] Disable fallback-to-raw on compile errors
+- [x] Hard fail on missing SDK for AS3 projects
+- [x] Skip AS3 for projects with no symbols/scripts
+- [ ] Add compile log: "AS3 mode: full-recompile"
+
+## Phase 2 — Intent Markers 🟢 MOSTLY DONE
+- [x] Implement linkage stub detection (`_is_linkage_stub`)
+- [x] Extract frame methods from `*_fla` classes
+- [x] Normalize scripts on import via `normalize_imported_scripts`  
+- [x] Mark remaining scripts as `class-source`
+- [ ] Propagate `scriptOrigin` field through compile pipeline
+- [ ] Backfill on load: infer origins for existing projects
+- [ ] Hide linkage-generated from external script list in UI
+
+## Phase 3 — Frame Action Roundtrip
+- [ ] Export frame-origin scripts as frame actions to target timeline
+- [ ] Validate frame index mapping (label+frame or nearest-frame fallback)
+- [ ] Ensure actions inject to correct container lib.actions
+
+## Phase 4 — Linkage Regeneration SafeGuards
+- [ ] Add exportPolicy: `"regenerate"` guard for linkage-generated scripts
+- [ ] Prevent compile_as3 from reading source for linkage classes
+- [ ] Verify generate_symbol_stubs uses current dims (already done)
+- [ ] Do not persist linkage-generated class files
+
+## Phase 5 — Diagnostics
+- [ ] Add AS3 compilation log: script counts by origin
+- [ ] Log frame script reattachment map
+- [ ] Log linkage class regeneration with dimensions
+- [ ] Hard fail on unknown origin + un-normalizable script
+
+---
+
+## Implementation Order
+1. ✅ Phase 1 done
+2. ✅ Phase 2 core done (need propagation + backfill)
+3. → Phase 3 (frame action export routing)
+4. → Phase 4 (linkage safeguards)
+5. → Phase 5 (diagnostics)

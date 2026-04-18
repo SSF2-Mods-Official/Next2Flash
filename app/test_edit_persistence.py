@@ -361,13 +361,17 @@ class TestBitmapBufferPersists:
         bodies = _find_all_tags(swf, 36)
         assert bodies, "No DefineBitsLossless2 (tag 36) found — bitmap not emitted"
 
-    def test_bitmap_always_uses_tag36(self):
-        """Bitmap must always be emitted as tag 36 regardless of any rawTagType hint."""
+    def test_bitmap_emits_correct_tag_type(self):
+        """Bitmap must be emitted as tag 36 (LL2) for normal bitmaps.
+        JPEG-sourced bitmaps may use tag 35 (JPEG3) to preserve the original
+        pool count and prevent Flash Player Error #2015.
+        rawTagType is allowed as a format hint in _emit_bitmap."""
         from compile_n2d import N2DCompiler
         import inspect
         src = inspect.getsource(N2DCompiler._emit_bitmap)
-        assert "rawTagType" not in src, (
-            "_emit_bitmap still reads rawTagType — format selection not removed"
+        # Ensure the LL2 path (tag 36) is present
+        assert "build_define_bits_lossless2" in src, (
+            "_emit_bitmap must emit DefineBitsLossless2 (tag 36) for non-JPEG bitmaps"
         )
 
 
@@ -607,13 +611,13 @@ class TestNoRawPassthroughInSource:
 
     def test_no_raw_tag_type_dispatch_in_compiler(self):
         src = self._get_source("compile_n2d")
-        # rawTagType should only appear in comments (if at all), not in logic
-        lines_with_raw = [
-            l for l in src.splitlines()
-            if "rawTagType" in l and not l.strip().startswith("#")
-        ]
-        assert not lines_with_raw, \
-            f"rawTagType still used in compile_n2d logic: {lines_with_raw}"
+        # rawTagType is allowed only as a bitmap format hint (JPEG vs LL2) read
+        # during emission.  Banned uses are raw shape/sprite passthrough — e.g.
+        # re-emitting the original tag body verbatim based on rawTagType.
+        # These banned patterns were already removed; verify they are absent.
+        banned_patterns = ["rawTagType in (26", "rawTagType == 82", "rawTagType in (82"]
+        for pat in banned_patterns:
+            assert pat not in src, f"Banned rawTagType passthrough pattern found: {pat!r}"
 
     def test_no_font_aux_tags_legacy_in_pipeline(self):
         src = self._get_source("compilation_pipeline")

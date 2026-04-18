@@ -358,22 +358,22 @@ class TimelineMarker extends BaseTimeline
             return ;
         }
 
-        const markerLeft = this._$left;
-        const offsetX    = 318;
-        const toolWidth  = 45;
+        const contentRect = content.getBoundingClientRect();
+        const markerRect  = element.getBoundingClientRect();
 
         // 表示外なら非表示
-        if (0 > markerLeft
-            || this._$clientWidth > 0
-            && markerLeft + offsetX - toolWidth >= this._$clientWidth
+        if (markerRect.right <= contentRect.left
+            || markerRect.left >= contentRect.right
         ) {
             border.setAttribute("style", "display: none;");
             return ;
         }
 
-        const left   = offsetX + this._$markerClientWidth / 2 + markerLeft;
-        const top    = this._$offsetTop - 1;
-        const height = window.screen.height;
+        const left = markerRect.left + this._$markerClientWidth / 2;
+        const top  = Math.max(0, contentRect.top - 1);
+
+        // fixed配置なのでviewport基準の高さを使う
+        const height = Math.max(0, window.innerHeight - top);
 
         border.setAttribute(
             "style", `height: ${height}px; top: ${top | 0}px; left: ${left | 0}px;`

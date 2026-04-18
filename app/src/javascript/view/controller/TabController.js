@@ -23,6 +23,13 @@ class TabController
          */
         this._$handler = null;
 
+        /**
+         * @type {function}
+         * @default null
+         * @private
+         */
+        this._$resizeHandler = null;
+
         // DOMの読込がまだであれば、イベントに登録
         Util.$readEnd++;
         if (document.readyState !== "complete") {
@@ -88,6 +95,16 @@ class TabController
             }
         }
 
+        this.suppressControllerVerticalArtifacts();
+
+        if (!this._$resizeHandler) {
+            this._$resizeHandler = () =>
+            {
+                this.suppressControllerVerticalArtifacts();
+            };
+            window.addEventListener("resize", this._$resizeHandler);
+        }
+
         Util.$initializeEnd();
     }
 
@@ -147,6 +164,71 @@ class TabController
 
         if (event.target.dataset.tabType === "controller-area-property") {
             this.showController();
+        }
+
+        // Wait a tick so tab content layout is finalized before scanning.
+        window.requestAnimationFrame(() =>
+        {
+            this.suppressControllerVerticalArtifacts();
+        });
+    }
+
+    /**
+     * @description Hide unexpected thin full-height vertical artifacts in the
+     *              controller panel (e.g. stuck 1px overlay lines).
+     *
+     * @return {void}
+     * @method
+     * @public
+     */
+    suppressControllerVerticalArtifacts ()
+    {
+        const controller = document.getElementById("controller");
+        if (!controller) {
+            return;
+        }
+
+        const controllerRect = controller.getBoundingClientRect();
+        const minHeight = Math.max(140, controllerRect.height * 0.45);
+
+        const nodes = document.body.querySelectorAll("*");
+        for (let idx = 0; idx < nodes.length; ++idx) {
+
+            const node = nodes[idx];
+            if (!(node instanceof HTMLElement)) {
+                continue;
+            }
+
+            // Keep explicit framework elements untouched.
+            if (node.id === "controller-adjustment"
+                || node.id === "timeline-marker"
+                || node.id === "timeline-marker-border") {
+                continue;
+            }
+
+            const style = window.getComputedStyle(node);
+            if (style.display === "none"
+                || style.visibility === "hidden"
+                || style.opacity === "0") {
+                continue;
+            }
+
+            const rect = node.getBoundingClientRect();
+            if (!rect.width || !rect.height) {
+                continue;
+            }
+
+            // Candidate: visible thin vertical line-like element in controller.
+            if (rect.width > 3
+                || rect.height < minHeight
+                || rect.left < controllerRect.left
+                || rect.right > controllerRect.right
+                || rect.top > controllerRect.bottom
+                || rect.bottom < controllerRect.top) {
+                continue;
+            }
+
+            node.style.setProperty("display", "none", "important");
         }
     }
 
