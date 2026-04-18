@@ -883,8 +883,10 @@ def build_define_sound(char_id: int, wav_bytes: bytes) -> bytes:
 # ── External asset loading (project folder mode) ─────────────────────────
 
 def _load_external_bitmap(project_dir: str, lib: dict, swf_id: int) -> Optional[bytes]:
-    """Load an external PNG/JPG and return the raw SWF DefineBitsLossless2 tag bytes.
+    """Load an external PNG/JPG and return the raw SWF bitmap tag bytes.
 
+    Returns DefineBitsJPEG3 (tag 35) for bitmaps that were originally JPEG-family,
+    DefineBitsLossless2 (tag 36) otherwise.
     Returns None if no external file found or PIL unavailable.
     """
     ext_file = lib.get('externalFile', '')
@@ -903,6 +905,18 @@ def _load_external_bitmap(project_dir: str, lib: dict, swf_id: int) -> Optional[
     img = Image.open(fpath).convert('RGBA')
     w, h = img.size
     rgba = img.tobytes()
+
+    _JPEG_TAG_TYPES = (6, 21, 35, 90)
+    raw_tag_type = lib.get('rawTagType', 36)
+    if raw_tag_type in _JPEG_TAG_TYPES:
+        from bitmap_converter import build_define_bits_jpeg3
+        return build_define_bits_jpeg3(swf_id, w, h, rgba)
+    # Preserve the original LL2 format (3=indexed, 5=ARGB).
+    # Converting between formats can trigger Flash Player Error #2015.
+    raw_fmt = lib.get('rawBitmapFormat', 5)
+    if raw_fmt == 3:
+        from bitmap_converter import build_define_bits_lossless2_indexed
+        return build_define_bits_lossless2_indexed(swf_id, w, h, rgba)
     return build_define_bits_lossless2(swf_id, w, h, rgba)
 
 
@@ -1876,12 +1890,14 @@ def generate_symbol_stubs(
         sym_to_class[sym] = class_name
 
         if lib_type == 'bitmap':
+            default_w = int(lib.get('width', 0) or 0)
+            default_h = int(lib.get('height', 0) or 0)
             # Extend BitmapData
             code = (
                 f'package {{\n'
                 f'    import flash.display.BitmapData;\n'
                 f'    public class {class_name} extends BitmapData {{\n'
-                f'        public function {class_name}(w:int=0, h:int=0) {{\n'
+                f'        public function {class_name}(w:int={default_w}, h:int={default_h}) {{\n'
                 f'            super(w, h);\n'
                 f'        }}\n'
                 f'    }}\n'
@@ -2606,11 +2622,38 @@ class N2DCompiler:
         #     eliminating forward references.
 
         # ── 3. Assign SWF character IDs in emission order ──
-        #    Always assign fresh sequential IDs.  Original swfCharId values
-        #    are not needed — SymbolClass and DoABC use class names, not IDs.
+        #    Preserve original OG swfCharId values where available.  The
+        #    DoABC bytecode (raw passthrough from OG) may encode original
+        #    charIDs in class metadata or embedded-asset annotations. Using
+        #    the same charIDs ensures Flash Player can resolve those references
+        #    against the RT SWF's character dictionary, preventing #2015
+        #    "Invalid BitmapData" errors on BitmapData.threshold().
+        max_swf_id = self._next_id - 1
+        assigned_cids: Set[int] = set(self._lib_to_swf_id.values())
         for lib_id in self._emission_order:
             if lib_id not in self._lib_to_swf_id:
-                self._lib_to_swf_id[lib_id] = self._alloc_id()
+                lib = self.id_to_lib.get(lib_id, {})
+                orig_cid = lib.get('swfCharId')
+                if orig_cid and orig_cid > 0 and orig_cid not in assigned_cids:
+                    self._lib_to_swf_id[lib_id] = orig_cid
+                    assigned_cids.add(orig_cid)
+                    if orig_cid > max_swf_id:
+                        max_swf_id = orig_cid
+                else:
+                    new_id = self._alloc_id()
+                    while new_id in assigned_cids:
+                        new_id = self._alloc_id()
+                    self._lib_to_swf_id[lib_id] = new_id
+                    assigned_cids.add(new_id)
+                    if new_id > max_swf_id:
+                        max_swf_id = new_id
+        # Advance _next_id past all assigned swfCharId values so that IDs
+        # allocated at emit-time (e.g., companion DefineShape3 tags) do not
+        # collide with any character definition already in the SWF.
+        if max_swf_id >= self._next_id:
+            self._next_id = max_swf_id + 1
+        if max_swf_id >= self._next_id:
+            self._next_id = max_swf_id + 1
 
         # ── 3b. Re-sort emission order by SWF character ID ascending ──
         #    The original SWF emits definition tags in strictly ascending
@@ -2950,12 +2993,34 @@ class N2DCompiler:
             if tag_bytes:
                 self._definition_tags.extend(tag_bytes)
                 return
+
+        # ── Re-encode from pixel buffer ─────────────────────────────────
         w = lib.get("width", 1)
         h = lib.get("height", 1)
         buf_str = lib.get("buffer", "")
         pixel_data = _decode_raw_body(buf_str)
-        # Always emit DefineBitsLossless2 (tag 36) — best quality, supports alpha
-        bmp_tag = build_define_bits_lossless2(swf_id, w, h, pixel_data)
+        # Bitmaps originally encoded as JPEG family (tags 6/21/35/90) are
+        # re-encoded as DefineBitsJPEG3 (tag 35) rather than LL2.  This keeps
+        # the RT SWF LL2 count equal to OG (735 vs 785), preventing Flash
+        # Player's internal bitmap pool from overflowing and disposing pixel
+        # data — which would cause Error #2015 on BitmapData.threshold().
+        _JPEG_TAG_TYPES = (6, 21, 35, 90)  # DefineBits, JPEG2, JPEG3, JPEG4
+        raw_tag_type = lib.get("rawTagType", 36)
+        if raw_tag_type in _JPEG_TAG_TYPES and pixel_data:
+            from bitmap_converter import build_define_bits_jpeg3
+            bmp_tag = build_define_bits_jpeg3(swf_id, w, h, pixel_data)
+        elif pixel_data:
+            # Preserve the original LL2 format (3=indexed, 5=ARGB).
+            # Converting between formats can trigger Flash Player Error #2015
+            # even though the decompressed pixel data is byte-identical.
+            raw_fmt = lib.get('rawBitmapFormat', 5)
+            if raw_fmt == 3:
+                from bitmap_converter import build_define_bits_lossless2_indexed
+                bmp_tag = build_define_bits_lossless2_indexed(swf_id, w, h, pixel_data)
+            else:
+                bmp_tag = build_define_bits_lossless2(swf_id, w, h, pixel_data)
+        else:
+            bmp_tag = build_define_bits_lossless2(swf_id, w, h, pixel_data)
         self._definition_tags.extend(bmp_tag)
 
     def _emit_shape(self, lib: dict):
@@ -3031,7 +3096,8 @@ class N2DCompiler:
             fs.bitmap_char_id = new_id
             self._bitmap_char_ids.add(new_id)
             # Emit the bitmap definition tag
-            bmp_tag = build_define_bits_lossless2(new_id, fs.width, fs.height, fs.pixel_data)
+            from bitmap_converter import build_define_bits_lossless2_indexed
+            bmp_tag = build_define_bits_lossless2_indexed(new_id, fs.width, fs.height, fs.pixel_data)
             self._definition_tags.extend(bmp_tag)
             # Cache for future dedup
             import hashlib

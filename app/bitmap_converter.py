@@ -29,6 +29,7 @@ def build_define_bits_lossless2(
     We convert to ARGB order as required by SWF.
     """
     log.debug("build_define_bits_lossless2: char_id=%d %dx%d pixel_bytes=%d", char_id, width, height, len(pixel_data))
+
     # Convert RGBA → premultiplied ARGB using numpy if available (100x faster)
     try:
         import numpy as np
@@ -74,8 +75,8 @@ def build_define_bits_lossless2(
                 argb_buf[i+3] = (b * a + 127) // 255
         argb_bytes = bytes(argb_buf)
 
-    # zlib level 6 is ~3x faster than 9 with <5% size increase
-    compressed = zlib.compress(argb_bytes, 6)
+    # Match OG SWF zlib level (best compression → FLEVEL 3 / 0x78DA header)
+    compressed = zlib.compress(argb_bytes, 9)
 
     body = io.BytesIO()
     body.write(struct.pack("<H", char_id))
@@ -84,7 +85,78 @@ def build_define_bits_lossless2(
     body.write(struct.pack("<H", height))
     body.write(compressed)
 
-    return build_tag(TAG_DEFINE_BITS_LOSSLESS2, body.getvalue())
+    return build_tag(TAG_DEFINE_BITS_LOSSLESS2, body.getvalue(), force_long=True)
+
+
+def build_define_bits_lossless2_indexed(
+    char_id: int,
+    width: int,
+    height: int,
+    pixel_data: bytes,
+) -> bytes:
+    """Build DefineBitsLossless2 (tag 36) with indexed-color format (format=3).
+
+    Uses the exact unique RGBA colors as the palette so pixel values are
+    preserved perfectly (lossless).  If the image has more than 256 distinct
+    RGBA values, falls back to the 32-bit ARGB format=5 encoding.
+
+    `pixel_data` should be raw RGBA bytes (4 bytes per pixel, row-major).
+    Palette entries are stored as RGBA (not premultiplied) per SWF spec.
+    """
+    pixel_count = width * height
+    if pixel_count == 0:
+        return build_define_bits_lossless2(char_id, width, height, pixel_data)
+
+    # --- fast path: numpy ---
+    try:
+        import numpy as np
+        px = np.frombuffer(pixel_data, dtype=np.uint8).reshape(pixel_count, 4)
+        # Treat each pixel as a uint32 for fast uniqueness counting
+        px32 = px.view(np.uint32).reshape(-1)
+        unique32, inverse = np.unique(px32, return_inverse=True)
+        if len(unique32) > 256:
+            return build_define_bits_lossless2(char_id, width, height, pixel_data)
+        # Build RGBA palette (SWF LL2 format=3 uses RGBA order, no premultiply)
+        unique_px = unique32.view(np.uint8).reshape(-1, 4)  # RGBA rows
+        palette = unique_px.tobytes()
+        num_colors = len(unique32)
+        # Build pixel index rows with 4-byte stride padding
+        row_stride = (width + 3) & ~3
+        indices = np.zeros(height * row_stride, dtype=np.uint8)
+        inverse_2d = inverse.astype(np.uint8).reshape(height, width)
+        for y in range(height):
+            indices[y * row_stride: y * row_stride + width] = inverse_2d[y]
+    except ImportError:
+        # --- pure Python fallback ---
+        palette_list: list[bytes] = []
+        color_to_idx: dict[bytes, int] = {}
+        for i in range(pixel_count):
+            c = pixel_data[i * 4: i * 4 + 4]
+            if c not in color_to_idx:
+                if len(color_to_idx) >= 256:
+                    return build_define_bits_lossless2(char_id, width, height, pixel_data)
+                color_to_idx[c] = len(palette_list)
+                palette_list.append(c)
+        num_colors = len(palette_list)
+        palette = b''.join(palette_list)
+        row_stride = (width + 3) & ~3
+        indices = bytearray(height * row_stride)
+        for y in range(height):
+            for x in range(width):
+                c = pixel_data[(y * width + x) * 4: (y * width + x) * 4 + 4]
+                indices[y * row_stride + x] = color_to_idx[c]
+
+    compressed = zlib.compress(palette + bytes(indices), 9)
+
+    body = io.BytesIO()
+    body.write(struct.pack("<H", char_id))
+    body.write(struct.pack("<B", 3))            # BitmapFormat = 3 (indexed)
+    body.write(struct.pack("<H", width))
+    body.write(struct.pack("<H", height))
+    body.write(struct.pack("<B", num_colors - 1))  # ColorTableSize = count - 1
+    body.write(compressed)
+
+    return build_tag(TAG_DEFINE_BITS_LOSSLESS2, body.getvalue(), force_long=True)
 
 
 def build_define_bits_lossless2_from_raw(
@@ -104,7 +176,7 @@ def build_define_bits_lossless2_from_raw(
     body.write(struct.pack("<H", width))
     body.write(struct.pack("<H", height))
     body.write(compressed)
-    return build_tag(TAG_DEFINE_BITS_LOSSLESS2, body.getvalue())
+    return build_tag(TAG_DEFINE_BITS_LOSSLESS2, body.getvalue(), force_long=True)
 
 
 def build_define_bits_lossless(
@@ -144,7 +216,7 @@ def build_define_bits_lossless(
     body.write(struct.pack("<H", width))
     body.write(struct.pack("<H", height))
     body.write(compressed)
-    return build_tag(TAG_DEFINE_BITS_LOSSLESS, body.getvalue())
+    return build_tag(TAG_DEFINE_BITS_LOSSLESS, body.getvalue(), force_long=True)
 
 
 def build_define_bits_jpeg3(
@@ -190,4 +262,4 @@ def build_define_bits_jpeg3(
     body.write(alpha_compressed)
 
     TAG_DEFINE_BITS_JPEG3 = 35
-    return build_tag(TAG_DEFINE_BITS_JPEG3, body.getvalue())
+    return build_tag(TAG_DEFINE_BITS_JPEG3, body.getvalue(), force_long=True)

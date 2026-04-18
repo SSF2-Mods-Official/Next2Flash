@@ -786,35 +786,38 @@
       return;
     }
 
-    // Get the stored blob (memory first, then IDB)
-    var blobPromise = _importedN2DBlob
-      ? Promise.resolve(_importedN2DBlob)
-      : _loadImportedBlobFromIDB();
+    // Remember which in-app tab is currently active.
+    // The tool creates a new tab when loading an N2D blob.
+    var oldTabEl = document.querySelector('#view-tab-area .active[data-tab-id]');
+    var oldTabId = oldTabEl ? oldTabEl.dataset.tabId : null;
 
-    blobPromise.then(function (storedBlob) {
-      if (!storedBlob) {
-        toast('No stored project file — please use Import Project first.', true);
-        return;
-      }
+    showProgress('Refreshing project from server...', 10);
+    fetch(API_BASE + '/api/refresh-assets', { method: 'POST' })
+      .then(function (r) {
+        updateProgress('Refreshing external assets...', 35);
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Server error'); });
+        var name = r.headers.get('X-N2D-Name') || _currentProjectDir.split(/[\\/]/).pop() || 'project';
+        var libs = r.headers.get('X-N2D-Libraries') || '?';
+        updateProgress('Downloading refreshed project data (' + libs + ' libraries)...', 60);
+        return r.blob().then(function (b) {
+          return { blob: b, name: name, libs: libs };
+        });
+      })
+      .then(function (result) {
+        updateProgress('Loading refreshed project into editor...', 85);
+        _currentProjectName = result.name;
+        _feedN2DToTool(result.blob, result.name);
 
-      // Remember which in-app tab is currently active
-      var oldTabEl = document.querySelector('#view-tab-area .active[data-tab-id]');
-      var oldTabId = oldTabEl ? oldTabEl.dataset.tabId : null;
+        _importedN2DBlob = result.blob.slice(0);
+        _saveImportedBlobToIDB(_importedN2DBlob);
 
-      showProgress('Refreshing project from server...', 10);
-
-      // Re-run the exact same open-project pipeline with the stored file.
-      // The tool creates its own new tab when loading an N2D (via the unzlib
-      // worker onmessage handler), so we must NOT close the old tab until the
-      // new workspace has fully loaded — otherwise we corrupt workspace state.
-      _doOpenProjectBlob(storedBlob, _currentProjectDir.split(/[\\/]/).pop() + '.n2d', function (result) {
         // Poll until the new tab becomes active in the DOM, then close the old one.
         var attempts = 0;
         function waitAndCloseOldTab() {
           var activeEl = document.querySelector('#view-tab-area .active[data-tab-id]');
           var activeId = activeEl ? activeEl.dataset.tabId : null;
           if (activeId !== null && activeId !== oldTabId) {
-            // New workspace is loaded and active — safe to close old tab
+            // New workspace is loaded and active — safe to close old tab.
             if (oldTabId !== null) {
               var closeBtn = document.getElementById('tab-delete-id-' + oldTabId);
               if (closeBtn) {
@@ -823,18 +826,23 @@
                 try { closeBtn.click(); } finally { window.confirm = origConfirm; }
               }
             }
+            hideProgress();
             toast('Refreshed: ' + result.name + ' (' + result.libs + ' libraries)');
           } else if (++attempts < 100) {
             setTimeout(waitAndCloseOldTab, 100);
           } else {
-            // Timed out (10s) — don't close the old tab to avoid corruption
             _log.warn('Refresh: timed out waiting for new tab');
+            hideProgress();
             toast('Refreshed: ' + result.name + ' (old tab may still be open)');
           }
         }
         setTimeout(waitAndCloseOldTab, 100);
+      })
+      .catch(function (err) {
+        hideProgress();
+        _log.error('Refresh failed:', err.message);
+        toast('Refresh failed: ' + err.message, true);
       });
-    });
   }
 
   /* ================================================================== */
@@ -1356,7 +1364,8 @@
                     if (!orig) return;
                     // Restore fontData/buttonData/binaryDataBody if missing
                     ['fontData', 'fontTagType', 'fontAuxTags', 'buttonData',
-                     'binaryDataBody', 'soundFormat', 'buttonAuxTags', 'swfCharId'
+                     'binaryDataBody', 'soundFormat', 'buttonAuxTags', 'swfCharId',
+                     'rawBitmapFormat'
                     ].forEach(function (field) {
                       if (!lib[field] && orig[field]) lib[field] = orig[field];
                     });

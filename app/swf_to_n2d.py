@@ -2929,10 +2929,18 @@ class N2DBuilder:
             if buffer_str:
                 decode_ok += 1
 
-            # Preserve original bitmap tag type for lossless re-encoding
+            # Preserve original bitmap tag type and format for lossless re-encoding
             raw_tag_type = 36  # default: DefineBitsLossless2
+            raw_bitmap_format = 5  # default: 32-bit ARGB
             if cid in self.raw_tag_data:
                 raw_tag_type = self.raw_tag_data[cid][0]
+                tag_body = self.raw_tag_data[cid][1]
+                # Preserve the LL2 format byte (3=indexed, 5=ARGB) so that
+                # re-encoding uses the same format as the original.  Converting
+                # between formats (e.g. fmt5→fmt3) can trigger Flash Player
+                # Error #2015 even though pixel data is identical.
+                if raw_tag_type in (TAG_DEFINE_BITS_LOSSLESS, TAG_DEFINE_BITS_LOSSLESS2) and len(tag_body) >= 1:
+                    raw_bitmap_format = tag_body[0]
 
             entry = {
                 'id': lid,
@@ -2946,6 +2954,7 @@ class N2DBuilder:
                 'imageType': 'image/png',
                 'buffer': buffer_str,
                 'rawTagType': raw_tag_type,
+                'rawBitmapFormat': raw_bitmap_format,
             }
             self.libraries.append(entry)
             bitmap_count += 1

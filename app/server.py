@@ -163,6 +163,7 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
 
     # Overlay editor library changes onto disk libraries
     editor_libs = editor.get('libraries', [])
+    bitmap_dims_changed = False
     for elib in editor_libs:
         if not elib:
             continue
@@ -193,11 +194,22 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
                           'endBounds',     # morph shape end-state bounds
                           'rawTagType',    # original SWF tag type (for metadata)
                           'soundStreamParsed', # SoundStreamHead2 inside sprites
+                          'rawBitmapFormat',   # original LL2 format byte (3 or 5)
                           )
         saved = {}
         for k in roundtrip_keys:
             if k in dlib:
                 saved[k] = dlib[k]
+
+        # Track bitmap dimension changes. If an exported symbol class extends
+        # BitmapData, constructor defaults must be regenerated when width/height
+        # changes; raw DoABC passthrough would keep stale dimensions.
+        old_w = dlib.get('width')
+        old_h = dlib.get('height')
+        is_bitmap_symbol = (
+            dlib.get('type') == 'bitmap' and
+            bool(dlib.get('symbol'))
+        )
 
         # Save swfDepth per-layer by name so we can restore it after the merge.
         # Layer.toObject() does not include swfDepth, so it's lost otherwise,
@@ -229,6 +241,12 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
             if k not in dlib or not dlib[k]:
                 dlib[k] = v
 
+        if is_bitmap_symbol:
+            new_w = dlib.get('width')
+            new_h = dlib.get('height')
+            if old_w != new_w or old_h != new_h:
+                bitmap_dims_changed = True
+
         # Restore swfDepth on layers that match by name (existing layers).
         # New layers (e.g. a freshly drawn pencil shape layer) won't match and
         # will fall back to sequential depth assignment at compile time.
@@ -247,6 +265,10 @@ def _merge_editor_into_disk(editor: dict, disk: dict) -> None:
                         for ci, ri in enumerate(ri_flags):
                             if ri and 'reinstated' not in chars[ci]:
                                 chars[ci]['reinstated'] = ri
+
+    if bitmap_dims_changed:
+        disk['scriptsModified'] = True
+        log.info('_merge_editor_into_disk: bitmap dimensions changed; marked scriptsModified=True')
 
 
 def _apply_text_patches_to_n2d(n2d_path: str, text_patches: list,
@@ -435,6 +457,26 @@ def _overlay_external_bitmaps(n2d_json: dict, project_dir: str) -> None:
     libraries = n2d_json.get("libraries", [])
     log.info('_overlay_external_bitmaps: project_dir=%s, libraries=%d', project_dir, len(libraries))
 
+    def _buffer_to_rgba_list(buf_value):
+        """Decode common buffer encodings into an RGBA byte-list."""
+        if not buf_value:
+            return []
+        if isinstance(buf_value, list):
+            return list(buf_value)
+        if isinstance(buf_value, (bytes, bytearray)):
+            return list(buf_value)
+        if isinstance(buf_value, str):
+            raw = buf_value[4:] if buf_value.startswith('b64:') else buf_value
+            try:
+                return list(base64.b64decode(raw))
+            except Exception:
+                return list(buf_value.encode('latin-1'))
+        return []
+
+    def _rgba_to_storage(rgba_bytes: bytes):
+        """Store RGBA in the same compact encoding used by N2D JSON blobs."""
+        return 'b64:' + base64.b64encode(rgba_bytes).decode('ascii')
+
     def _fingerprint(buf_list):
         """Take a reliable fingerprint: skip leading transparent pixels, grab FP_BYTES."""
         for px in range(0, len(buf_list) - 3, 4):
@@ -447,6 +489,7 @@ def _overlay_external_bitmaps(n2d_json: dict, project_dir: str) -> None:
     fingerprint_to_new = {}
     lib_id_to_new      = {}   # for int-id recode entries
     updated_libs = 0
+    bitmap_dims_changed = 0
 
     for lib in libraries:
         if not lib or lib.get("type") != "bitmap":
@@ -460,28 +503,25 @@ def _overlay_external_bitmaps(n2d_json: dict, project_dir: str) -> None:
         try:
             # Fingerprint OLD buffer before overwriting
             orig_buf = lib.get("buffer", "")
-            if orig_buf:
-                # Handle both string buffers (JSON) and list buffers (MessagePack)
-                if isinstance(orig_buf, str):
-                    old_list = list(orig_buf.encode('latin-1'))
-                elif isinstance(orig_buf, (list, bytes)):
-                    old_list = list(orig_buf) if not isinstance(orig_buf, list) else orig_buf
-                else:
-                    old_list = []
-                fp = _fingerprint(old_list) if old_list else None
-            else:
-                fp = None
+            old_list = _buffer_to_rgba_list(orig_buf)
+            fp = _fingerprint(old_list) if old_list else None
+
+            old_w = lib.get('width')
+            old_h = lib.get('height')
 
             img  = Image.open(fpath).convert("RGBA")
             rgba = img.tobytes()
-            new_list = list(rgba)
+            new_buf = _rgba_to_storage(rgba)
 
-            # Update library entry (use list for MessagePack compatibility)
-            lib["buffer"] = new_list
+            # Update library entry using compact b64 encoding (tool-friendly JSON)
+            lib["buffer"] = new_buf
             lib["width"]  = img.width
             lib["height"] = img.height
 
-            payload = (new_list, img.width, img.height)
+            if lib.get('symbol') and (old_w != img.width or old_h != img.height):
+                bitmap_dims_changed += 1
+
+            payload = (rgba, img.width, img.height)
             if fp:
                 fingerprint_to_new[fp] = payload
             lib_id_to_new[lib["id"]] = payload
@@ -527,22 +567,34 @@ def _overlay_external_bitmaps(n2d_json: dict, project_dir: str) -> None:
                 else:
                     # Fingerprint match against old buffer
                     buf = fv.get("buffer") or []
+                    buf = _buffer_to_rgba_list(buf)
                     fp  = _fingerprint(buf)
                     new_data = fingerprint_to_new.get(fp)
 
             if new_data is not None:
                 new_rgba, new_w, new_h = new_data
                 if isinstance(fv, dict):
-                    fv["buffer"] = new_rgba
+                    old_buf = fv.get('buffer')
+                    if isinstance(old_buf, list):
+                        fv["buffer"] = list(new_rgba)
+                    elif isinstance(old_buf, (bytes, bytearray)):
+                        fv["buffer"] = bytes(new_rgba)
+                    elif isinstance(old_buf, str) and not old_buf.startswith('b64:'):
+                        # Shape recode bitmap dicts are typically stored as raw latin-1 strings.
+                        # Preserve that encoding so parser behavior remains stable.
+                        fv["buffer"] = new_rgba.decode('latin-1')
+                    else:
+                        fv["buffer"] = _rgba_to_storage(new_rgba)
                     fv["width"]  = new_w
                     fv["height"] = new_h
-                else:
-                    recodes[fill_at] = {"buffer": new_rgba, "width": new_w, "height": new_h}
                 fills_updated += 1
 
             i += step
 
     log.info('_overlay_external_bitmaps: updated %d embedded shape fill dicts', fills_updated)
+    if bitmap_dims_changed:
+        n2d_json['scriptsModified'] = True
+        log.info('_overlay_external_bitmaps: %d bitmap dimensions changed; marked scriptsModified=True', bitmap_dims_changed)
     print(f'[N2F] bitmap overlay: {updated_libs} bitmaps, {fills_updated} shape fills updated')
 
 
@@ -1008,9 +1060,15 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 project_dir = None
 
             # Return zlib-compressed N2D for loading into the tool
-            json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
-            url_encoded = json_str.replace('%', '%25')
-            compressed = zlib.compress(url_encoded.encode("ascii"), 1)
+            # Return ZIP + MessagePack (same modern format used elsewhere) to
+            # avoid JSON string roundtrips for large/binary-heavy projects.
+            import zipfile
+            import io as _io
+            zip_buffer = _io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+                msgpack_data = msgpack.packb(n2d_json, use_bin_type=True)
+                zf.writestr('project.msgpack', msgpack_data)
+            compressed = zip_buffer.getvalue()
 
             n2d_name = n2d_json.get("name", name)
 
@@ -2081,9 +2139,14 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             except Exception as save_err:
                 print(f"[Refresh] WARN: could not save updated project.n2d: {save_err}")
 
-            json_str = json.dumps(n2d_json, separators=(",", ":"), ensure_ascii=True)
-            url_encoded = json_str.replace('%', '%25')
-            compressed = zlib.compress(url_encoded.encode("ascii"), 1)
+            # Return ZIP + MessagePack payload (same format as open/import paths).
+            import zipfile
+            import io as _io
+            zip_buffer = _io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+                msgpack_data = msgpack.packb(n2d_json, use_bin_type=True)
+                zf.writestr('project.msgpack', msgpack_data)
+            compressed = zip_buffer.getvalue()
 
             self.send_response(200)
             self._cors_headers()
@@ -2094,6 +2157,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self.send_header("X-Refreshed-Scripts", str(scripts_refreshed))
             self.send_header("X-Refreshed-Bitmaps", str(bitmaps_refreshed))
             self.send_header("X-Refreshed-Sounds", str(sounds_refreshed))
+            self.send_header("X-N2D-Format", "msgpack")
             self.send_header("Content-Length", str(len(compressed)))
             self.end_headers()
             self.wfile.write(compressed)

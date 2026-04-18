@@ -11,6 +11,7 @@ import io
 import logging
 import math
 import struct
+import base64
 from typing import List, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -190,7 +191,13 @@ def _parse_bitmap_data(val) -> Tuple[int, int, bytes, int]:
         h = int(val.get('height', 1))
         buf = val.get('buffer', [])
         if isinstance(buf, str):
-            pixel_data = bytes(ord(c) for c in buf)
+            if buf.startswith('b64:'):
+                try:
+                    pixel_data = base64.b64decode(buf[4:])
+                except Exception:
+                    pixel_data = b''
+            else:
+                pixel_data = bytes(ord(c) for c in buf)
         elif isinstance(buf, (bytes, bytearray)):
             pixel_data = bytes(buf)
         else:

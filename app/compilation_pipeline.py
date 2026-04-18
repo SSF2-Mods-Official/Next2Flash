@@ -314,9 +314,35 @@ class AllocateCharIDsStage(PipelineStage):
         #     and causing animation looping.
 
         # ── 3. Assign SWF character IDs in emission order ──
+        #    Preserve original OG swfCharId values where available.  The
+        #    DoABC bytecode (raw passthrough from OG) may encode original
+        #    charIDs in class metadata or embedded-asset annotations. Using
+        #    the same charIDs ensures Flash Player can resolve those references
+        #    against the RT SWF's character dictionary, preventing #2015
+        #    "Invalid BitmapData" errors on BitmapData.threshold().
+        max_swf_id = ctx.next_id - 1
+        assigned_cids: Set[int] = set(ctx.lib_to_swf_id.values())
         for lib_id in emission_order:
             if lib_id not in ctx.lib_to_swf_id:
-                ctx.lib_to_swf_id[lib_id] = ctx.alloc_id()
+                lib = ctx.id_to_lib.get(lib_id, {})
+                orig_cid = lib.get('swfCharId')
+                if orig_cid and orig_cid > 0 and orig_cid not in assigned_cids:
+                    ctx.lib_to_swf_id[lib_id] = orig_cid
+                    assigned_cids.add(orig_cid)
+                    if orig_cid > max_swf_id:
+                        max_swf_id = orig_cid
+                else:
+                    new_id = ctx.alloc_id()
+                    while new_id in assigned_cids:
+                        new_id = ctx.alloc_id()
+                    ctx.lib_to_swf_id[lib_id] = new_id
+                    assigned_cids.add(new_id)
+                    if new_id > max_swf_id:
+                        max_swf_id = new_id
+        # Advance next_id past all assigned IDs to avoid collision with
+        # IDs allocated at emit-time (e.g., companion DefineShape3 tags).
+        if max_swf_id >= ctx.next_id:
+            ctx.next_id = max_swf_id + 1
 
         # ── 3b. Re-sort emission order by SWF character ID ascending ──
         emission_order.sort(key=lambda lid: ctx.lib_to_swf_id.get(lid, 0))
