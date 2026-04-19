@@ -1358,6 +1358,30 @@
    * the workspace JSON produced by the tool's save().
    */
   function injectRoundtripFields(json) {
+    // If a source script is currently open in the unified editor modal,
+    // capture its live buffer so export includes unsaved in-editor edits.
+    if (window.__N2F_EditorBridge && typeof window.__N2F_EditorBridge.getActiveSourceScriptState === 'function') {
+      try {
+        var activeState = window.__N2F_EditorBridge.getActiveSourceScriptState();
+        if (activeState && activeScript !== null && activeScript >= 0 && activeScript < scripts.length) {
+          var target = scripts[activeScript];
+          var statePath = activeState.path || '';
+          var stateName = activeState.name || '';
+          var targetPath = target.path || '';
+          var targetName = target.name || '';
+          var sameScript = (statePath && targetPath && statePath === targetPath) ||
+            (!statePath && !targetPath && stateName && stateName === targetName);
+          if (sameScript) {
+            target.source = (activeState.source || '');
+            scriptsModified = true;
+            saveScriptsToStorage();
+          }
+        }
+      } catch (bridgeEx) {
+        _log.warn('Bridge state read failed during export injection: ' + bridgeEx.message);
+      }
+    }
+
     // 1) Source scripts
     if (scripts.length > 0) {
       json.scripts = scripts.map(function (s) {

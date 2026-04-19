@@ -22,6 +22,7 @@ import logging
 import msgpack
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -754,6 +755,13 @@ def _overlay_external_scripts(data: dict, project_dir: str) -> None:
             continue
         with open(ext_path, 'r', encoding='utf-8') as f:
             new_source = f.read()
+        spath = script.get('path', '')
+        primary = os.path.basename(spath)[:-3] if spath.endswith('.as') else ''
+        if primary:
+            cleaned = _strip_non_primary_classes(new_source, primary)
+            if cleaned != new_source:
+                log.info('_overlay_external_scripts: stripped non-primary classes for %s', spath)
+                new_source = cleaned
         old_source = script.get('source', '')
         if new_source != old_source:
             script['source'] = new_source
@@ -762,6 +770,62 @@ def _overlay_external_scripts(data: dict, project_dir: str) -> None:
     if modified:
         data['scriptsModified'] = True
         log.info('_overlay_external_scripts: marked scriptsModified=True')
+
+
+def _strip_non_primary_classes(source: str, primary_class: str) -> str:
+    """Keep only the primary class block in a script when extra top-level
+    helper classes leak into the same file.
+
+    This targets roundtrip artifacts where one source file accidentally
+    accumulates multiple top-level class declarations, which then appear as
+    unexpected RT-only scripts after decompile.
+    """
+    if not source or not primary_class:
+        return source
+
+    class_pat = re.compile(r'\bclass\s+(\w+)\b[^\{]*\{')
+    matches = list(class_pat.finditer(source))
+    if len(matches) <= 1:
+        return source
+
+    keep_spans: List[Tuple[int, int]] = []
+    for m in matches:
+        name = m.group(1)
+        if name == primary_class:
+            keep_spans.append((m.start(), m.end()))
+    if not keep_spans:
+        return source
+
+    # Remove non-primary class blocks by brace matching from the class keyword.
+    to_remove: List[Tuple[int, int]] = []
+    for m in matches:
+        name = m.group(1)
+        if name == primary_class:
+            continue
+        start = m.start()
+        pos = m.end()
+        depth = 1
+        while pos < len(source) and depth > 0:
+            ch = source[pos]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            pos += 1
+        to_remove.append((start, pos))
+
+    if not to_remove:
+        return source
+
+    out = []
+    cursor = 0
+    for s, e in sorted(to_remove):
+        if cursor < s:
+            out.append(source[cursor:s])
+        cursor = max(cursor, e)
+    if cursor < len(source):
+        out.append(source[cursor:])
+    return ''.join(out)
 
 
 def load_n2d(path: str) -> Tuple[dict, Optional[str]]:
@@ -1746,13 +1810,19 @@ def _extract_toplevel_functions(lines: List[str]) -> Tuple[List[str], List[str]]
     remaining = []
     functions = []
     i = 0
+    depth = 0
     while i < len(lines):
-        stripped = lines[i].strip()
-        # Match: function name(...) at the start of the line (no indentation)
-        if re.match(r'^function\s+\w+\s*\(', stripped):
+        line = lines[i]
+        stripped = line.strip()
+        # Match: function or access-modified function declaration.
+        # Examples:
+        #   function foo(...)
+        #   public function foo(...)
+        #   protected function foo(...)
+        if depth == 0 and re.match(r'^(?:(?:public|private|protected|internal)\s+)?function\s+\w+\s*\(', stripped):
             # Collect the function signature + body
-            func_lines = [lines[i]]
-            brace_count = lines[i].count('{') - lines[i].count('}')
+            func_lines = [line]
+            brace_count = line.count('{') - line.count('}')
             i += 1
 
             if brace_count == 0:
@@ -1776,9 +1846,13 @@ def _extract_toplevel_functions(lines: List[str]) -> Tuple[List[str], List[str]]
                 i += 1
 
             functions.append('\n'.join(func_lines))
+            depth = 0
             continue
 
-        remaining.append(lines[i])
+        remaining.append(line)
+        depth += line.count('{') - line.count('}')
+        if depth < 0:
+            depth = 0
         i += 1
 
     return remaining, functions
@@ -1794,21 +1868,33 @@ def _extract_toplevel_vars(lines: List[str]) -> Tuple[List[str], List[str]]:
     remaining = []
     var_decls = []
     seen_vars: Set[str] = set()
+    depth = 0
 
     for line in lines:
         stripped = line.strip()
         # Must start at indent 0 (or just whitespace prefix ≤ 0)
         # and be a var declaration ending with ;
-        if stripped.startswith('var ') and stripped.endswith(';'):
-            var_match = re.match(r'^var\s+(\w+)', stripped)
+        if depth == 0 and re.match(r'^(?:(?:public|private|protected|internal)\s+)?var\s+\w+', stripped) and stripped.endswith(';'):
+            var_match = re.match(r'^(?:(?:public|private|protected|internal)\s+)?var\s+(\w+)', stripped)
             if var_match:
                 var_name = var_match.group(1)
                 if var_name not in seen_vars:
                     seen_vars.add(var_name)
-                    var_decls.append(stripped)
-                remaining.append(line)  # keep in body too for initialization
+                    # Normalize to bare "var ...;". Caller adds desired access modifier.
+                    normalized = re.sub(r'^(?:public|private|protected|internal)\s+', '', stripped)
+                    var_decls.append(normalized)
+                # Do not keep access-modified var declarations in frame bodies;
+                # they are invalid inside function scope and belong at class scope.
+                if not re.match(r'^(?:public|private|protected|internal)\s+var\s+', stripped):
+                    remaining.append(line)
+                depth += line.count('{') - line.count('}')
+                if depth < 0:
+                    depth = 0
                 continue
         remaining.append(line)
+        depth += line.count('{') - line.count('}')
+        if depth < 0:
+            depth = 0
 
     return remaining, var_decls
 
@@ -1828,10 +1914,84 @@ def _extract_imports(lines: List[str]) -> Tuple[List[str], Set[str]]:
     return remaining, imports
 
 
+def _sanitize_frame_body(body: str) -> str:
+    """Remove known unsafe decompiler artifacts from frame action bodies.
+
+    Specifically strips local temp initializers that dereference ``this.self``
+    before the frame script assigns ``this.self = ...``.
+    """
+    if not body:
+        return body
+
+    lines = body.split('\n')
+    out: List[str] = []
+    self_assigned = False
+    dropped_locals: Set[str] = set()
+    bad_local_re = re.compile(
+        r'^\s*var\s+(_local_\d+)\s*:[^=]*=\s*this\.self\.'
+    )
+    activation_local_re = re.compile(
+        r'^\s*var\s+_local_\d+\s*:[^=]*=\s*__activation__\s*;\s*$'
+    )
+
+    for ln in lines:
+        if 'this.self =' in ln:
+            self_assigned = True
+
+        if activation_local_re.match(ln):
+            # This is a decompiler artifact produced when nested/local
+            # function scaffolding leaked into frame code.
+            continue
+
+        if not self_assigned:
+            m = bad_local_re.match(ln)
+            if m:
+                # Drop unsafe local initialization that touches this.self
+                # before frame-level self assignment.
+                dropped_locals.add(m.group(1))
+                continue
+            # If we dropped a local initializer, also drop any pre-init lines
+            # that depend on that local to avoid #1065 undefined variable at
+            # runtime.
+            if dropped_locals and any(
+                re.search(r'\b' + re.escape(name) + r'\b', ln)
+                for name in dropped_locals
+            ):
+                continue
+
+        out.append(ln)
+
+    return '\n'.join(out)
+
+
+def _dedupe_local_var_decls(body: str) -> str:
+    """Remove duplicate local var declarations within a function body.
+
+    Some legacy imported frame actions may contain duplicate local declarations
+    with the same identifier after normalization. Keep the first declaration
+    and drop subsequent duplicates to satisfy mxmlc.
+    """
+    if not body:
+        return body
+
+    out_lines: List[str] = []
+    seen_vars: Set[str] = set()
+    for line in body.splitlines():
+        m = re.match(r'^\s*var\s+(\w+)\b', line)
+        if m:
+            name = m.group(1)
+            if name in seen_vars:
+                continue
+            seen_vars.add(name)
+        out_lines.append(line)
+    return '\n'.join(out_lines)
+
+
 def generate_symbol_stubs(
     libs: List[dict],
     stub_dir: str,
     project_name: str = "",
+    existing_source_classes: Optional[Set[str]] = None,
 ) -> Dict[str, str]:
     """
     Generate AS3 class stub files for all exported symbols.
@@ -1847,6 +2007,8 @@ def generate_symbol_stubs(
              (e.g. "5" → "gameandwatch_fla.Idle_3" or "gnw_idle0")
     """
     log.debug("generate_symbol_stubs: %d libs, project=%s", len(libs), project_name)
+    existing_source_classes = set(existing_source_classes or set())
+    existing_source_classes_lower = {c.lower() for c in existing_source_classes}
     sym_to_class: Dict[str, str] = {}  # symbol_name → class_name (default pkg)
     fla_classes: Dict[int, str] = {}   # lib_id → fla class name (for containers w/ scripts)
     used_classes: Set[str] = set()
@@ -1886,7 +2048,10 @@ def generate_symbol_stubs(
         if sym == 'Main':  # Document class — handled separately
             continue
 
-        class_name = _sanitize_class_name(sym)
+        if sym in existing_source_classes or sym.lower() in existing_source_classes_lower:
+            class_name = sym
+        else:
+            class_name = _sanitize_class_name(sym)
         # De-duplicate class names (case-insensitive for Windows FS)
         orig = class_name
         counter = 2
@@ -1897,15 +2062,26 @@ def generate_symbol_stubs(
         used_classes_lower.add(class_name.lower())
         sym_to_class[sym] = class_name
 
+        # Support fully-qualified class names (e.g. blackmage_fla.Idle_3).
+        if '.' in class_name:
+            class_pkg, class_simple = class_name.rsplit('.', 1)
+            package_open = f'package {class_pkg} {{'
+            rel_dir = class_pkg.replace('.', os.sep)
+        else:
+            class_pkg = ''
+            class_simple = class_name
+            package_open = 'package {'
+            rel_dir = ''
+
         if lib_type == 'bitmap':
             default_w = int(lib.get('width', 0) or 0)
             default_h = int(lib.get('height', 0) or 0)
             # Extend BitmapData
             code = (
-                f'package {{\n'
+                package_open + '\n'
                 f'    import flash.display.BitmapData;\n'
-                f'    public class {class_name} extends BitmapData {{\n'
-                f'        public function {class_name}(w:int={default_w}, h:int={default_h}) {{\n'
+                f'    public dynamic class {class_simple} extends BitmapData {{\n'
+                f'        public function {class_simple}(w:int={default_w}, h:int={default_h}) {{\n'
                 f'            super(w, h);\n'
                 f'        }}\n'
                 f'    }}\n'
@@ -1914,10 +2090,10 @@ def generate_symbol_stubs(
         elif lib_type == 'sound':
             # Extend Sound
             code = (
-                f'package {{\n'
+                package_open + '\n'
                 f'    import flash.media.Sound;\n'
-                f'    public class {class_name} extends Sound {{\n'
-                f'        public function {class_name}() {{\n'
+                f'    public dynamic class {class_simple} extends Sound {{\n'
+                f'        public function {class_simple}() {{\n'
                 f'            super();\n'
                 f'        }}\n'
                 f'    }}\n'
@@ -1943,10 +2119,7 @@ def generate_symbol_stubs(
                 # 3. Extract top-level function declarations → class methods
                 # 4. Extract top-level var declarations → class members
                 # 5. Remaining code → frame function bodies
-                all_imports: Set[str] = set()
-                all_imports.add('import flash.display.MovieClip;')
-                all_imports.add('import flash.events.Event;')
-                all_imports.add('import flash.display.DisplayObject;')
+                all_imports: List[str] = ['import flash.display.MovieClip;']
                 all_var_decls: List[str] = []
                 all_func_texts: List[str] = []
                 frame_bodies: Dict[int, str] = {}
@@ -1963,13 +2136,18 @@ def generate_symbol_stubs(
 
                     # Step 2: extract imports
                     lines, frame_imports = _extract_imports(lines)
-                    all_imports.update(frame_imports)
+                    for imp in frame_imports:
+                        if imp not in all_imports:
+                            all_imports.append(imp)
 
                     # Step 3: extract top-level functions
                     lines, funcs = _extract_toplevel_functions(lines)
                     for func_text in funcs:
                         # Get function name to avoid duplicates
-                        m = re.match(r'function\s+(\w+)', func_text.strip())
+                        m = re.match(
+                            r'(?:(?:public|private|protected|internal)\s+)?function\s+(\w+)',
+                            func_text.strip(),
+                        )
                         if m and m.group(1) not in seen_func_names:
                             seen_func_names.add(m.group(1))
                             all_func_texts.append(func_text)
@@ -1978,26 +2156,34 @@ def generate_symbol_stubs(
                     lines, var_decls = _extract_toplevel_vars(lines)
                     for vd in var_decls:
                         vm = re.match(r'var\s+(\w+)', vd)
-                        if vm and vm.group(1) not in seen_var_names:
-                            seen_var_names.add(vm.group(1))
+                        if not vm:
+                            continue
+                        vname = vm.group(1)
+                        # Ignore decompiler-local temporaries accidentally
+                        # surfaced as top-level vars (e.g. _local_1), which
+                        # can cause constructor-time null dereferences.
+                        if re.match(r'^_local_\d+$', vname):
+                            continue
+                        if vname not in seen_var_names:
+                            seen_var_names.add(vname)
                             all_var_decls.append(vd)
 
                     # Step 5: remaining lines become frame body
-                    frame_bodies[frame_num] = '\n'.join(lines)
+                    frame_bodies[frame_num] = _sanitize_frame_body(
+                        _dedupe_local_var_decls('\n'.join(lines))
+                    )
 
                 # Build addFrameScript calls and frame functions
-                afs_lines = []
+                afs_args = []
                 frame_func_list = []
                 for frame_num in sorted(frame_bodies.keys()):
                     frame_0based = frame_num - 1
-                    func_name = 'frame_' + str(frame_num)
+                    func_name = 'frame' + str(frame_num)
                     body = frame_bodies[frame_num].strip()
                     if not body:
                         body = '// (empty)'
-                    afs_lines.append(
-                        '            addFrameScript('
-                        + str(frame_0based) + ', ' + func_name + ');'
-                    )
+                    afs_args.append(str(frame_0based))
+                    afs_args.append('this.' + func_name)
                     body_indented = '\n'.join(
                         '            ' + bl for bl in body.split('\n')
                     )
@@ -2008,9 +2194,7 @@ def generate_symbol_stubs(
                     )
 
                 # Build the class file
-                imports_block = '\n'.join(
-                    '    ' + imp for imp in sorted(all_imports)
-                )
+                imports_block = '\n'.join('    ' + imp for imp in all_imports)
                 vars_block = ''
                 if all_var_decls:
                     vars_block = '\n'.join(
@@ -2026,18 +2210,20 @@ def generate_symbol_stubs(
                         )
                         formatted_funcs.append(indented)
                     funcs_block = '\n'.join(formatted_funcs)
-                afs_block = '\n'.join(afs_lines)
+                afs_block = ''
+                if afs_args:
+                    afs_block = '            addFrameScript(' + ', '.join(afs_args) + ');'
                 frame_funcs_block = '\n'.join(frame_func_list)
 
                 parts = []
-                parts.append('package {')
+                parts.append(package_open)
                 parts.append(imports_block)
                 parts.append('    public dynamic class '
-                             + class_name + ' extends MovieClip {')
+                             + class_simple + ' extends MovieClip {')
                 if vars_block:
                     parts.append(vars_block)
                 parts.append(
-                    '        public function ' + class_name + '() {\n'
+                    '        public function ' + class_simple + '() {\n'
                     '            super();\n'
                     + afs_block + '\n'
                     '        }'
@@ -2050,11 +2236,11 @@ def generate_symbol_stubs(
                 code = '\n'.join(parts) + '\n'
             else:
                 code = (
-                    'package {\n'
+                    package_open + '\n'
                     '    import flash.display.MovieClip;\n'
-                    '    public dynamic class ' + class_name
+                    '    public dynamic class ' + class_simple
                     + ' extends MovieClip {\n'
-                    '        public function ' + class_name + '() {\n'
+                    '        public function ' + class_simple + '() {\n'
                     '            super();\n'
                     '        }\n'
                     '    }\n'
@@ -2063,19 +2249,23 @@ def generate_symbol_stubs(
         else:
             # Shape / text / other — generic Sprite
             code = (
-                f'package {{\n'
+                package_open + '\n'
                 f'    import flash.display.Sprite;\n'
-                f'    public class {class_name} extends Sprite {{\n'
-                f'        public function {class_name}() {{\n'
+                f'    public class {class_simple} extends Sprite {{\n'
+                f'        public function {class_simple}() {{\n'
                 f'            super();\n'
                 f'        }}\n'
                 f'    }}\n'
                 f'}}\n'
             )
 
-        filepath = os.path.join(stub_dir, class_name + '.as')
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(code)
+        fqn_for_stub = class_name
+        if fqn_for_stub.lower() not in existing_source_classes_lower:
+            out_dir = os.path.join(stub_dir, rel_dir) if rel_dir else stub_dir
+            os.makedirs(out_dir, exist_ok=True)
+            filepath = os.path.join(out_dir, class_simple + '.as')
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(code)
 
     # ── Generate _fla package stubs for containers with frame scripts ──
     if fla_pkg and fla_classes:
@@ -2099,10 +2289,7 @@ def generate_symbol_stubs(
                         frame_scripts_map[f] = []
                     frame_scripts_map[f].append(act['action'])
 
-                all_imports_fla: Set[str] = set()
-                all_imports_fla.add('import flash.display.MovieClip;')
-                all_imports_fla.add('import flash.events.Event;')
-                all_imports_fla.add('import flash.display.DisplayObject;')
+                all_imports_fla: List[str] = ['import flash.display.MovieClip;']
                 all_var_decls_fla: List[str] = []
                 all_func_texts_fla: List[str] = []
                 frame_bodies_fla: Dict[int, str] = {}
@@ -2114,7 +2301,9 @@ def generate_symbol_stubs(
                     cleaned = _strip_block_comments(merged)
                     lines = cleaned.split('\n')
                     lines, frame_imports = _extract_imports(lines)
-                    all_imports_fla.update(frame_imports)
+                    for imp in frame_imports:
+                        if imp not in all_imports_fla:
+                            all_imports_fla.append(imp)
                     lines, funcs = _extract_toplevel_functions(lines)
                     for func_text in funcs:
                         m = re.match(r'function\s+(\w+)', func_text.strip())
@@ -2124,23 +2313,26 @@ def generate_symbol_stubs(
                     lines, var_decls = _extract_toplevel_vars(lines)
                     for vd in var_decls:
                         vm = re.match(r'var\s+(\w+)', vd)
-                        if vm and vm.group(1) not in seen_var_names_fla:
-                            seen_var_names_fla.add(vm.group(1))
+                        if not vm:
+                            continue
+                        vname = vm.group(1)
+                        if re.match(r'^_local_\d+$', vname):
+                            continue
+                        if vname not in seen_var_names_fla:
+                            seen_var_names_fla.add(vname)
                             all_var_decls_fla.append(vd)
-                    frame_bodies_fla[frame_num] = '\n'.join(lines)
+                    frame_bodies_fla[frame_num] = _dedupe_local_var_decls('\n'.join(lines))
 
-                afs_lines_fla = []
+                afs_args_fla = []
                 frame_func_list_fla = []
                 for frame_num in sorted(frame_bodies_fla.keys()):
                     frame_0based = frame_num - 1
-                    func_name = 'frame_' + str(frame_num)
+                    func_name = 'frame' + str(frame_num)
                     body = frame_bodies_fla[frame_num].strip()
                     if not body:
                         body = '// (empty)'
-                    afs_lines_fla.append(
-                        '            addFrameScript('
-                        + str(frame_0based) + ', ' + func_name + ');'
-                    )
+                    afs_args_fla.append(str(frame_0based))
+                    afs_args_fla.append('this.' + func_name)
                     body_indented = '\n'.join(
                         '            ' + bl for bl in body.split('\n')
                     )
@@ -2150,9 +2342,7 @@ def generate_symbol_stubs(
                         + '        }'
                     )
 
-                imports_block_fla = '\n'.join(
-                    '    ' + imp for imp in sorted(all_imports_fla)
-                )
+                imports_block_fla = '\n'.join('    ' + imp for imp in all_imports_fla)
                 vars_block_fla = ''
                 if all_var_decls_fla:
                     vars_block_fla = '\n'.join(
@@ -2167,7 +2357,9 @@ def generate_symbol_stubs(
                         )
                         formatted.append(indented)
                     funcs_block_fla = '\n'.join(formatted)
-                afs_block_fla = '\n'.join(afs_lines_fla)
+                afs_block_fla = ''
+                if afs_args_fla:
+                    afs_block_fla = '            addFrameScript(' + ', '.join(afs_args_fla) + ');'
                 frame_funcs_block_fla = '\n'.join(frame_func_list_fla)
 
                 parts = []
@@ -2202,6 +2394,9 @@ def generate_symbol_stubs(
                     f'}}\n'
                 )
 
+            if fla_fqn.lower() in existing_source_classes_lower:
+                continue
+
             filepath = os.path.join(fla_dir, fla_class + '.as')
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(code)
@@ -2211,7 +2406,6 @@ def generate_symbol_stubs(
 
 def compile_as3(
     shared_dir: str,
-    swc_path: str,
     sdk_path: str,
     libs: List[dict],
     main_class: str = "Main",
@@ -2236,29 +2430,9 @@ def compile_as3(
         stub_dir = os.path.join(tmp_dir, "stubs")
         os.makedirs(stub_dir, exist_ok=True)
 
-        print("  Generating AS3 class stubs...")
-        sym_to_class, fla_classes = generate_symbol_stubs(libs, stub_dir, project_name)
-        print(f"  Generated {len(sym_to_class)} class stubs + {len(fla_classes)} _fla classes")
-
-        # Detect classes provided by the SWC so we don't override them
-        # with decompiled source (which can produce incompatible bytecode).
-        swc_classes: Set[str] = set()
-        if os.path.isfile(swc_path):
-            try:
-                import zipfile as _zf
-                with _zf.ZipFile(swc_path) as zswc:
-                    if 'catalog.xml' in zswc.namelist():
-                        cat_xml = zswc.read('catalog.xml').decode('utf-8')
-                        swc_classes = set(re.findall(r'<def id="([^"]+)"', cat_xml))
-                if swc_classes:
-                    print(f"  SWC provides {len(swc_classes)} classes (will skip from embedded)")
-            except Exception as e:
-                print(f"  WARNING: Could not parse SWC catalog: {e}")
-
         # Write embedded scripts from N2D project to temp dir
         embedded_dir = os.path.join(tmp_dir, "embedded")
         os.makedirs(embedded_dir, exist_ok=True)
-        skipped_swc = 0
         skipped_linkage = 0
         if embedded_scripts:
             for script in embedded_scripts:
@@ -2272,26 +2446,40 @@ def compile_as3(
                 if script.get('scriptOrigin') == 'linkage-generated':
                     skipped_linkage += 1
                     continue
-                
-                # Skip top-level scripts that the SWC already provides.
-                # Sub-package scripts (e.g. gameandwatch_fla/Idle_3.as) are
-                # never in the SWC so they're always written.
-                if '/' not in spath and spath.endswith('.as'):
-                    class_name = spath[:-3]
-                    if class_name in swc_classes:
-                        skipped_swc += 1
-                        continue
+
                 fpath = os.path.join(embedded_dir, spath)
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
                 with open(fpath, 'w', encoding='utf-8') as sf:
                     sf.write(source)
-            written = len(embedded_scripts) - skipped_swc - skipped_linkage
+            written = len(embedded_scripts) - skipped_linkage
             msg = f"  Wrote {written} embedded scripts to temp dir"
             if skipped_linkage:
                 msg += f" (skipped {skipped_linkage} linkage-generated)"
-            if skipped_swc:
-                msg += f" (skipped {skipped_swc} SWC-provided)"
             print(msg)
+
+        # Build class-name inventory from embedded scripts so we can avoid
+        # generating synthetic stubs for classes that already have real
+        # imported/decompiled source.
+        embedded_class_names: Set[str] = set()
+        if os.path.isdir(embedded_dir):
+            for dirpath, _dn, filenames in os.walk(embedded_dir):
+                rel = os.path.relpath(dirpath, embedded_dir)
+                pkg = '' if rel == '.' else rel.replace(os.sep, '.')
+                for fn in filenames:
+                    if not fn.endswith('.as'):
+                        continue
+                    cls = fn[:-3]
+                    fqn = f"{pkg}.{cls}" if pkg else cls
+                    embedded_class_names.add(fqn)
+
+        print("  Generating AS3 class stubs...")
+        sym_to_class, fla_classes = generate_symbol_stubs(
+            libs,
+            stub_dir,
+            project_name,
+            existing_source_classes=embedded_class_names,
+        )
+        print(f"  Generated {len(sym_to_class)} class stubs + {len(fla_classes)} _fla classes")
 
         temp_swf = os.path.join(tmp_dir, "output.swf")
 
@@ -2300,17 +2488,70 @@ def compile_as3(
         player_home = os.path.join(sdk_path, "frameworks", "libs", "player")
         env["PLAYERGLOBAL_HOME"] = player_home
 
-        # Prefer embedded Main.as (user-edited) over shared/ original
+        # Filter out known redundant top-level shared classes that duplicate
+        # internal class declarations from package files. Keeping both can emit
+        # an extra standalone class in RT (for example, XFormData).
+        compile_shared_dir = shared_dir
+        class_decl_re = re.compile(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+        shared_top_level = [
+            fn for fn in os.listdir(shared_dir)
+            if fn.endswith('.as') and os.path.isfile(os.path.join(shared_dir, fn))
+        ]
+        shared_nested_declared_classes: Set[str] = set()
+        for dirpath, _dirnames, filenames in os.walk(shared_dir):
+            rel = os.path.relpath(dirpath, shared_dir)
+            if rel == '.':
+                continue
+            for fn in filenames:
+                if not fn.endswith('.as'):
+                    continue
+                fpath = os.path.join(dirpath, fn)
+                try:
+                    with open(fpath, 'r', encoding='utf-8', errors='ignore') as sf:
+                        src = sf.read()
+                except Exception:
+                    continue
+                for match in class_decl_re.finditer(src):
+                    shared_nested_declared_classes.add(match.group(1))
+
+        exclude_shared_top_level: List[str] = []
+        for fn in shared_top_level:
+            cls_name = fn[:-3]
+            if cls_name not in shared_nested_declared_classes:
+                continue
+            fpath = os.path.join(shared_dir, fn)
+            try:
+                with open(fpath, 'r', encoding='utf-8', errors='ignore') as tf:
+                    top_src = tf.read()
+            except Exception:
+                continue
+            if len(class_decl_re.findall(top_src)) >= 2:
+                exclude_shared_top_level.append(fn)
+
+        if exclude_shared_top_level:
+            compile_shared_dir = os.path.join(tmp_dir, "shared_filtered")
+            shutil.copytree(shared_dir, compile_shared_dir)
+            for fn in exclude_shared_top_level:
+                fpath = os.path.join(compile_shared_dir, fn)
+                if os.path.isfile(fpath):
+                    os.remove(fpath)
+            print(
+                "  Filtered redundant shared top-level classes: "
+                + ", ".join(sorted(fn[:-3] for fn in exclude_shared_top_level))
+            )
+
+        # Prefer embedded Main.as (user-edited) over shared/original.
+        # If shared was filtered, resolve Main.as against filtered directory.
         main_as = os.path.join(embedded_dir, main_class + ".as")
         if not os.path.isfile(main_as):
-            main_as = os.path.join(shared_dir, main_class + ".as")
+            main_as = os.path.join(compile_shared_dir, main_class + ".as")
         if not os.path.isfile(main_as):
             raise RuntimeError(f"Main class not found: {main_as}")
 
         cmd = [
             mxmlc,
             f"-source-path+={embedded_dir}",
-            f"-source-path+={shared_dir}",
+            f"-source-path+={compile_shared_dir}",
             f"-source-path+={stub_dir}",
             f"-target-player=25.0",
             "-static-link-runtime-shared-libraries",
@@ -2318,19 +2559,13 @@ def compile_as3(
             f"-output={temp_swf}",
         ]
 
-        # Add SWC as library
-        if os.path.isfile(swc_path):
-            cmd.append(f"-library-path+={swc_path}")
-        else:
-            print(f"  WARNING: SWC not found: {swc_path}", file=sys.stderr)
-
         # Use a config file for includes to avoid command-line-too-long
         # Auto-discover framework-style AS3 packages in shared_dir
         # (e.g. fl/motion/*.as -> fl.motion.AdjustColor)
         # These are classes not provided by the Flex SDK but needed at runtime.
         framework_classes = []
-        for dirpath, _dirnames, filenames in os.walk(shared_dir):
-            rel = os.path.relpath(dirpath, shared_dir)
+        for dirpath, _dirnames, filenames in os.walk(compile_shared_dir):
+            rel = os.path.relpath(dirpath, compile_shared_dir)
             if rel == '.':
                 continue  # skip top-level shared .as files (handled as stubs/main)
             pkg = rel.replace(os.sep, '.')
@@ -2342,21 +2577,81 @@ def compile_as3(
         if framework_classes:
             print(f"  Found {len(framework_classes)} framework classes: {', '.join(framework_classes)}")
 
-        # Discover sub-package classes in embedded scripts dir
-        # (e.g. gameandwatch_fla/*.as → gameandwatch_fla.Idle_3)
+        include_all_framework = os.getenv('N2F_INCLUDE_ALL_FRAMEWORK_CLASSES', '').strip().lower() in ('1', 'true', 'yes', 'on')
+        include_framework_classes = framework_classes if include_all_framework else []
+        if framework_classes and not include_all_framework:
+            print("  Framework include policy: only transitively referenced classes (broad include disabled)")
+
+        # Discover embedded classes in embedded scripts dir.
+        # Keep sub-package and top-level classes separate for diagnostics,
+        # but include both so utility classes (e.g. ItemSettings.as) are
+        # emitted even when not directly referenced by Main.
         embedded_classes = []
+        embedded_top_level_classes = []
+        embedded_top_level_paths: Dict[str, str] = {}
         if os.path.isdir(embedded_dir):
             for dirpath, _dn, filenames in os.walk(embedded_dir):
                 rel = os.path.relpath(dirpath, embedded_dir)
-                if rel == '.':
-                    continue  # top-level .as handled as main / direct sources
-                pkg = rel.replace(os.sep, '.')
                 for fn in filenames:
-                    if fn.endswith('.as'):
+                    if not fn.endswith('.as'):
+                        continue
+                    if rel == '.':
+                        cls_name = fn[:-3]
+                        embedded_top_level_classes.append(cls_name)
+                        embedded_top_level_paths[cls_name] = os.path.join(dirpath, fn)
+                    else:
+                        pkg = rel.replace(os.sep, '.')
                         fqn = f"{pkg}.{fn[:-3]}"
                         embedded_classes.append(fqn)
+
+        # Some decompiles emit a redundant top-level class file while the
+        # canonical declaration is an internal class in a package file
+        # (e.g. XFormData inside fl.motion.ColorMatrix). Skip those redundant
+        # top-level includes so mxmlc does not emit an extra standalone class.
+        if embedded_top_level_classes and embedded_classes:
+            nested_declared_classes: Set[str] = set()
+            class_decl_re = re.compile(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+            for dirpath, _dn, filenames in os.walk(embedded_dir):
+                rel = os.path.relpath(dirpath, embedded_dir)
+                if rel == '.':
+                    continue
+                for fn in filenames:
+                    if not fn.endswith('.as'):
+                        continue
+                    fpath = os.path.join(dirpath, fn)
+                    try:
+                        src = open(fpath, 'r', encoding='utf-8', errors='ignore').read()
+                    except Exception:
+                        continue
+                    for match in class_decl_re.finditer(src):
+                        nested_declared_classes.add(match.group(1))
+
+            filtered_top_level_classes: List[str] = []
+            excluded_top_level_classes: List[str] = []
+            for cls_name in embedded_top_level_classes:
+                top_path = embedded_top_level_paths.get(cls_name)
+                if cls_name in nested_declared_classes and top_path and os.path.isfile(top_path):
+                    try:
+                        top_src = open(top_path, 'r', encoding='utf-8', errors='ignore').read()
+                    except Exception:
+                        top_src = ''
+                    top_decl_count = len(class_decl_re.findall(top_src)) if top_src else 0
+                    if top_decl_count >= 2:
+                        excluded_top_level_classes.append(cls_name)
+                        continue
+                filtered_top_level_classes.append(cls_name)
+
+            if excluded_top_level_classes:
+                print(
+                    "  Excluding redundant top-level classes: "
+                    + ", ".join(sorted(excluded_top_level_classes))
+                )
+            embedded_top_level_classes = filtered_top_level_classes
+
         if embedded_classes:
             print(f"  Found {len(embedded_classes)} embedded sub-package classes")
+        if embedded_top_level_classes:
+            print(f"  Found {len(embedded_top_level_classes)} embedded top-level classes")
 
         config_path = os.path.join(tmp_dir, "includes.cfg")
         with open(config_path, 'w', encoding='utf-8') as cfg:
@@ -2368,11 +2663,16 @@ def compile_as3(
             for fla_fqn in fla_classes.values():
                 cfg.write(f'    <symbol>{fla_fqn}</symbol>\n')
             # Include framework classes found in shared dir sub-packages
-            for fw_fqn in framework_classes:
+            # only when explicitly requested.
+            for fw_fqn in include_framework_classes:
                 cfg.write(f'    <symbol>{fw_fqn}</symbol>\n')
             # Include embedded sub-package classes (e.g. gameandwatch_fla)
             for emb_fqn in embedded_classes:
                 cfg.write(f'    <symbol>{emb_fqn}</symbol>\n')
+            # Include embedded top-level classes so unreferenced helpers
+            # still become part of the emitted DoABC.
+            for emb_top in embedded_top_level_classes:
+                cfg.write(f'    <symbol>{emb_top}</symbol>\n')
             cfg.write('  </includes>\n')
             cfg.write('</flex-config>\n')
         cmd.append(f"-load-config+={config_path}")
@@ -2380,8 +2680,8 @@ def compile_as3(
         cmd.append(main_as)
 
         total_stubs = len(sym_to_class) + len(fla_classes)
-        total_includes = total_stubs + len(framework_classes) + len(embedded_classes)
-        print(f"  Compiling {main_class}.as + {total_stubs} stubs + {len(framework_classes)} framework + {len(embedded_classes)} embedded classes with mxmlc...")
+        total_includes = total_stubs + len(include_framework_classes) + len(embedded_classes) + len(embedded_top_level_classes)
+        print(f"  Compiling {main_class}.as + {total_stubs} stubs + {len(include_framework_classes)} framework + {len(embedded_classes) + len(embedded_top_level_classes)} embedded classes with mxmlc...")
         result = subprocess.run(
             cmd, capture_output=True, text=True, env=env, shell=True,
         )
@@ -2390,11 +2690,19 @@ def compile_as3(
             print(f"  mxmlc stdout: {result.stdout}", file=sys.stderr)
             print(f"  mxmlc stderr: {result.stderr}", file=sys.stderr)
             # Show which stubs had errors
+            error_lines = []
             for line in result.stderr.split('\n'):
                 if 'Error' in line:
                     print(f"    {line}", file=sys.stderr)
+                    error_lines.append(line.strip())
+            detail = ''
+            if error_lines:
+                detail = '; '.join(error_lines[:6])
+            elif result.stderr.strip():
+                detail = result.stderr.strip().split('\n')[-1]
             raise RuntimeError(
                 f"mxmlc compilation failed (exit code {result.returncode})"
+                + (f": {detail}" if detail else "")
             )
 
         if not os.path.isfile(temp_swf):

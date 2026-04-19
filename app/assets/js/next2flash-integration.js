@@ -981,6 +981,51 @@
     return patches;
   }
 
+  /**
+   * Collect current ActionScript scripts from the AS panel, including unsaved
+   * editor text (captured by injectRoundtripFields). Returns null if panel is
+   * unavailable or no scripts are present.
+   */
+  function _collectScriptPatches() {
+    var panel = window.__n2d_as_panel;
+    if (!panel || typeof panel.injectRoundtripFields !== 'function') {
+      // Fallback for cases where AS panel instance is not active but scripts
+      // are still persisted by actionscript-panel.js.
+      try {
+        var raw = localStorage.getItem('n2d_as_scripts');
+        if (!raw) return null;
+        var cached = JSON.parse(raw);
+        if (!Array.isArray(cached) || !cached.length) return null;
+        _log.info('Collected ' + cached.length + ' script patches from localStorage fallback');
+        return {
+          scripts: cached,
+          // Assume modified when exporting from fallback cache so compiler
+          // does not skip source refresh paths.
+          scriptsModified: true
+        };
+      } catch (e) {
+        _log.warn('Failed localStorage script fallback: ' + e.message);
+        return null;
+      }
+    }
+
+    try {
+      var probe = {};
+      panel.injectRoundtripFields(probe);
+      var scripts = Array.isArray(probe.scripts) ? probe.scripts : [];
+      var scriptsModified = !!probe.scriptsModified;
+      if (!scripts.length && !scriptsModified) return null;
+      _log.info('Collected ' + scripts.length + ' script patches from AS panel');
+      return {
+        scripts: scripts,
+        scriptsModified: scriptsModified
+      };
+    } catch (ex) {
+      _log.warn('Failed to collect script patches: ' + ex.message);
+      return null;
+    }
+  }
+
   /* ================================================================== */
   /*  Export SWF                                                         */
   /* ================================================================== */
@@ -1009,6 +1054,7 @@
           function _electronDiskOnlyFallback() {
             updateProgress('Reading project from disk...', 30);
             var textPatches = _collectTextPatches();
+            var scriptPatches = _collectScriptPatches();
             _log.info('Electron disk-only fallback with ' + textPatches.length + ' text patches');
             updateProgress('Compiling SWF from project files...', 45);
             return fetch(API_BASE + '/api/compile-disk', {
@@ -1017,7 +1063,8 @@
               body: JSON.stringify({
                 projectDir: _currentProjectDir,
                 outputPath: outputPath,
-                textPatches: textPatches
+                textPatches: textPatches,
+                scriptPatches: scriptPatches
               }),
             })
               .then(function (r) {
@@ -1039,6 +1086,10 @@
               var form = new FormData();
               form.append('editorBlob', rawBlob, 'editor.bin');
               form.append('outputPath', outputPath);
+              var scriptPatches = _collectScriptPatches();
+              if (scriptPatches) {
+                form.append('scriptPatches', JSON.stringify(scriptPatches));
+              }
               updateProgress('Server compiling SWF...', 50);
               return fetch(API_BASE + '/api/save-and-compile', { method: 'POST', body: form })
                 .then(function (r) {
@@ -1077,6 +1128,10 @@
         var form = new FormData();
         if (rawBlob) {
           form.append('editorBlob', rawBlob, 'editor.bin');
+          var scriptPatches = _collectScriptPatches();
+          if (scriptPatches) {
+            form.append('scriptPatches', JSON.stringify(scriptPatches));
+          }
         } else {
           // Disk-only: tell server to compile from existing project.n2d
           // but include text patches so editor text edits are preserved
@@ -1084,6 +1139,10 @@
           var patches = _collectTextPatches();
           if (patches.length) {
             form.append('textPatches', JSON.stringify(patches));
+          }
+          var scriptPatchesDisk = _collectScriptPatches();
+          if (scriptPatchesDisk) {
+            form.append('scriptPatches', JSON.stringify(scriptPatchesDisk));
           }
         }
         updateProgress('Server compiling SWF...', 50);

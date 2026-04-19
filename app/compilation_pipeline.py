@@ -714,8 +714,10 @@ class CompileAS3Stage(PipelineStage):
         
         print("  AS3 mode: full-recompile (passthrough disabled)")
 
-        project_name = os.path.splitext(os.path.basename(ctx.n2d_path))[0]
-        swc_path = os.path.join(ctx.shared_dir, "SSF2 API.swc")
+        if ctx.project_dir:
+            project_name = os.path.basename(os.path.normpath(ctx.project_dir))
+        else:
+            project_name = os.path.splitext(os.path.basename(ctx.n2d_path))[0]
 
         # Absolute policy: never passthrough raw DoABC from the imported SWF.
         # Every export must come from the current normalized source model.
@@ -736,7 +738,7 @@ class CompileAS3Stage(PipelineStage):
             print(f"  Scripts by origin: {origin_str}")
         
         ctx.doabc_tags, ctx.sym_to_class, ctx.fla_classes = compile_as3(
-            ctx.shared_dir, swc_path, ctx.sdk_path,
+            ctx.shared_dir, ctx.sdk_path,
             ctx.libs, "Main", project_name,
             embedded_scripts=embedded_scripts,
         )

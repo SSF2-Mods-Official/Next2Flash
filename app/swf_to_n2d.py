@@ -1842,6 +1842,11 @@ _LINKAGE_EXTENDS_RE = re.compile(
     r'public\s+(?:dynamic\s+)?class\s+\w+\s+extends\s+(?:BitmapData|Sound)\b'
 )
 
+# Detects simple MovieClip symbol stubs generated from linkage.
+_MOVIECLIP_EXTENDS_RE = re.compile(
+    r'public\s+(?:dynamic\s+)?class\s+\w+\s+extends\s+MovieClip\b'
+)
+
 def _is_linkage_stub(source: str) -> bool:
     """Return True if *source* is a synthetic linkage stub.
 
@@ -1864,36 +1869,94 @@ def _is_linkage_stub(source: str) -> bool:
     return not stripped
 
 
+def _is_movieclip_symbol_stub(source: str) -> bool:
+    """Return True if *source* is a synthetic MovieClip symbol stub.
+
+    A synthetic MovieClip stub is constructor-only boilerplate that just calls
+    ``super();`` and has no frame scripts, vars, or helper methods.
+    """
+    if not _MOVIECLIP_EXTENDS_RE.search(source):
+        return False
+    # Frame-script classes are handled separately; never classify them as stubs.
+    if re.search(r'addFrameScript\s*\(', source):
+        return False
+
+    stripped = re.sub(r'/\*.*?\*/', '', source, flags=re.DOTALL)
+    stripped = re.sub(r'//[^\n]*', '', stripped)
+    stripped = re.sub(r'package\s*\{', '', stripped)
+    stripped = re.sub(r'import\s+[\w.]+;', '', stripped)
+    stripped = re.sub(r'public\s+(?:dynamic\s+)?class\s+\w+\s+extends\s+MovieClip\s*\{', '', stripped)
+    stripped = re.sub(r'public\s+function\s+\w+\s*\([^)]*\)\s*\{', '', stripped)
+    stripped = re.sub(r'super\s*\(\s*\)\s*;', '', stripped)
+    stripped = re.sub(r'[{}]', '', stripped).strip()
+    return not stripped
+
+
 def _extract_frame_methods_from_fla_class(source: str) -> Dict[int, str]:
-    """Parse a _fla-package class source and return {1-based frame: body} dict.
+    """Parse a MovieClip class source with addFrameScript().
+
+        Returns a tuple:
+      frame_bodies  — {1-based frame number: body string}
+      var_decls     — list of raw ``var NAME:TYPE;`` declaration strings
+                      (stripped of leading ``public ``/``private `` modifier)
+      helper_funcs  — list of complete function source texts for methods
+                      that are NOT frame-mapped (i.e. true helper methods)
+            import_lines  — list of ``import ...;`` lines found in the class source
 
     Frame method names are discovered from addFrameScript() calls; the
     corresponding method bodies are then extracted by brace-matching.
+    Class-level field declarations and helper functions are collected so
+    callers can inject them into the target container's frame actions.
     """
-    result: Dict[int, str] = {}
-    # Find addFrameScript(0, frame1, 6, frame7, ...)
-    args_m = re.search(r'addFrameScript\s*\(([^)]+)\)', source)
-    if not args_m:
-        return result
-    args = [a.strip() for a in args_m.group(1).split(',')]
-    frame_methods: Dict[int, str] = {}
-    for i in range(0, len(args) - 1, 2):
-        try:
-            frame_0 = int(args[i])
-            meth = args[i + 1].strip()
-            # Flash decompiler emits "this.frameN" — strip the "this." prefix
-            if meth.startswith('this.'):
-                meth = meth[5:]
-            frame_methods[frame_0 + 1] = meth  # convert to 1-based
-        except (ValueError, IndexError):
-            continue
-    for frame_num, meth_name in frame_methods.items():
-        pat = (r'(?:internal\s+|public\s+|private\s+|protected\s+)?'
-               r'function\s+' + re.escape(meth_name) +
-               r'\s*\([^)]*\)\s*(?::\s*\*\s*)?\{')
-        mm = re.search(pat, source)
-        if not mm:
-            continue
+    frame_bodies: Dict[int, str] = {}
+    var_decls: List[str] = []
+    helper_funcs: List[str] = []
+    import_lines: List[str] = []
+
+    # Capture class-level imports so typed declarations (e.g. Point) still
+    # compile after frame extraction/injection.
+    for m in re.finditer(r'^\s*import\s+[\w.]+\s*;', source, re.MULTILINE):
+        imp = m.group(0).strip()
+        if imp not in import_lines:
+            import_lines.append(imp)
+
+    # ── Step 1: discover frame method names from addFrameScript() ────────
+    # Two formats handled:
+    #   1. FLA decompiler multi-arg:  addFrameScript(0, this.frame1, 5, this.frame6, ...)
+    #   2. Next2Flash re-export single-pair:  addFrameScript(0, frame_1);
+    # re.DOTALL so the arg list can span multiple lines.
+    all_arg_groups = re.findall(r'addFrameScript\s*\(([^)]+)\)', source, re.DOTALL)
+    frame_method_names: Dict[int, str] = {}  # {1-based frame: method_name}
+    for match_args in all_arg_groups:
+        args = [a.strip() for a in match_args.split(',')]
+        for i in range(0, len(args) - 1, 2):
+            try:
+                frame_0 = int(args[i])
+                meth = args[i + 1].strip()
+                if meth.startswith('this.'):
+                    meth = meth[5:]
+                frame_method_names[frame_0 + 1] = meth
+            except (ValueError, IndexError):
+                continue
+
+    frame_meth_set = set(frame_method_names.values())
+
+    # ── Step 2: extract ALL method bodies by brace-matching ─────────────
+    # Pattern matches: [access] function NAME(...) [: ReturnType] {
+    func_pat = re.compile(
+        r'(?:internal\s+|public\s+|private\s+|protected\s+)?'
+        r'function\s+(\w+)\s*\([^)]*\)\s*(?::\s*[\w.*]+\s*)?\{',
+        re.DOTALL,
+    )
+    # Skip the constructor (same name as class, detected by having addFrameScript inside)
+    constructor_names: set = set()
+    for m in re.finditer(r'public\s+function\s+(\w+)\s*\([^)]*\)', source):
+        # Heuristic: constructor has no return type annotation and shares name with class
+        # We use a simple fallback: if the body contains addFrameScript it's the ctor
+        pass  # handled below by checking for addFrameScript in body
+
+    for mm in func_pat.finditer(source):
+        meth_name = mm.group(1)
         start = mm.end()
         depth = 1
         pos = start
@@ -1903,10 +1966,65 @@ def _extract_frame_methods_from_fla_class(source: str) -> Dict[int, str]:
             elif source[pos] == '}':
                 depth -= 1
             pos += 1
-        body = source[start:pos - 1].strip()
-        if body:
-            result[frame_num] = body
-    return result
+        body = source[start:pos - 1]
+
+        if meth_name in frame_meth_set:
+            # This is a frame action method
+            for fnum, fname in frame_method_names.items():
+                if fname == meth_name:
+                        # Store even empty bodies — an empty frame action is intentional
+                        # (e.g. a timeline stop() that the decompiler omitted)
+                        frame_bodies[fnum] = body.strip()
+        else:
+            # Skip constructors (bodies that contain addFrameScript calls)
+            if 'addFrameScript' in body:
+                continue
+            # Helper function — capture the full text including signature
+            full_text = source[mm.start():pos].strip()
+            helper_funcs.append(full_text)
+
+    # ── Step 3: extract class-level field declarations ───────────────────
+    # Collect vars only at class scope depth (inside class body, outside any
+    # method body). This prevents local frame-method vars from being promoted
+    # into class fields, which causes duplicate-definition compile errors.
+    class_decl = re.search(r'\bclass\s+\w+\b[^\{]*\{', source)
+    if class_decl:
+        class_start = class_decl.end() - 1  # points at the '{' of class body
+        depth = 1
+        i = class_start + 1
+        while i < len(source) and depth > 0:
+            ch = source[i]
+            if ch == '{':
+                depth += 1
+                i += 1
+                continue
+            if ch == '}':
+                depth -= 1
+                i += 1
+                continue
+
+            if depth == 1:
+                # Read one physical line at class scope.
+                line_end = source.find('\n', i)
+                if line_end == -1:
+                    line_end = len(source)
+                line = source[i:line_end].strip()
+
+                vm = re.match(
+                    r'^(?:public\s+|private\s+|protected\s+|internal\s+)?var\s+(.+;)$',
+                    line,
+                )
+                if vm:
+                    decl = 'var ' + vm.group(1).strip()
+                    if decl not in var_decls:
+                        var_decls.append(decl)
+
+                i = line_end + 1
+                continue
+
+            i += 1
+
+    return frame_bodies, var_decls, helper_funcs, import_lines
 
 
 def normalize_imported_scripts(scripts: List[dict], libs: List[dict]) -> List[dict]:
@@ -1928,15 +2046,41 @@ def normalize_imported_scripts(scripts: List[dict], libs: List[dict]) -> List[di
     Returns the list of normalized scripts (linkage stubs removed; frame and
     class-source scripts marked with ``scriptOrigin`` field).
     """
+    # Optional fidelity mode: preserve imported script text exactly.
+    # Default behavior remains legacy normalization (stub/frame extraction).
+    # Set N2F_PRESERVE_IMPORTED_SCRIPTS=1 to bypass normalization.
+    if os.getenv('N2F_PRESERVE_IMPORTED_SCRIPTS', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        preserved: List[dict] = []
+        for script in scripts:
+            src = script.get('source', '')
+            if _is_linkage_stub(src):
+                script['scriptOrigin'] = 'linkage-generated'
+            else:
+                script['scriptOrigin'] = 'class-source'
+            preserved.append(script)
+        log.info(
+            'normalize_imported_scripts: preserve mode active (preserved %d scripts, normalization bypassed)',
+            len(preserved),
+        )
+        print(f"  Script normalization: preserve mode kept {len(preserved)} scripts")
+        return preserved
+
     log.info('normalize_imported_scripts: starting with %d scripts', len(scripts))
     
-    # index containers by swfCharId for fast _fla class matching
+    # index containers by swfCharId AND by symbol for _fla class matching.
+    # _fla class filenames use the FLA internal timeline index, NOT the SWF charId.
+    # The actual container has symbol == "<pkg>.<ClassName>" (e.g. "bowser_fla.FTilt_25").
+    # Symbol matching is therefore the primary strategy; charId is a fast-path fallback.
     swf_cid_to_lib: Dict[int, dict] = {}
+    symbol_to_lib: Dict[str, dict] = {}
     for lib in libs:
         if lib.get('type') == 'container':
             cid = lib.get('swfCharId')
             if cid is not None:
                 swf_cid_to_lib[cid] = lib
+            sym = lib.get('symbol', '')
+            if sym:
+                symbol_to_lib[sym] = lib
 
     kept: List[dict] = []
     n_linkage = n_frame = 0
@@ -1948,38 +2092,121 @@ def normalize_imported_scripts(scripts: List[dict], libs: List[dict]) -> List[di
         pkg_dir = parts[0] if len(parts) == 2 else ''
         class_filename = parts[-1].replace('.as', '')
 
+        # Precompute symbol candidates for matching scripts to library containers.
+        symbol_candidates: List[str] = []
+        if pkg_dir:
+            symbol_candidates.append(pkg_dir.replace('/', '.') + '.' + class_filename)
+        symbol_candidates.append(class_filename)
+
         # ── 1. Linkage stub ───────────────────────────────────────────
         if _is_linkage_stub(source):
             n_linkage += 1
             log.debug('  [%d] LINKAGE STUB: %s', idx, path)
             continue  # discard — regenerated at export
 
-        # ── 2. _fla frame aggregate ───────────────────────────────────
-        if pkg_dir.endswith('_fla'):
-            # Flash IDE names: ClassName_swfCharId  e.g. dkrun_18
-            num_match = re.search(r'_(\d+)$', class_filename)
+        # ── 1b. MovieClip symbol stub ─────────────────────────────────
+        # Drop constructor-only MovieClip stubs when they map to a real
+        # container symbol. These are export-generated and should not appear
+        # in Source Scripts.
+        if _is_movieclip_symbol_stub(source):
+            matched_container = None
+            for cand in symbol_candidates:
+                matched_container = symbol_to_lib.get(cand)
+                if matched_container is not None:
+                    break
+            if matched_container is not None:
+                n_linkage += 1
+                log.debug('  [%d] MOVIECLIP STUB: %s -> container %d', idx, path, matched_container.get('id'))
+                continue
+
+        # ── 2. Frame aggregate / timeline class ───────────────────────
+        # Handle both classic *_fla classes and package-less MovieClip classes
+        # that define timeline actions via addFrameScript().
+        has_add_frame_script = bool(re.search(r'addFrameScript\s*\(', source))
+        is_movieclip_class = bool(re.search(r'class\s+\w+\s+extends\s+MovieClip\b', source))
+        is_frame_candidate = pkg_dir.endswith('_fla') or (has_add_frame_script and is_movieclip_class)
+
+        if is_frame_candidate:
+            # Candidate symbol names (best to worst):
+            # 1) package path + filename class (e.g. bowser_fla.FTilt_25)
+            # 2) filename class only (e.g. blackmage_dash_attack)
+            # 3) parsed class name from source (if different from file)
+            symbol_candidates = []
+            if pkg_dir:
+                symbol_candidates.append(pkg_dir.replace('/', '.') + '.' + class_filename)
+            symbol_candidates.append(class_filename)
+
+            class_decl = re.search(r'class\s+(\w+)\s+extends\s+MovieClip\b', source)
+            if class_decl:
+                declared_class = class_decl.group(1)
+                if pkg_dir:
+                    symbol_candidates.append(pkg_dir.replace('/', '.') + '.' + declared_class)
+                symbol_candidates.append(declared_class)
+
             target_lib = None
-            if num_match:
-                target_lib = swf_cid_to_lib.get(int(num_match.group(1)))
+            for cand in symbol_candidates:
+                target_lib = symbol_to_lib.get(cand)
+                if target_lib is not None:
+                    break
+
+            # Secondary fallback for some *_fla files where trailing number
+            # can still coincide with SWF charId.
+            if target_lib is None and pkg_dir.endswith('_fla'):
+                num_match = re.search(r'_(\d+)$', class_filename)
+                if num_match:
+                    target_lib = swf_cid_to_lib.get(int(num_match.group(1)))
 
             if target_lib is not None:
-                frame_bodies = _extract_frame_methods_from_fla_class(source)
-                if frame_bodies:
+                frame_bodies, var_decls, helper_funcs, import_lines = _extract_frame_methods_from_fla_class(source)
+                if frame_bodies or var_decls or helper_funcs or import_lines:
+                    # Build a preamble of class-level vars and helper functions.
+                    # These get prepended to frame 1's body so that compile_n2d.py's
+                    # _extract_toplevel_vars / _extract_toplevel_functions lifts them
+                    # into the generated class.
+                    preamble_parts = []
+                    for imp in import_lines:
+                        preamble_parts.append(imp)
+                    for vd in var_decls:
+                        preamble_parts.append(vd)
+                    for hf in helper_funcs:
+                        preamble_parts.append(hf)
+                    preamble = '\n'.join(preamble_parts)
+
                     existing = {a['frame']: a for a in target_lib.get('actions', [])}
                     for fnum, body in frame_bodies.items():
                         if fnum not in existing:
+                            inject_body = body
+                            # Inject preamble into first frame only
+                            if preamble and fnum == min(frame_bodies.keys()):
+                                inject_body = preamble + '\n' + body
                             target_lib.setdefault('actions', []).append(
-                                {'frame': fnum, 'action': body}
+                                {'frame': fnum, 'action': inject_body}
                             )
+                    # If there's a preamble but no frame bodies — inject into a new frame 1
+                    if preamble and not frame_bodies and 1 not in existing:
+                        target_lib.setdefault('actions', []).append(
+                            {'frame': 1, 'action': preamble}
+                        )
                     target_lib['actions'] = sorted(
                         target_lib.get('actions', []), key=lambda a: a['frame']
                     )
                 n_frame += 1
                 log.debug('  [%d] FRAME AGGREGATE: %s -> container %d', idx, path, target_lib.get('id'))
-                
-            # Mark as frame-origin (whether matched or not) so it won't be compiled
-            script['scriptOrigin'] = 'frame'
-            kept.append(script)
+            else:
+                if pkg_dir.endswith('_fla'):
+                    log.debug('  [%d] FRAME AGGREGATE (no container match, dropping): %s', idx, path)
+                else:
+                    # Non-_fla classes can be real class-source code. If we couldn't
+                    # map them to a container symbol, keep them as class-source.
+                    script['scriptOrigin'] = 'class-source'
+                    kept.append(script)
+                    log.debug('  [%d] CLASS-SOURCE (unmapped addFrameScript class): %s', idx, path)
+                    continue
+
+            # Frame aggregate scripts are always dropped from the script list.
+            # Their content has been injected into the container's lib.actions;
+            # keeping them as external scripts would make them appear twice in
+            # the UI (once in Source Scripts, once in the frame panels).
             continue
 
         # ── 3. Class-source ───────────────────────────────────────────

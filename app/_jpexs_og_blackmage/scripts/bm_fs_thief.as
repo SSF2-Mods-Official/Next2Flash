@@ -1,0 +1,22 @@
+package
+{
+   import flash.display.MovieClip;
+   
+   [Embed(source="/_assets/assets.swf", symbol="symbol326")]
+   public dynamic class bm_fs_thief extends MovieClip
+   {
+      public var stance:MovieClip;
+      
+      public function bm_fs_thief()
+      {
+         super();
+         addFrameScript(0,this.frame1);
+      }
+      
+      internal function frame1() : *
+      {
+         stop();
+      }
+   }
+}
+

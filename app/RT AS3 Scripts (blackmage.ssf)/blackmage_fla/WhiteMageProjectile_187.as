@@ -1,0 +1,94 @@
+﻿// Decompiled by AS3 Sorcerer 6.20
+// www.as3sorcerer.com
+
+//blackmage_fla.WhiteMageProjectile_187
+
+package blackmage_fla
+{
+    import flash.display.MovieClip;
+
+    public dynamic class WhiteMageProjectile_187 extends MovieClip 
+    {
+
+        internal var self:*;
+        internal var character:*;
+        internal var lowestX:Number;
+        internal var highestX:Number;
+        internal var pos:Array;
+        internal var xCo:*;
+        internal var i:*;
+
+        public function WhiteMageProjectile_187()
+        {
+            addFrameScript(0, this.frame1, 18, this.frame19, 64, this.frame65, 69, this.frame70);
+        }
+
+        internal function frame1():*
+        {
+            var _local_1:*;
+            var _local_2:*;
+            var _local_3:Number;
+            var _local_4:Number;
+            var _local_5:Array;
+            var _local_6:*;
+            var _local_7:*;
+            this.self = SSF2API.getProjectile(this);
+            if (((SSF2API.isReady()) && (this.self)))
+            {
+                this.character = this.self.getOwner();
+            };
+        }
+
+        internal function frame19():*
+        {
+            this.lowestX = 9999999;
+            this.highestX = -9999999;
+            if (this.character.getGlobalVariable("fsTargets").length > 0)
+            {
+                this.pos = this.character.getGlobalVariable("fsTargets");
+                this.i = 0;
+                while (this.i < this.pos.length)
+                {
+                    if (this.pos[this.i].getX() < this.lowestX)
+                    {
+                        this.lowestX = this.pos[this.i].getX();
+                    };
+                    if (this.pos[this.i].getX() > this.highestX)
+                    {
+                        this.highestX = this.pos[this.i].getX();
+                    };
+                    this.i++;
+                };
+            }
+            else
+            {
+                if (this.self.isFacingRight())
+                {
+                    this.lowestX = (this.self.getX() + 200);
+                    this.highestX = (this.self.getX() + 200);
+                }
+                else
+                {
+                    this.lowestX = (this.self.getX() - 200);
+                    this.highestX = (this.self.getX() - 200);
+                };
+            };
+            this.xCo = (this.lowestX + ((this.highestX - this.lowestX) / 2));
+            this.character.fireProjectile("bm_fs_holy", this.xCo, this.self.getY(), true);
+        }
+
+        internal function frame65():*
+        {
+            this.self.attachEffect("bm_fs_warp");
+            this.self.playSound("bm_Warp_part2");
+        }
+
+        internal function frame70():*
+        {
+            this.self.destroy();
+        }
+
+
+    }
+}//package blackmage_fla
+

@@ -1,0 +1,53 @@
+BlackMage OG vs RT (Latest)
+Generated: 2026-04-18
+
+Scope A: SWF-level decompile parity gate
+Source:
+- OG: ssf2-idk-140x-original/build/data/character/blackmage.ssf
+- RT: ssf2-idk-140x-original/src/Super Smash Flash 2 Beta v1.4.0.1/data/character/blackmage.ssf
+
+Current gate metrics
+- PARITY_GATE_OG=779
+- PARITY_GATE_RT=779
+- PARITY_GATE_ONLY_OG=0
+- PARITY_GATE_ONLY_RT=0
+- PARITY_GATE_IDENTICAL=52
+- PARITY_GATE_WS_ONLY=0
+- PARITY_GATE_REAL_DIFF=727
+
+Scope B: app folder OG vs RT scripts snapshot
+Source:
+- app/OG AS3 Scripts (blackmage.ssf)
+- app/RT AS3 Scripts (blackmage.ssf)
+
+Current folder metrics
+- FOLDER2_OG=778
+- FOLDER2_RT=779
+- FOLDER2_ONLY_OG=0
+- FOLDER2_ONLY_RT=1
+- FOLDER2_ONLY_RT_FILE=XFormData.as
+- FOLDER2_IDENTICAL=47
+- FOLDER2_WS_ONLY=5
+- FOLDER2_REAL_DIFF=726
+
+Phases executed this pass
+Phase A (missing/extra class parity)
+- Added script overlay sanitation in compile_n2d.py to strip non-primary class leakage from external scripts.
+- Result (SWF-level): missing/extra class parity achieved (0/0).
+
+Phase B (stub emission parity pack)
+- Reduced forced default imports in generated frame stubs.
+- Preserved extracted var declarations without forcing public modifiers.
+
+Phase C (frame action canonicalization)
+- Retained canonical frame method naming/call shape (frameN + single addFrameScript multi-arg call).
+
+Phase D (automated parity gate)
+- Added app/_parity_gate_blackmage.py with strict fail criteria:
+  - any missing/extra classes
+  - real diff count > threshold
+
+Key status
+- ItemSettings.as in RT: YES (fixed and retained)
+- SWF-level class-set parity: YES (0 missing / 0 extra)
+- Remaining blocker: high real semantic/source drift (727)

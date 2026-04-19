@@ -521,14 +521,19 @@ class JavaScriptEditor extends BaseTimeline
         // reset
         this._$editor.setValue("", -1);
 
-        scene = scene || Util.$currentWorkSpace().scene;
-        if (scene.hasAction(this._$frame)) {
-            this._$editor.setValue(scene.getAction(this._$frame), -1);
+        const openedScene = scene;
+        const activeScene = scene || Util.$currentWorkSpace().scene;
+        // Preserve legacy behavior for normal timeline editing (no explicit
+        // scene passed), while still tracking explicit targets such as
+        // external-script adapters and non-current MovieClip scenes.
+        this._$scene = openedScene || null;
+        if (activeScene.hasAction(this._$frame)) {
+            this._$editor.setValue(activeScene.getAction(this._$frame), -1);
         }
 
         document
             .getElementById("editor-title")
-            .textContent = `${scene.name} / frame[${this._$frame}]`;
+            .textContent = `${activeScene.name} / frame[${this._$frame}]`;
 
         const element = document.getElementById("editor-modal");
         if (event) {
@@ -598,31 +603,40 @@ class JavaScriptEditor extends BaseTimeline
             return;
         }
 
-        const leftFrame = Util.$timelineHeader.leftFrame;
-        if (leftFrame > this._$frame) {
-            return ;
+        const script  = this._$editor.getValue(0);
+        const scene = this._$scene || Util.$currentWorkSpace().scene;
+        if (!scene) {
+            return;
         }
 
-        const index  = this._$frame - leftFrame;
-        const parent = document
-            .getElementById("timeline-header")
-            .children[index];
+        let frameActionElement = null;
+        // Only touch timeline-header DOM when editing the current timeline.
+        // External/adapted scenes do not have a corresponding visible header row.
+        if (!this._$scene) {
+            const leftFrame = Util.$timelineHeader.leftFrame;
+            if (leftFrame <= this._$frame) {
+                const index = this._$frame - leftFrame;
+                const header = document.getElementById("timeline-header");
+                if (header && header.children && index >= 0 && index < header.children.length) {
+                    const parent = header.children[index];
+                    if (parent && parent.children && TimelineHeader.ACTION_INDEX < parent.children.length) {
+                        frameActionElement = parent.children[TimelineHeader.ACTION_INDEX];
+                    }
+                }
+            }
+        }
 
-        const element = parent.children[TimelineHeader.ACTION_INDEX];
-        const script  = this._$editor.getValue(0);
-
-        const scene = this._$scene || Util.$currentWorkSpace().scene;
         if (script) {
             scene.setAction(this._$frame, script.trim());
-            if (!this._$scene
-                && !element.classList.contains("frame-border-box-action")
+            if (frameActionElement
+                && !frameActionElement.classList.contains("frame-border-box-action")
             ) {
-                element.setAttribute("class", "frame-border-box-action");
+                frameActionElement.setAttribute("class", "frame-border-box-action");
             }
         } else {
             scene.deleteAction(this._$frame);
-            if (!this._$scene) {
-                element.setAttribute("class", "frame-border-box");
+            if (frameActionElement) {
+                frameActionElement.setAttribute("class", "frame-border-box");
             }
         }
     }
@@ -708,5 +722,26 @@ window.__N2F_EditorBridge = {
         }
         Util.$javaScriptEditor.hide();
         return true;
+    },
+    "getActiveSourceScriptState": () =>
+    {
+        if (!Util.$javaScriptEditor || !Util.$javaScriptEditor.active) {
+            return null;
+        }
+
+        const editor = Util.$javaScriptEditor;
+        if (!editor._$externalScriptSession || !editor._$scene || editor._$frame === -1) {
+            return null;
+        }
+
+        return {
+            "name": editor._$externalScriptSession.script
+                ? (editor._$externalScriptSession.script.name || "")
+                : "",
+            "path": editor._$externalScriptSession.script
+                ? (editor._$externalScriptSession.script.path || "")
+                : "",
+            "source": editor._$editor ? editor._$editor.getValue(0) : ""
+        };
     }
 };

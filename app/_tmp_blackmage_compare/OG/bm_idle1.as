@@ -1,0 +1,15 @@
+package
+{
+    import flash.display.BitmapData;
+
+    public dynamic class bm_idle1 extends BitmapData
+    {
+
+        public function bm_idle1(_arg_1:int=29, _arg_2:int=35)
+        {
+            super(_arg_1, _arg_2);
+        }
+
+    }
+}
+

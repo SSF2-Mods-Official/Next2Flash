@@ -420,6 +420,146 @@ def _apply_text_patches_inline(data: dict, text_patches: list) -> int:
     return patched
 
 
+def _parse_script_patches_payload(script_patches):
+    """Normalize script patch payload to (scripts, scripts_modified)."""
+    if not script_patches:
+        return [], False
+
+    if isinstance(script_patches, dict):
+        scripts = script_patches.get('scripts', [])
+        scripts_modified = bool(script_patches.get('scriptsModified', False))
+    elif isinstance(script_patches, list):
+        scripts = script_patches
+        scripts_modified = False
+    else:
+        return [], False
+
+    if not isinstance(scripts, list):
+        return [], scripts_modified
+
+    clean = []
+    for s in scripts:
+        if not isinstance(s, dict):
+            continue
+        source = s.get('source', '')
+        if not isinstance(source, str):
+            source = ''
+        item = dict(s)
+        item['source'] = source
+        clean.append(item)
+
+    return clean, scripts_modified
+
+
+def _apply_script_patches_inline(data: dict, script_patches) -> int:
+    """Apply script patches to an already-loaded N2D dict (in-place)."""
+    scripts, scripts_modified = _parse_script_patches_payload(script_patches)
+    if not scripts:
+        return 0
+
+    existing = data.get('scripts', [])
+    if not isinstance(existing, list):
+        existing = []
+
+    def _script_key(s: dict) -> str:
+        if not isinstance(s, dict):
+            return ''
+        p = s.get('path', '')
+        n = s.get('name', '')
+        key = p or n
+        return key.replace('\\', '/').strip().lower() if isinstance(key, str) else ''
+
+    existing_by_key = {}
+    for i, s in enumerate(existing):
+        k = _script_key(s)
+        if k:
+            existing_by_key[k] = i
+
+    updated = 0
+    added = 0
+    for patch in scripts:
+        k = _script_key(patch)
+        if not k:
+            continue
+
+        idx = existing_by_key.get(k)
+        if idx is None:
+            item = dict(patch)
+            p = item.get('path') or item.get('name') or ''
+            if p and not item.get('name'):
+                item['name'] = os.path.basename(str(p))
+            if p and not item.get('path'):
+                item['path'] = str(p).replace('\\', '/')
+            existing_by_key[k] = len(existing)
+            existing.append(item)
+            added += 1
+            continue
+
+        target = existing[idx]
+        if not isinstance(target, dict):
+            target = {}
+            existing[idx] = target
+
+        # Keep existing metadata (e.g. scriptOrigin/externalFile) unless patch
+        # explicitly overrides. Always update source text.
+        target['source'] = patch.get('source', target.get('source', ''))
+        for field in ('name', 'path', 'scriptOrigin', 'externalFile'):
+            if field in patch and patch.get(field) not in (None, ''):
+                target[field] = patch.get(field)
+        updated += 1
+
+    data['scripts'] = existing
+    if scripts_modified or updated > 0 or added > 0:
+        data['scriptsModified'] = True
+
+    log.info('_apply_script_patches_inline: merged %d patches (%d updated, %d added, scriptsModified=%s)',
+             len(scripts), updated, added, scripts_modified)
+    return updated + added
+
+
+def _write_script_files(project_dir: str, scripts: list) -> int:
+    """Write script sources to project scripts/ so compile overlay sees edits."""
+    if not project_dir or not scripts:
+        return 0
+
+    scripts_dir = os.path.normpath(os.path.join(project_dir, 'scripts'))
+    os.makedirs(scripts_dir, exist_ok=True)
+
+    written = 0
+    for script in scripts:
+        if not isinstance(script, dict):
+            continue
+        source = script.get('source', '')
+        if not isinstance(source, str) or source == '':
+            continue
+
+        rel = script.get('path') or script.get('name') or ''
+        if not isinstance(rel, str) or not rel.strip():
+            continue
+
+        rel = rel.replace('\\', '/').lstrip('/')
+        if rel.lower().startswith('scripts/'):
+            rel = rel[8:]
+        if not rel.lower().endswith('.as'):
+            rel += '.as'
+
+        full_path = os.path.normpath(os.path.join(scripts_dir, rel))
+        if not (full_path == scripts_dir or full_path.startswith(scripts_dir + os.sep)):
+            log.warning('_write_script_files: skipping unsafe script path %s', rel)
+            continue
+
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(source)
+
+        # Keep externalFile in sync for save/load cycles
+        script['externalFile'] = 'scripts/' + rel.replace('\\', '/')
+        written += 1
+
+    log.info('_write_script_files: wrote %d script files', written)
+    return written
+
+
 def _read_scripts_from_disk(n2d_json: dict, project_dir: str) -> int:
     """For every script with an externalFile, read its .as file from disk.
 
@@ -1233,6 +1373,20 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             # Check if this is the fast editorBlob path, disk-only, or legacy n2d path
             editor_blob, _ = self._extract_upload(body, 'editorBlob')
             n2d_data, _ = self._extract_upload(body, 'n2d')
+            text_patches_raw = self._extract_form_field(body, 'textPatches')
+            script_patches_raw = self._extract_form_field(body, 'scriptPatches')
+            text_patches = []
+            script_patches = None
+            if text_patches_raw:
+                try:
+                    text_patches = json.loads(text_patches_raw)
+                except Exception as e:
+                    log.warning('Failed to parse text patches: %s', e)
+            if script_patches_raw:
+                try:
+                    script_patches = json.loads(script_patches_raw)
+                except Exception as e:
+                    log.warning('Failed to parse script patches: %s', e)
             # disk-only flag: compile from existing project.n2d without any editor overlay
             disk_only = b'diskOnly' in body and not editor_blob and not n2d_data
             # Optional: write SWF to a specific file path (Electron mode) instead of HTTP response
@@ -1306,15 +1460,6 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 _t2a = _time.perf_counter()
                 print(f"[PERF] disk-only load: {(_t2a-_t2)*1000:.0f}ms")
 
-                # Apply text patches if provided (editor text edits)
-                text_patches_raw = self._extract_form_field(body, 'textPatches')
-                if text_patches_raw:
-                    try:
-                        text_patches = json.loads(text_patches_raw)
-                        _apply_text_patches_inline(n2d_json, text_patches)
-                    except Exception as e:
-                        log.warning('Failed to apply text patches: %s', e)
-
             elif n2d_data:
                 # === LEGACY PATH: full N2D blob ===
                 _t2 = _time.perf_counter()
@@ -1332,6 +1477,27 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                         n2d_json = json.loads(text)
             else:
                 return self._error_response(400, 'No editorBlob or n2d field')
+
+            # Apply lightweight inline patches before compile.
+            if text_patches:
+                try:
+                    _apply_text_patches_inline(n2d_json, text_patches)
+                except Exception as e:
+                    log.warning('Failed to apply text patches: %s', e)
+
+            scripts_applied = 0
+            if script_patches:
+                try:
+                    scripts_applied = _apply_script_patches_inline(n2d_json, script_patches)
+                except Exception as e:
+                    log.warning('Failed to apply script patches: %s', e)
+
+            # External script files are source-of-truth during compile overlay.
+            if scripts_applied > 0 and project_dir:
+                try:
+                    _write_script_files(project_dir, n2d_json.get('scripts', []))
+                except Exception as e:
+                    log.warning('Failed to write script files: %s', e)
 
             # Compile SWF from in-memory merged data (skip save_project_folder)
             _t3 = _time.perf_counter()
@@ -1395,7 +1561,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             traceback.print_exc()
             log.error('_handle_save_and_compile: %s', e)
-            self._error_response(500, str(e))
+            msg = str(e) if str(e) else repr(e)
+            self._error_response(500, msg)
 
     def _handle_compile_disk(self):
         """POST /api/compile-disk — Compile SWF directly from on-disk project.
@@ -1419,6 +1586,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             project_dir = req.get('projectDir', '')
             output_path = req.get('outputPath', '')
             text_patches = req.get('textPatches', [])
+            script_patches = req.get('scriptPatches')
 
             if not project_dir:
                 with self._project_lock:
@@ -1441,6 +1609,15 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 swf_path = output_path
             else:
                 swf_path = os.path.join(tempfile.mkdtemp(), f'{name}.swf')
+
+            # If script patches were provided, write them to scripts/ before
+            # compile so _overlay_external_scripts picks up latest edits.
+            if script_patches:
+                scripts, scripts_modified = _parse_script_patches_payload(script_patches)
+                if scripts:
+                    _write_script_files(project_dir, scripts)
+                    if scripts_modified:
+                        log.info('_handle_compile_disk: script patches marked scriptsModified=True')
 
             # ── Apply text patches if provided ─────────────────────────
             compile_n2d_path = n2d_path
@@ -1494,7 +1671,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             traceback.print_exc()
             log.error('_handle_compile_disk: %s', e)
-            self._error_response(500, str(e))
+            msg = str(e) if str(e) else repr(e)
+            self._error_response(500, msg)
 
     def _handle_import_swf_path(self):
         """POST /api/import-swf-path — Import SWF by filesystem path.

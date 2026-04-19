@@ -1,0 +1,8 @@
+package {
+    import flash.display.BitmapData;
+    public class bm_crouch0 extends BitmapData {
+        public function bm_crouch0(w:int=26, h:int=32) {
+            super(w, h);
+        }
+    }
+}
