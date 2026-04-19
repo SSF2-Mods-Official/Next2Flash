@@ -17,8 +17,16 @@ class FilterHTML
      * @method
      * @public
      */
-    static createHeaderHTML (id, name)
+    static createHeaderHTML (id, name, noLock = false)
     {
+        const lockHTML = noLock ? `` : `
+            <div id="filter-${id}-lock" data-filter-id="${id}" class="filter-lock">
+                ┌
+                <div class="disable" data-detail="{{比率を固定}}"></div>
+                └
+            </div>
+        `;
+
         return `
 <div id="filter-id-${id}" class="filter-border">
 
@@ -32,13 +40,7 @@ class FilterHTML
     <div id="filter-view-area-${id}" class="filter-view-area">
     
         <div class="filter-view-area-left">
-        
-            <div id="filter-${id}-lock" data-filter-id="${id}" class="filter-lock">
-                ┌
-                <div class="disable" data-detail="{{比率を固定}}"></div>
-                └
-            </div>
-        
+        ${lockHTML}
         </div>
 `;
     }
@@ -395,6 +397,54 @@ class FilterHTML
         <canvas id="gradient-canvas-${id}"></canvas>
     </div>
     <div id="color-pointer-list-${id}" data-filter-id="${id}" class="color-pointer-list" data-detail="{{カラーポインターを追加}}"></div>
+</div>
+`;
+    }
+
+    /**
+     * @description ColorMatrix(AdjustColor)のHTMLタグを返す
+     *              Return ColorMatrix (AdjustColor) HTML
+     *
+     * @param  {number} id
+     * @param  {number} brightness
+     * @param  {number} contrast
+     * @param  {number} hue
+     * @param  {number} saturation
+     * @param  {boolean} [isCustomMatrix=false]
+     * @return {string}
+     * @method
+     * @static
+     */
+    static createColorMatrix (id, brightness, contrast, hue, saturation, isCustomMatrix = false)
+    {
+        const customNote = isCustomMatrix
+            ? "<div class=\"filter-text-long color-matrix-note\">Imported custom matrix detected. Editing AdjustColor values will convert it to standard controls.</div>"
+            : "";
+
+        return `
+<div class="color-matrix-panel">
+    <div class="filter-text-long">AdjustColor</div>
+    ${customNote}
+
+    <div class="color-matrix-row">
+        <div class="filter-text-long color-matrix-label">Brightness</div>
+        <div><input type="text" id="colorMatrix-brightness-${id}" value="${brightness}" data-filter-id="${id}" data-name="colorMatrixBrightness" autocomplete="off" tabindex="-1"></div>
+    </div>
+
+    <div class="color-matrix-row">
+        <div class="filter-text-long color-matrix-label">Contrast</div>
+        <div><input type="text" id="colorMatrix-contrast-${id}" value="${contrast}" data-filter-id="${id}" data-name="colorMatrixContrast" autocomplete="off" tabindex="-1"></div>
+    </div>
+
+    <div class="color-matrix-row">
+        <div class="filter-text-long color-matrix-label">Hue</div>
+        <div><input type="text" id="colorMatrix-hue-${id}" value="${hue}" data-filter-id="${id}" data-name="colorMatrixHue" autocomplete="off" tabindex="-1"></div>
+    </div>
+
+    <div class="color-matrix-row">
+        <div class="filter-text-long color-matrix-label">Saturation</div>
+        <div><input type="text" id="colorMatrix-saturation-${id}" value="${saturation}" data-filter-id="${id}" data-name="colorMatrixSaturation" autocomplete="off" tabindex="-1"></div>
+    </div>
 </div>
 `;
     }

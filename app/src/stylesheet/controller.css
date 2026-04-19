@@ -1757,6 +1757,56 @@
     margin-top      : 18px;
 }
 
+#filter-setting-list .color-matrix-panel
+{
+    display        : flex;
+    flex-direction : column;
+    gap            : 4px;
+    margin         : 12px;
+    width          : calc(100% - 12px);
+}
+
+#filter-setting-list .color-matrix-panel input[type="text"]
+{
+    border           : none;
+    border-bottom    : 1px solid darkgray;
+    outline          : none;
+    background-color : transparent;
+    color            : #f5f5f5;
+    text-align       : center;
+    width            : 40px;
+    margin           : 3px;
+    padding          : 0;
+}
+
+#filter-setting-list .color-matrix-panel input[type="text"]:focus
+{
+    border-bottom : 1px solid #f5f5f5;
+}
+
+#filter-setting-list .color-matrix-row
+{
+    display     : flex;
+    align-items : center;
+    gap         : 8px;
+}
+
+#filter-setting-list .color-matrix-label
+{
+    width      : 80px;
+    font-size  : 11px;
+    color      : darkgray;
+    text-align : left;
+}
+
+#filter-setting-list .color-matrix-note
+{
+    font-size   : 10px;
+    color       : darkgray;
+    line-height : 1.4;
+    padding     : 0 0 4px 0;
+}
+
 #filter-setting-list .filter-lock
 {
     width       : 18px;

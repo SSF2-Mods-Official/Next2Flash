@@ -746,7 +746,7 @@ class Screen extends BaseScreen
                         for (let idx = 0; idx < place.filter.length; ++idx) {
 
                             const nextFilter    = place.filter[idx];
-                            const currentFilter = character._$currentPlace[idx];
+                            const currentFilter = character._$currentPlace.filter[idx];
 
                             if (!nextFilter || !currentFilter) {
                                 doUpdate = true;

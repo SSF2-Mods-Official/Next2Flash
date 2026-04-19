@@ -1984,6 +1984,7 @@ class Shape extends Instance
         }
 
         const hydrationVersion = Util.$hydrationVersion | 0;
+        const previousGraphicBuffer = this._$graphicBuffer;
         if (this._$bufferVersion !== hydrationVersion) {
             this._$graphicBuffer = null;
         }
@@ -2095,8 +2096,26 @@ class Shape extends Instance
                 }
             }
 
-            this._$graphicBuffer = graphics._$getRecodes();
-            this._$bufferVersion = hydrationVersion;
+            const rebuiltGraphicBuffer = graphics._$getRecodes();
+            const hasRebuiltData = Array.isArray(rebuiltGraphicBuffer)
+                ? rebuiltGraphicBuffer.length > 0
+                : !!rebuiltGraphicBuffer;
+
+            if (!hasRebuiltData
+                && Array.isArray(previousGraphicBuffer)
+                && previousGraphicBuffer.length > 0
+            ) {
+                // Hydration can briefly provide empty recodes; keep prior drawable buffer until valid data arrives.
+                this._$graphicBuffer = previousGraphicBuffer;
+                console.warn(
+                    `[N2F-DBG] createInstance shapeId=${this.id} EMPTY_REBUILD_FALLBACK `
+                    + `prevBufferLen=${previousGraphicBuffer.length} hydrationVersion=${hydrationVersion}`
+                );
+                // Intentionally keep _$bufferVersion unchanged so we retry rebuilding on next draw.
+            } else {
+                this._$graphicBuffer = rebuiltGraphicBuffer;
+                this._$bufferVersion = hydrationVersion;
+            }
         }
         graphics._$buffer = this._$graphicBuffer;
 
@@ -2132,8 +2151,16 @@ class Shape extends Instance
      */
     _applyHydratedData (data)
     {
-        if (data.recodes) {
+        if (Array.isArray(data.recodes) && data.recodes.length > 0) {
             this.recodes = data.recodes;
+        } else if (Array.isArray(data.recodes)
+            && data.recodes.length === 0
+            && this._$recodes.length > 0
+        ) {
+            console.warn(
+                `[N2F-DBG] Shape._applyHydratedData skip-empty-recodes shapeId=${this.id} `
+                + `existingLen=${this._$recodes.length}`
+            );
         }
         if (data.bounds) {
             this.bounds = data.bounds;

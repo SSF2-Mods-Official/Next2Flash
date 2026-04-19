@@ -540,6 +540,37 @@ class LibraryController
     }
 
     /**
+     * @description デバッグ情報をサーバーログへ送信
+     *
+     * @param  {string} message
+     * @param  {object} payload
+     * @return {void}
+     * @method
+     * @public
+     */
+    sendDebugLog (message, payload = {})
+    {
+        try {
+
+            fetch("/api/log", {
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/json"
+                },
+                "keepalive": true,
+                "body": JSON.stringify({
+                    "level": "INFO",
+                    "module": "LibraryController",
+                    "message": `${message} ${JSON.stringify(payload)}`
+                })
+            }).catch(() => {});
+
+        } catch (e) {
+            // no-op
+        }
+    }
+
+    /**
      * @description サウンドのselectを初期化
      *
      * @return {void}
@@ -598,6 +629,10 @@ class LibraryController
     reload (libraries = null)
     {
         const workSpace = Util.$currentWorkSpace();
+        const searchElement = document.getElementById("library-search");
+        const currentSearch = searchElement
+            ? `${searchElement.value || ""}`.toLowerCase()
+            : "";
 
         // 指定がなければ現在のタブのライブラリを使用する
         if (!libraries) {
@@ -742,6 +777,158 @@ class LibraryController
             dup.clear();
             folderMap.clear();
             childrenMap.clear();
+        }
+
+        const listElement = document
+            .getElementById("library-list-box");
+
+        if (listElement) {
+
+            const renderedIds = new Set();
+            const renderedChildren = listElement.children;
+            for (let idx = 0; idx < renderedChildren.length; ++idx) {
+                renderedIds.add(renderedChildren[idx].dataset.libraryId | 0);
+            }
+
+            const missingLibraries = [];
+            for (let idx = 0; idx < libraries.length; ++idx) {
+
+                const value = libraries[idx];
+                const libraryId = value.id | 0;
+
+                if (!libraryId || renderedIds.has(libraryId)) {
+                    continue;
+                }
+
+                missingLibraries.push(value);
+            }
+
+            if (missingLibraries.length) {
+
+                console.warn(
+                    `[N2F] Library panel reconciliation restored ${missingLibraries.length} missing row(s).`
+                );
+
+                for (let idx = 0; idx < missingLibraries.length; ++idx) {
+
+                    const value = missingLibraries[idx];
+                    this.createInstance(
+                        value.type, value.name, value.id, value.symbol
+                    );
+
+                    if (!value.folderId) {
+                        continue;
+                    }
+
+                    const child = document
+                        .getElementById(`library-child-id-${value.id}`);
+
+                    const folderElement = document
+                        .getElementById(`library-child-id-${value.folderId}`);
+
+                    if (!child || !folderElement) {
+                        continue;
+                    }
+
+                    listElement.insertBefore(
+                        child, folderElement.nextElementSibling
+                    );
+                }
+
+                for (let idx = 0; idx < libraries.length; ++idx) {
+
+                    const value = libraries[idx];
+                    if (value.type !== InstanceType.FOLDER || value.folderId) {
+                        continue;
+                    }
+
+                    this.updateFolderStyle(value, value.mode);
+                }
+            }
+
+            if (currentSearch.indexOf("blackmage_d") > -1) {
+
+                const renderedBlackmageRows = [];
+                const renderedNow = listElement.children;
+                for (let idx = 0; idx < renderedNow.length; ++idx) {
+
+                    const node = renderedNow[idx];
+
+                    const libraryId = node.dataset.libraryId | 0;
+                    const instance = workSpace.getLibrary(libraryId);
+                    if (!instance || !instance.name) {
+                        continue;
+                    }
+
+                    if (instance.name.toLowerCase().indexOf("blackmage_d") === -1) {
+                        continue;
+                    }
+
+                    renderedBlackmageRows.push({
+                        "id": instance.id,
+                        "name": instance.name,
+                        "symbol": instance.symbol,
+                        "folderId": instance.folderId | 0,
+                        "display": node.style.display || "",
+                        "inDom": true
+                    });
+                }
+
+                const expectedBlackmageRows = libraries
+                    .filter((instance) => {
+                        return instance
+                            && instance.name
+                            && instance.name.toLowerCase().indexOf("blackmage_d") > -1;
+                    })
+                    .map((instance) => {
+                        return {
+                            "id": instance.id,
+                            "name": instance.name,
+                            "symbol": instance.symbol,
+                            "folderId": instance.folderId | 0
+                        };
+                    });
+
+                const renderedIds = new Set(
+                    renderedBlackmageRows.map((entry) => entry.id)
+                );
+
+                const missingFromDom = expectedBlackmageRows
+                    .filter((entry) => !renderedIds.has(entry.id));
+
+                console.groupCollapsed(
+                    `[N2F][LibraryPanelDebug] query=${currentSearch} expected=${expectedBlackmageRows.length} rendered=${renderedBlackmageRows.length}`
+                );
+                console.log("expectedBlackmageRows", expectedBlackmageRows);
+                console.log("renderedBlackmageRows", renderedBlackmageRows);
+                console.log("missingFromDom", missingFromDom);
+                console.log(
+                    "id217",
+                    {
+                        "expected": expectedBlackmageRows.some((entry) => entry.id === 217),
+                        "rendered": renderedBlackmageRows.some((entry) => entry.id === 217)
+                    }
+                );
+                console.groupEnd();
+
+                const debugPayload = {
+                    "query": currentSearch,
+                    "expected": expectedBlackmageRows.length,
+                    "rendered": renderedBlackmageRows.length,
+                    "id217": {
+                        "expected": expectedBlackmageRows.some((entry) => entry.id === 217),
+                        "rendered": renderedBlackmageRows.some((entry) => entry.id === 217)
+                    },
+                    "expectedRows": expectedBlackmageRows,
+                    "renderedRows": renderedBlackmageRows,
+                    "missingFromDom": missingFromDom
+                };
+
+                window.__n2fLibraryDebug = window.__n2fLibraryDebug || {};
+                window.__n2fLibraryDebug.panel = debugPayload;
+
+                this.sendDebugLog("[N2F][LibraryPanelDebug]", debugPayload);
+            }
         }
 
         // 重複登録防止のnameMapを生成

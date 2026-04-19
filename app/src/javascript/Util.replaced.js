@@ -7,16 +7,48 @@ let characterId = 0;
 const Util = {};
 window.Util = Util;
 
-// Route [N2F-DBG] console.warn to Electron main-process stdout + log file
+// Route debug-tagged console output to Electron main-process log bridge.
 (function () {
+    const DEBUG_PREFIXES = ["[N2F-DBG]", "[MCDbg]", "[ScrDbg]"];
+    const shouldForward = (args) => {
+        if (!window.n2fElectron || !args || args.length === 0) {
+            return false;
+        }
+
+        const first = args[0];
+        if (typeof first !== "string") {
+            return false;
+        }
+
+        for (let idx = 0; idx < DEBUG_PREFIXES.length; ++idx) {
+            if (first.indexOf(DEBUG_PREFIXES[idx]) === 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const forward = (args) => {
+        try {
+            window.n2fElectron.logDebug(args.join(" "));
+        } catch (_error) {
+            // Best-effort bridge; never block normal logging.
+        }
+    };
+
     const _origWarn = console.warn;
     console.warn = function () {
         _origWarn.apply(console, arguments);
-        if (window.n2fElectron && arguments.length > 0
-            && typeof arguments[0] === 'string'
-            && arguments[0].indexOf('[N2F-DBG]') === 0
-        ) {
-            window.n2fElectron.logDebug(arguments[0]);
+        if (shouldForward(arguments)) {
+            forward(Array.from(arguments));
+        }
+    };
+
+    const _origLog = console.log;
+    console.log = function () {
+        _origLog.apply(console, arguments);
+        if (shouldForward(arguments)) {
+            forward(Array.from(arguments));
         }
     };
 })();
@@ -771,6 +803,7 @@ Util.$initialize = () =>
     Util.$filterClasses = {
         "BevelFilter": BevelFilter,
         "BlurFilter": BlurFilter,
+        "ColorMatrixFilter": ColorMatrixFilter,
         "DropShadowFilter": DropShadowFilter,
         "GlowFilter": GlowFilter,
         "GradientBevelFilter": GradientBevelFilter,
@@ -1547,6 +1580,25 @@ Util._$validateLibraries = function(libraries, source)
 Util.$loadWorkSpaceProgressively = async function(json, name)
 {
     console.time("[N2F] Progressive JSON.parse");
+
+    const serverLog = (level, message) => {
+        try {
+            fetch("/api/log", {
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/json"
+                },
+                "keepalive": true,
+                "body": JSON.stringify({
+                    "level": level,
+                    "module": "ProgressiveLoader",
+                    "message": message
+                })
+            }).catch(() => {});
+        } catch (e) {
+            // no-op
+        }
+    };
     
     try {
         // Parse the JSON (this is still the bottleneck, but we time it separately)
@@ -1611,6 +1663,15 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
         
         console.log(`[N2F] Loading ${libraries.length} libraries in ${totalChunks} chunks (${CHUNK_SIZE} per chunk)...`);
         console.time("[N2F] Load all libraries");
+
+        const expectedLibrariesById = new Map();
+        for (let idx = 0; idx < libraries.length; idx++) {
+            const libData = libraries[idx];
+            if (!libData || typeof libData.id === "undefined" || libData.id === null) {
+                continue;
+            }
+            expectedLibrariesById.set(libData.id | 0, libData);
+        }
         
         let loadErrors = 0;
         for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
@@ -1642,6 +1703,77 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
             // Update progress
             const progress = Math.round((end / libraries.length) * 100);
             console.log(`[N2F] Loaded ${end}/${libraries.length} libraries (${progress}%)`);
+        }
+
+        const missingLibraryIds = [];
+        for (const expectedId of expectedLibrariesById.keys()) {
+            if (!workSpaces.getLibrary(expectedId)) {
+                missingLibraryIds.push(expectedId);
+            }
+        }
+
+        if (missingLibraryIds.length) {
+
+            console.warn(
+                `[N2F] Library reconciliation: ${missingLibraryIds.length} missing entries after initial load.`
+            );
+            serverLog("WARN", `[N2F] Library reconciliation: missing=${missingLibraryIds.length}`);
+
+            let recoveredLibraries = 0;
+            for (let idx = 0; idx < missingLibraryIds.length; idx++) {
+
+                const missingId = missingLibraryIds[idx];
+                const libData = expectedLibrariesById.get(missingId);
+
+                if (!libData) {
+                    continue;
+                }
+
+                try {
+                    workSpaces.addLibrary(libData);
+                    if (workSpaces.getLibrary(missingId)) {
+                        recoveredLibraries++;
+                    }
+                } catch (recoveryErr) {
+                    console.error(
+                        `[N2F] Library reconciliation FAILED for id=${missingId}: ${recoveryErr.message}`
+                    );
+                }
+            }
+
+            const unresolvedLibraryIds = [];
+            for (let idx = 0; idx < missingLibraryIds.length; idx++) {
+                const missingId = missingLibraryIds[idx];
+                if (!workSpaces.getLibrary(missingId)) {
+                    unresolvedLibraryIds.push(missingId);
+                }
+            }
+
+            const unresolvedLibraries = unresolvedLibraryIds
+                .map((libraryId) => {
+                    const value = expectedLibrariesById.get(libraryId);
+                    return {
+                        "id": libraryId,
+                        "name": value ? value.name : "",
+                        "type": value ? value.type : ""
+                    };
+                });
+
+            console.log(
+                `[N2F] Library reconciliation result: recovered=${recoveredLibraries}/${missingLibraryIds.length}, unresolved=${unresolvedLibraryIds.length}`
+            );
+            serverLog(
+                "INFO",
+                `[N2F] Library reconciliation result: recovered=${recoveredLibraries}/${missingLibraryIds.length}, unresolved=${unresolvedLibraryIds.length}`
+            );
+
+            if (unresolvedLibraries.length) {
+                console.warn("[N2F] Library reconciliation unresolved entries:", unresolvedLibraries);
+                serverLog(
+                    "WARN",
+                    `[N2F] Library reconciliation unresolved entries: ${JSON.stringify(unresolvedLibraries)}`
+                );
+            }
         }
         
         if (loadErrors > 0) {
@@ -1717,6 +1849,25 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
 Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
 {
     console.log(`[N2F] Progressive loading from object with ${object.libraries ? object.libraries.length : 0} libraries`);
+
+    const serverLog = (level, message) => {
+        try {
+            fetch("/api/log", {
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/json"
+                },
+                "keepalive": true,
+                "body": JSON.stringify({
+                    "level": level,
+                    "module": "ProgressiveLoader",
+                    "message": message
+                })
+            }).catch(() => {});
+        } catch (e) {
+            // no-op
+        }
+    };
     
     // Pre-validate libraries before loading
     Util._$validateLibraries(object.libraries, 'Progressive(Object)');
@@ -1775,6 +1926,15 @@ Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
         
         console.log(`[N2F] Loading ${libraries.length} libraries in ${totalChunks} chunks (${CHUNK_SIZE} per chunk)...`);
         console.time("[N2F] Load all libraries");
+
+        const expectedLibrariesById = new Map();
+        for (let idx = 0; idx < libraries.length; idx++) {
+            const libData = libraries[idx];
+            if (!libData || typeof libData.id === "undefined" || libData.id === null) {
+                continue;
+            }
+            expectedLibrariesById.set(libData.id | 0, libData);
+        }
         
         let loadErrors = 0;
         for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
@@ -1806,6 +1966,77 @@ Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
             // Update progress
             const progress = Math.round((end / libraries.length) * 100);
             console.log(`[N2F] Loaded ${end}/${libraries.length} libraries (${progress}%)`);
+        }
+
+        const missingLibraryIds = [];
+        for (const expectedId of expectedLibrariesById.keys()) {
+            if (!workSpaces.getLibrary(expectedId)) {
+                missingLibraryIds.push(expectedId);
+            }
+        }
+
+        if (missingLibraryIds.length) {
+
+            console.warn(
+                `[N2F] Library reconciliation: ${missingLibraryIds.length} missing entries after initial load.`
+            );
+            serverLog("WARN", `[N2F] Library reconciliation: missing=${missingLibraryIds.length}`);
+
+            let recoveredLibraries = 0;
+            for (let idx = 0; idx < missingLibraryIds.length; idx++) {
+
+                const missingId = missingLibraryIds[idx];
+                const libData = expectedLibrariesById.get(missingId);
+
+                if (!libData) {
+                    continue;
+                }
+
+                try {
+                    workSpaces.addLibrary(libData);
+                    if (workSpaces.getLibrary(missingId)) {
+                        recoveredLibraries++;
+                    }
+                } catch (recoveryErr) {
+                    console.error(
+                        `[N2F] Library reconciliation FAILED for id=${missingId}: ${recoveryErr.message}`
+                    );
+                }
+            }
+
+            const unresolvedLibraryIds = [];
+            for (let idx = 0; idx < missingLibraryIds.length; idx++) {
+                const missingId = missingLibraryIds[idx];
+                if (!workSpaces.getLibrary(missingId)) {
+                    unresolvedLibraryIds.push(missingId);
+                }
+            }
+
+            const unresolvedLibraries = unresolvedLibraryIds
+                .map((libraryId) => {
+                    const value = expectedLibrariesById.get(libraryId);
+                    return {
+                        "id": libraryId,
+                        "name": value ? value.name : "",
+                        "type": value ? value.type : ""
+                    };
+                });
+
+            console.log(
+                `[N2F] Library reconciliation result: recovered=${recoveredLibraries}/${missingLibraryIds.length}, unresolved=${unresolvedLibraryIds.length}`
+            );
+            serverLog(
+                "INFO",
+                `[N2F] Library reconciliation result: recovered=${recoveredLibraries}/${missingLibraryIds.length}, unresolved=${unresolvedLibraryIds.length}`
+            );
+
+            if (unresolvedLibraries.length) {
+                console.warn("[N2F] Library reconciliation unresolved entries:", unresolvedLibraries);
+                serverLog(
+                    "WARN",
+                    `[N2F] Library reconciliation unresolved entries: ${JSON.stringify(unresolvedLibraries)}`
+                );
+            }
         }
         
         if (loadErrors > 0) {
