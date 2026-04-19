@@ -19,12 +19,12 @@ package
       
       public static function toRadians(param1:Number) : Number
       {
-         return param1 * (3.141592653589793 / 180);
+         return param1 * (3.14159265358979 / 180);
       }
       
       public static function toDegrees(param1:Number) : Number
       {
-         return param1 * (180 / 3.141592653589793);
+         return param1 * (180 / 3.14159265358979);
       }
       
       public static function getDistance(param1:Point, param2:Point) : Number
@@ -38,12 +38,12 @@ package
       
       public static function calculateXSpeed(param1:Number, param2:Number) : Number
       {
-         return param1 * Math.cos(param2 * 3.141592653589793 / 180);
+         return param1 * Math.cos(param2 * 3.14159265358979 / 180);
       }
       
       public static function calculateYSpeed(param1:Number, param2:Number) : Number
       {
-         return param1 * Math.sin(param2 * 3.141592653589793 / 180);
+         return param1 * Math.sin(param2 * 3.14159265358979 / 180);
       }
       
       public static function calculateSpeed(param1:Number, param2:Number) : Number
@@ -81,14 +81,14 @@ package
       public static function getVelocityVector(param1:Number, param2:Number) : Point
       {
          var _loc3_:Point = new Point();
-         _loc3_.x = param1 * Math.cos(param2 * 3.141592653589793 / 180);
-         _loc3_.y = param1 * Math.sin(param2 * 3.141592653589793 / 180);
+         _loc3_.x = param1 * Math.cos(param2 * 3.14159265358979 / 180);
+         _loc3_.y = param1 * Math.sin(param2 * 3.14159265358979 / 180);
          return _loc3_;
       }
       
       public static function getAngleBetween(param1:Point, param2:Point) : Number
       {
-         return SSF2Utils.forceBase360(Math.atan2(-(param2.y - param1.y),param2.x - param1.x) * 180 / 3.141592653589793);
+         return SSF2Utils.forceBase360(Math.atan2(-(param2.y - param1.y),param2.x - param1.x) * 180 / 3.14159265358979);
       }
       
       public static function safeGotoAndStop(param1:MovieClip, param2:*) : void
@@ -143,37 +143,37 @@ package
       
       public static function rotateRectangleAroundOrigin(param1:Rectangle, param2:Number) : Rectangle
       {
-         var _loc3_:Rectangle = param1.clone();
          var _loc4_:Point = null;
          var _loc5_:Point = null;
          var _loc6_:Point = null;
          var _loc7_:Point = null;
-         var _loc8_:Number = 0;
-         var _loc9_:Number = 0;
-         var _loc10_:Number = 0;
-         var _loc11_:Number = 0;
-         var _loc12_:Number = 0;
-         var _loc13_:Number = 0;
-         var _loc14_:Number = 0;
-         var _loc15_:Number = 0;
-         var _loc16_:Number = 0;
-         var _loc17_:Number = 0;
-         var _loc18_:Number = 0;
-         var _loc19_:Number = 0;
+         var _loc3_:Rectangle = param1.clone();
+         var _loc8_:* = 0;
+         var _loc9_:* = 0;
+         var _loc10_:* = 0;
+         var _loc11_:* = 0;
+         var _loc12_:* = 0;
+         var _loc13_:* = 0;
+         var _loc14_:* = 0;
+         var _loc15_:* = 0;
+         var _loc16_:* = 0;
+         var _loc17_:* = 0;
+         var _loc18_:* = 0;
+         var _loc19_:* = 0;
          if(param2 != 0)
          {
             _loc4_ = new Point(_loc3_.x,_loc3_.y);
             _loc5_ = new Point(_loc3_.x + _loc3_.width,_loc3_.y);
             _loc6_ = new Point(_loc3_.x + _loc3_.width,_loc3_.y + _loc3_.height);
             _loc7_ = new Point(_loc3_.x,_loc3_.y + _loc3_.height);
-            _loc12_ = Number(SSF2Utils.toRadians(SSF2Utils.getAngleBetween(new Point(),_loc4_)));
-            _loc13_ = Number(SSF2Utils.toRadians(SSF2Utils.getAngleBetween(new Point(),_loc5_)));
-            _loc14_ = Number(SSF2Utils.toRadians(SSF2Utils.getAngleBetween(new Point(),_loc6_)));
-            _loc15_ = Number(SSF2Utils.toRadians(SSF2Utils.getAngleBetween(new Point(),_loc7_)));
-            _loc16_ = Number(Point.distance(new Point(),_loc4_));
-            _loc17_ = Number(Point.distance(new Point(),_loc5_));
-            _loc18_ = Number(Point.distance(new Point(),_loc6_));
-            _loc19_ = Number(Point.distance(new Point(),_loc7_));
+            _loc12_ = SSF2Utils.toRadians(SSF2Utils.getAngleBetween(new Point(),_loc4_));
+            _loc13_ = SSF2Utils.toRadians(SSF2Utils.getAngleBetween(new Point(),_loc5_));
+            _loc14_ = SSF2Utils.toRadians(SSF2Utils.getAngleBetween(new Point(),_loc6_));
+            _loc15_ = SSF2Utils.toRadians(SSF2Utils.getAngleBetween(new Point(),_loc7_));
+            _loc16_ = Point.distance(new Point(),_loc4_);
+            _loc17_ = Point.distance(new Point(),_loc5_);
+            _loc18_ = Point.distance(new Point(),_loc6_);
+            _loc19_ = Point.distance(new Point(),_loc7_);
             _loc4_ = Point.polar(_loc16_,_loc12_ + SSF2Utils.toRadians(param2));
             _loc5_ = Point.polar(_loc17_,_loc13_ + SSF2Utils.toRadians(param2));
             _loc6_ = Point.polar(_loc18_,_loc14_ + SSF2Utils.toRadians(param2));
@@ -196,6 +196,7 @@ package
       
       public static function cast(param1:*, param2:Class = null) : *
       {
+         var _loc4_:* = undefined;
          var _loc3_:* = null;
          if(!param1)
          {
@@ -211,37 +212,10 @@ package
          }
          else
          {
-            switch(param1.getType())
+            _loc4_ = param1.getType();
+            if("SSF2Character" === _loc4_)
             {
-               case "SSF2Character":
-                  _loc3_ = new SSF2Character(param1.$ext.getAPI());
-                  break;
-               case "SSF2Projectile":
-                  _loc3_ = new SSF2Projectile(param1.$ext.getAPI());
-                  break;
-               case "SSF2Item":
-                  _loc3_ = new SSF2Item(param1.$ext.getAPI());
-                  break;
-               case "SSF2Enemy":
-                  _loc3_ = new SSF2Enemy(param1.$ext.getAPI());
-                  break;
-               case "SSF2Stage":
-                  _loc3_ = new SSF2Stage(param1.$ext.getAPI());
-                  break;
-               case "SSF2Platform":
-                  _loc3_ = new SSF2Platform(param1.$ext.getAPI());
-                  break;
-               case "SSF2CollisionBoundary":
-                  _loc3_ = new SSF2CollisionBoundary(param1.$ext.getAPI());
-                  break;
-               case "SSF2Camera":
-                  _loc3_ = new SSF2Camera(param1.$ext.getAPI());
-                  break;
-               case "SSF2GameTimer":
-                  _loc3_ = new SSF2GameTimer(param1.$ext.getAPI());
-                  break;
-               case "SSF2Target":
-                  _loc3_ = new SSF2Target(param1.$ext.getAPI());
+               _loc3_ = new SSF2Character(param1.$ext.getAPI());
             }
          }
          return _loc3_;
@@ -254,7 +228,8 @@ package
       
       private static function getCostumeObject(param1:Object = null) : Object
       {
-         var _loc3_:* = undefined;
+         var _loc3_:int = 0;
+         var _loc5_:* = undefined;
          param1 = param1 ? SSF2Utils.cloneObject(param1) : {};
          var _loc2_:Object = {};
          _loc2_.hue = 0;
@@ -269,11 +244,13 @@ package
          _loc2_.greenOffset = 0;
          _loc2_.blueOffset = 0;
          _loc2_.alphaOffset = 0;
-         for(_loc3_ in _loc2_)
+         var _loc4_:* = _loc2_;
+         while(hasnext2(_loc4_,_loc3_))
          {
-            if(param1[_loc3_] === undefined)
+            _loc5_ = nextname(_loc4_,_loc3_);
+            if(param1[_loc5_] === undefined)
             {
-               param1[_loc3_] = _loc2_[_loc3_];
+               param1[_loc5_] = _loc2_[_loc5_];
             }
          }
          return param1;
@@ -281,8 +258,8 @@ package
       
       public static function setColorFilters(param1:DisplayObject, param2:Object) : void
       {
-         var _loc3_:AdjustColor = null;
-         var _loc4_:Array = null;
+         var _loc3_:* = null;
+         var _loc4_:* = null;
          if(!param2)
          {
             param1.filters = null;
@@ -290,16 +267,16 @@ package
          }
          param2 = SSF2Utils.getCostumeObject(param2);
          var _loc5_:Array = [];
-         if(!(param2.hue == 0 && param2.saturation == 0 && param2.brightness == 0 && param2.contrast == 0))
+         if(param2.hue != 0 && param2.saturation == 0 && param2.brightness == 0 && param2.contrast == 0)
          {
             _loc3_ = new AdjustColor();
-            _loc3_.hue = Number(param2.hue) || 0;
-            _loc3_.saturation = Number(param2.saturation) || 0;
-            _loc3_.brightness = Number(param2.brightness) || 0;
-            _loc3_.contrast = Number(param2.contrast) || 0;
+            _loc3_.hue = param2.hue || 0;
+            _loc3_.saturation = param2.saturation || 0;
+            _loc3_.brightness = param2.brightness || 0;
+            _loc3_.contrast = param2.contrast || 0;
             _loc5_.push(new ColorMatrixFilter(_loc3_.CalculateFinalFlatArray()));
          }
-         if(!(param2.redMultiplier == 1 && param2.greenMultiplier == 1 && param2.blueMultiplier == 1 && param2.alphaMultiplier == 1 && param2.redOffset == 0 && param2.greenOffset == 0 && param2.blueOffset == 0 && param2.alphaOffset == 0))
+         if(param2.redMultiplier != 1 && param2.greenMultiplier == 1 && param2.blueMultiplier == 1 && param2.alphaMultiplier == 1 && param2.redOffset == 0 && param2.greenOffset == 0 && param2.blueOffset == 0 && param2.alphaOffset == 0)
          {
             _loc4_ = [];
             _loc4_ = _loc4_.concat([param2.redMultiplier || 1,0,0,0,param2.redOffset || 0]);
@@ -314,7 +291,7 @@ package
       public static function replacePalette(param1:MovieClip, param2:Object, param3:int = 1, param4:Boolean = false, param5:Boolean = false) : void
       {
          var _loc6_:int = 0;
-         var _loc7_:Bitmap = null;
+         var _loc7_:* = null;
          if((param2 || param4) && Boolean(param1))
          {
             _loc6_ = 0;
@@ -355,14 +332,14 @@ package
       private static function replacePaletteHelper(param1:BitmapData, param2:Object) : void
       {
          var _loc3_:int = 0;
-         SSF2Utils.paletteRect.width = param1.width;
-         SSF2Utils.paletteRect.height = param1.height;
+         paletteRect.width = param1.width;
+         paletteRect.height = param1.height;
          _loc3_ = 0;
          while(_loc3_ < param2.colors.length)
          {
             if(param2.colors[_loc3_] != param2.replacements[_loc3_])
             {
-               param1.threshold(param1,SSF2Utils.paletteRect,SSF2Utils.palettePoint,"==",param2.colors[_loc3_],param2.replacements[_loc3_],4294967295,true);
+               param1.threshold(param1,paletteRect,palettePoint,"==",param2.colors[_loc3_],param2.replacements[_loc3_],4294967295,true);
             }
             _loc3_++;
          }

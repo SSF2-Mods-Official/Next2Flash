@@ -6,7 +6,7 @@ package
    
    public class SSF2CharacterExt extends SSF2Character
    {
-      private var effects:Array = new Array();
+      private var effects:Array;
       
       private var clearListener:Boolean;
       
@@ -44,6 +44,7 @@ package
       
       public function SSF2CharacterExt(param1:*)
       {
+         this.effects = new Array();
          super(param1);
       }
       
@@ -116,12 +117,9 @@ package
          var _loc2_:* = 0;
          while(_loc2_ < this.effects.length)
          {
-            if(this.effects[_loc2_] != null)
+            if(this.effects[_loc2_] != null && this.effects[_loc2_].parent != null)
             {
-               if(this.effects[_loc2_].parent != null)
-               {
-                  this.effects[_loc2_].parent.removeChild(this.effects[_loc2_]);
-               }
+               this.effects[_loc2_].parent.removeChild(this.effects[_loc2_]);
             }
             _loc2_++;
          }
@@ -142,7 +140,9 @@ package
       {
          var costumeData:Object;
          var onEffectEnterFrame:Function = null;
-         var effectMC:MovieClip = param1;
+         var effectMC:MovieClip = null;
+         var _arg_1:MovieClip = param1;
+         effectMC = _arg_1;
          applyPalette(effectMC);
          costumeData = getPaletteSwapData();
          onEffectEnterFrame = function(param1:Event):*

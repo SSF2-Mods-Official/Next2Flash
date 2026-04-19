@@ -390,10 +390,21 @@ def _parse_gradient_filter(br: BitReader, name: str) -> dict:
         'strength': strength, 'type': ftype, 'knockout': knockout,
     }
 
-def _parse_color_matrix(br: BitReader) -> None:
-    """Parse ColorMatrixFilter — skip 20 floats (not supported in editor)."""
-    br.byte_pos += 20 * 4
-    return None
+def _parse_color_matrix(br: BitReader) -> dict:
+    """Parse ColorMatrixFilter and preserve all 20 matrix floats.
+
+    Returning a concrete filter object keeps PO3 filter lists intact through
+    import -> n2d -> compile, instead of silently dropping grayscale/tint
+    effects that rely on color matrix filters.
+    """
+    matrix = []
+    for _ in range(20):
+        matrix.append(struct.unpack_from('<f', br.data, br.byte_pos)[0])
+        br.byte_pos += 4
+    return {
+        'class': 'ColorMatrixFilter',
+        'params': [None, matrix],
+    }
 
 def _parse_convolution(br: BitReader) -> None:
     """Parse ConvolutionFilter — skip (not supported in editor)."""

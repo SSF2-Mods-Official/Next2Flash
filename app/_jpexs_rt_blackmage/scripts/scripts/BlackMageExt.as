@@ -77,6 +77,7 @@ package
       
       override public function getOwnStats() : Object
       {
+         var _loc4_:Object = null;
          var _loc1_:Object = new Object();
          _loc1_ = {
             "classAPI":BlackMageExt,
@@ -1395,12 +1396,12 @@ package
                }}
             }
          };
-         var _loc4_:Object = null;
          return _loc1_;
       }
       
       override public function getAttackStats() : Object
       {
+         var _loc4_:Object = null;
          var _loc1_:Object = new Object();
          _loc1_ = {
             "classAPI":BlackMageExt,
@@ -2719,12 +2720,12 @@ package
                }}
             }
          };
-         var _loc4_:Object = null;
          return _loc2_;
       }
       
       override public function getItemStats() : Object
       {
+         var _loc4_:Object = null;
          var _loc1_:Object = new Object();
          _loc1_ = {
             "classAPI":BlackMageExt,
@@ -4048,6 +4049,7 @@ package
       
       override public function getProjectileStats() : Object
       {
+         var _loc4_:Object = null;
          var _loc1_:Object = new Object();
          _loc1_ = {
             "classAPI":BlackMageExt,
@@ -4987,7 +4989,7 @@ package
                }}
             }
          };
-         var _loc3_:Object = {
+         return {
             "fsmashfull":{
                "classAPI":SSF2Projectile,
                "linkage_id":"BMfsmashfull",
@@ -5366,8 +5368,6 @@ package
                }}
             }
          };
-         var _loc4_:Object = null;
-         return _loc3_;
       }
       
       public function resetChargeOnDeath(param1:* = null) : *

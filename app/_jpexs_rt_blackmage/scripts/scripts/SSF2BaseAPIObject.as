@@ -8,7 +8,8 @@ package
       
       public function SSF2BaseAPIObject(param1:*)
       {
-         var api:* = param1;
+         var _arg_1:* = param1;
+         api = _arg_1;
          super();
          this._api = api;
          this.$ext = {"getAPI":function():*
@@ -52,7 +53,10 @@ package
       
       public function isEqual(param1:*) : Boolean
       {
-         return !param1 ? false : param1 && this._api === param1.$ext.getAPI();
+         if(param1)
+         {
+         }
+         return param1 && this._api === param1.$ext.getAPI();
       }
    }
 }
