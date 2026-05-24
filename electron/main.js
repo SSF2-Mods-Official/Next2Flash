@@ -24,6 +24,11 @@ const APP_DIR = isDev
   ? path.join(__dirname, '..', 'app')
   : path.join(process.resourcesPath, 'app');
 
+// In packaged builds, server.py is compiled to server.exe by PyInstaller.
+// In dev, fall back to spawning python directly.
+const SERVER_EXE = isDev
+  ? null
+  : path.join(process.resourcesPath, 'server.exe');
 const PYTHON = process.env.N2F_PYTHON || 'python';
 const SERVER_SCRIPT = path.join(APP_DIR, 'server.py');
 const SERVER_PORT = parseInt(process.env.N2F_PORT || '5000', 10);
@@ -72,11 +77,24 @@ app.on('second-instance', () => {
 
 function startPythonServer() {
   return new Promise((resolve, reject) => {
-    console.log(`[N2F] Starting Python server: ${PYTHON} ${SERVER_SCRIPT}`);
+    // Packaged: run the bundled server.exe (no Python needed on host).
+    // Dev: run `python server.py` as before.
+    let cmd, args, cwd;
+    if (SERVER_EXE && fs.existsSync(SERVER_EXE)) {
+      cmd = SERVER_EXE;
+      args = [];
+      cwd = APP_DIR;
+      console.log(`[N2F] Starting bundled server: ${cmd}`);
+    } else {
+      cmd = PYTHON;
+      args = [SERVER_SCRIPT];
+      cwd = APP_DIR;
+      console.log(`[N2F] Starting Python server: ${cmd} ${SERVER_SCRIPT}`);
+    }
     console.log(`[N2F] APP_DIR = ${APP_DIR}`);
 
-    pythonProcess = spawn(PYTHON, [SERVER_SCRIPT], {
-      cwd: APP_DIR,
+    pythonProcess = spawn(cmd, args, {
+      cwd,
       env: { ...process.env, N2F_PORT: String(SERVER_PORT), N2F_ELECTRON: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
