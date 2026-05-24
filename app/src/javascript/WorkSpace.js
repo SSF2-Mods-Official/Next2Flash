@@ -21,6 +21,8 @@ class WorkSpace
         this._$revision     = [];
         this._$currentData  = null;
         this._$position     = 0;
+        this._$wsDbgId      = (WorkSpace._$wsDbgCounter = (WorkSpace._$wsDbgCounter || 0) + 1);
+        console.log(`[UNDO-DBG] new WorkSpace instance id=${this._$wsDbgId}`);
 
         // Command Pattern Undo/Redo (M6 refactoring)
         // Use this for efficient command-based undo instead of snapshot-based
@@ -533,6 +535,15 @@ class WorkSpace
      */
     temporarilySaved ()
     {
+        // Suppress snapshots while reloadData() is restoring state — otherwise
+        // tool side-effects (e.g. TransformTool.resetPointer) push the just-
+        // restored state back onto the stack, clobbering redo and turning
+        // every subsequent undo into a no-op.
+        if (this._$reloadInProgress) {
+            console.log(`[UNDO-DBG] temporarilySaved SUPPRESSED (reload in progress)`);
+            return;
+        }
+
         Util.$updated = true;
 
         if (this._$currentData) {
@@ -540,35 +551,30 @@ class WorkSpace
         }
 
         if (this._$position !== this._$revision.length) {
+            console.log(`[UNDO-DBG] temporarilySaved TRUNCATE revision from ${this._$revision.length} to ${this._$position}`);
             this._$revision.length = this._$position;
         }
 
-        // Deferred snapshot: push a lazy thunk that only serializes
-        // when undo is actually triggered.  The old requestIdleCallback
-        // eager-resolution caused 29s main-thread freezes on large files
-        // because toJSON(true) is O(N) over every library item / frame.
-        const self = this;
-        const idx  = this._$revision.length;
-        let resolved = false;
-        const thunk = {
-            _resolve () {
-                if (resolved) return;
-                resolved = true;
-                const json = self.toJSON(true);
-                self._$revision[idx] = json;
-                return json;
-            },
-            toString () { return this._resolve(); }
-        };
-        this._$revision.push(thunk);
+        const stack = (new Error()).stack.split('\n').slice(2, 5).map(s => s.trim()).join(' | ');
+        const json = this.toJSON(true);
+
+        // De-duplicate: if the top snapshot is identical to the new one, skip.
+        // (Happens when both a pre-edit and a post-edit save fire for the
+        // same logical action without any actual state change in between.)
+        if (this._$revision.length && this._$revision[this._$revision.length - 1] === json) {
+            console.log(`[UNDO-DBG] temporarilySaved DEDUPE (same as top) caller=${stack}`);
+            return;
+        }
+
+        this._$revision.push(json);
         this._$position++;
+        console.log(`[UNDO-DBG] temporarilySaved PUSH wsId=${this._$wsDbgId} pos=${this._$position} revLen=${this._$revision.length} jsonLen=${json.length} caller=${stack}`);
 
         // remove old data
         if (this._$revision.length > Util.REVISION_LIMIT) {
-
             this._$revision.shift();
-
             this._$position = this._$revision.length;
+            console.log(`[UNDO-DBG] temporarilySaved LIMIT_HIT pos=${this._$position}`);
         }
     }
 
@@ -581,22 +587,41 @@ class WorkSpace
      */
     undo ()
     {
+        console.log(`[UNDO-DBG] undo() ENTER wsId=${this._$wsDbgId} pos=${this._$position} revLen=${this._$revision.length} hasCurrentData=${!!this._$currentData}`);
         if (!this._$position) {
+            console.log(`[UNDO-DBG] undo() ABORT pos=0`);
             return ;
         }
 
+        const currentJson = this.toJSON(true);
         if (!this._$currentData) {
-            this._$currentData = this.toJSON(true);
+            this._$currentData = currentJson;
+            console.log(`[UNDO-DBG] undo() captured currentData len=${this._$currentData.length}`);
         }
 
-        const currentFrame = Util.$timelineFrame.currentFrame;
-        // Force-resolve lazy thunks before using them
-        let data = this._$revision[--this._$position];
-        if (data && typeof data === 'object' && data._resolve) {
-            data = data._resolve();
+        // Skip snapshots that match the current state — these are post-edit
+        // "save" calls (e.g. TransformTool.resetPointer fires AFTER a draw
+        // completes, snapshotting the already-mutated state). Without this,
+        // the first undo restores the SAME state and appears to do nothing.
+        let data = null;
+        while (this._$position > 0) {
+            const candidate = this._$revision[--this._$position];
+            if (candidate !== currentJson) {
+                data = candidate;
+                break;
+            }
+            console.log(`[UNDO-DBG] undo() SKIP same-as-current at pos=${this._$position}`);
         }
+
+        if (!data) {
+            console.log(`[UNDO-DBG] undo() ABORT - no distinct prior state found`);
+            return ;
+        }
+
+        console.log(`[UNDO-DBG] undo() RESTORING pos=${this._$position} dataLen=${data.length}`);
         this.reloadData(data);
         Util.$timelineFrame.currentFrame = 0;
+        console.log(`[UNDO-DBG] undo() DONE pos=${this._$position}`);
     }
 
     /**
@@ -608,42 +633,43 @@ class WorkSpace
      */
     redo ()
     {
+        console.log(`[UNDO-DBG] redo() ENTER wsId=${this._$wsDbgId} pos=${this._$position} revLen=${this._$revision.length} hasCurrentData=${!!this._$currentData}`);
         if (!this._$revision.length
             || this._$position === this._$revision.length
         ) {
+            console.log(`[UNDO-DBG] redo() ABORT - at top of stack`);
             return ;
         }
 
+        const currentJson = this.toJSON(true);
         let data = null;
-        if (this._$position + 1 === this._$revision.length) {
 
-            if (!this._$currentData) {
-                return ;
+        // Skip snapshots that match current state (mirror of undo() logic)
+        while (this._$position < this._$revision.length) {
+            const candidate = this._$revision[this._$position++];
+            if (candidate !== currentJson) {
+                data = candidate;
+                break;
             }
-
-            data = this._$currentData;
-
-            this._$position++;
-            this._$currentData = null;
-
-        } else {
-
-            data = this._$revision[++this._$position];
-
+            console.log(`[UNDO-DBG] redo() SKIP same-as-current at pos=${this._$position - 1}`);
         }
 
-        // Force-resolve lazy thunks
-        if (data && typeof data === 'object' && data._resolve) {
-            data = data._resolve();
+        // Fall through to stashed currentData if at top
+        if (!data && this._$currentData && this._$currentData !== currentJson) {
+            data = this._$currentData;
+            this._$currentData = null;
+            console.log(`[UNDO-DBG] redo() using stashed currentData`);
         }
 
         if (!data) {
+            console.log(`[UNDO-DBG] redo() ABORT - no distinct forward state`);
             return ;
         }
 
-        const currentFrame = Util.$timelineFrame.currentFrame;
+        console.log(`[UNDO-DBG] redo() RESTORING pos=${this._$position} dataLen=${data.length}`);
         this.reloadData(data);
         Util.$timelineFrame.currentFrame = 0;
+        console.log(`[UNDO-DBG] redo() DONE pos=${this._$position}`);
     }
 
     /**
@@ -656,6 +682,8 @@ class WorkSpace
      */
     reloadData (data)
     {
+        console.log(`[UNDO-DBG] reloadData() ENTER dataType=${typeof data} dataLen=${typeof data === 'string' ? data.length : 'N/A'} sceneId=${this._$scene && this._$scene.id} curFrame=${Util.$timelineFrame && Util.$timelineFrame.currentFrame}`);
+        this._$reloadInProgress = true;
         // 選択中のレイヤーを保持
         const layerIds = [];
         const targetLayers = Util.$timelineLayer.targetLayers;
@@ -716,6 +744,48 @@ class WorkSpace
 
             Util.$ctrlKey = ctrlKey;
         }
+
+        // Force screen redraw after undo/redo. Manual changeFrame+pointer
+        // reset wasn't reliably triggering a visual repaint. The user has
+        // confirmed that zooming in/out fixes the display, so invoke the
+        // exact same code path: ScreenZoom.execute(0) (delta=0 keeps zoom
+        // level identical but runs the full dispose → changeFrame → DOM
+        // pointer reset → ruler rebuild pipeline).
+        try {
+            const self = this;
+            if (Util.$screenZoom && typeof Util.$screenZoom.execute === "function") {
+                console.log(`[UNDO-DBG] reloadData() invoking ScreenZoom.execute(0)`);
+                Util.$screenZoom.execute(0);
+                // ScreenZoom.execute fires changeFrame asynchronously without
+                // returning the promise. Clear the reload guard on the next
+                // microtask tick — by then the dispose loop has already run
+                // and only the async DOM reset remains, which doesn't call
+                // temporarilySaved.
+                Promise.resolve().then(() => {
+                    self._$reloadInProgress = false;
+                    console.log(`[UNDO-DBG] reloadData() ASYNC DONE`);
+                });
+            } else {
+                // Fallback: direct changeFrame
+                const frame = Util.$timelineFrame
+                    ? Util.$timelineFrame.currentFrame
+                    : this._$scene.currentFrame;
+                for (const layer of this._$scene._$layers.values()) {
+                    for (let i = 0; i < layer._$characters.length; ++i) {
+                        layer._$characters[i].dispose();
+                    }
+                }
+                this._$scene.changeFrame(frame).then(() => {
+                    self._$reloadInProgress = false;
+                }).catch(() => {
+                    self._$reloadInProgress = false;
+                });
+            }
+        } catch (e) {
+            this._$reloadInProgress = false;
+            console.warn("[UNDO-DBG] reloadData: redraw failed", e);
+        }
+        console.log(`[UNDO-DBG] reloadData() EXIT (async pending)`);
     }
 
     /**

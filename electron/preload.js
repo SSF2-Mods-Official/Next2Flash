@@ -34,6 +34,12 @@ contextBridge.exposeInMainWorld('n2fElectron', {
   onMenuExportSWF: (callback) => {
     ipcRenderer.on('menu:export-swf', () => callback());
   },
+  onMenuUndo: (callback) => {
+    ipcRenderer.on('menu:undo', () => callback());
+  },
+  onMenuRedo: (callback) => {
+    ipcRenderer.on('menu:redo', () => callback());
+  },
   onImportSWF: (callback) => {
     ipcRenderer.on('file:import-swf', (_event, filePath) => callback(filePath));
   },

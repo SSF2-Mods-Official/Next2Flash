@@ -77,6 +77,27 @@ app.on('second-instance', () => {
 
 function startPythonServer() {
   return new Promise((resolve, reject) => {
+    // N2F_SKIP_SERVER_SPAWN=1 means the server was pre-started externally
+    // (e.g. by Next2Flash-Desktop.bat). Just wait for it to respond.
+    if (process.env.N2F_SKIP_SERVER_SPAWN === '1') {
+      console.log('[N2F] N2F_SKIP_SERVER_SPAWN set — connecting to pre-started server');
+      const startTime = Date.now();
+      const TIMEOUT = 30000;
+      function pollExternal() {
+        if (Date.now() - startTime > TIMEOUT) {
+          return reject(new Error('Pre-started server did not respond within 30 s'));
+        }
+        const req = http.get(`${SERVER_URL}/api/health`, (res) => {
+          if (res.statusCode === 200) { console.log('[N2F] External server ready'); resolve(); }
+          else { setTimeout(pollExternal, 200); }
+        });
+        req.on('error', () => setTimeout(pollExternal, 200));
+        req.setTimeout(1000, () => { req.destroy(); setTimeout(pollExternal, 200); });
+      }
+      setTimeout(pollExternal, 200);
+      return;
+    }
+
     // Packaged: run the bundled server.exe (no Python needed on host).
     // Dev: run `python server.py` as before.
     let cmd, args, cwd;
@@ -402,8 +423,16 @@ function buildMenu() {
     {
       label: 'Edit',
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
+        {
+          label: 'Undo',
+          accelerator: 'CmdOrCtrl+Z',
+          click: () => mainWindow?.webContents.send('menu:undo'),
+        },
+        {
+          label: 'Redo',
+          accelerator: 'CmdOrCtrl+Shift+Z',
+          click: () => mainWindow?.webContents.send('menu:redo'),
+        },
         { type: 'separator' },
         { role: 'cut' },
         { role: 'copy' },

@@ -184,6 +184,18 @@
       window.n2fElectron.onMenuSave(onSaveProject);
       window.n2fElectron.onMenuExportSWF(onExportSWF);
       window.n2fElectron.onImportSWF(function (swfPath) { _importSWFByPath(swfPath); });
+      if (window.n2fElectron.onMenuUndo) {
+        window.n2fElectron.onMenuUndo(function () {
+          var ws = Util.$currentWorkSpace();
+          if (ws) ws.undo();
+        });
+      }
+      if (window.n2fElectron.onMenuRedo) {
+        window.n2fElectron.onMenuRedo(function () {
+          var ws = Util.$currentWorkSpace();
+          if (ws) ws.redo();
+        });
+      }
       _log.info('Electron bridge detected — native menu/dialogs active');
     }
   }

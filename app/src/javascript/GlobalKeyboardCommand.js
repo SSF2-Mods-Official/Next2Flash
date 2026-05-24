@@ -56,16 +56,16 @@ class GlobalKeyboardCommand
             this._$handler = null;
         }
 
-        // 元に戻す
-        Util.$setShortcut(
+        // 元に戻す — global so it fires even when keyLock is active
+        Util.$setGlobalShortcut(
             Util.$generateShortcutKey("z", { "ctrl": true }),
-            this.undo
+            this.undo.bind(this)
         );
 
-        // 戻したデータを進める
-        Util.$setShortcut(
+        // 戻したデータを進める — global so it fires even when keyLock is active
+        Util.$setGlobalShortcut(
             Util.$generateShortcutKey("z", { "ctrl": true, "shift": true }),
-            this.redo
+            this.redo.bind(this)
         );
 
         // データをローカルに保存
