@@ -1,6 +1,8 @@
 # Generated output
 app/converted/
+app/build_tmp/
 dist/
+build/
 
 # Dependencies
 app/node_modules/
