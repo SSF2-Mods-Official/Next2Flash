@@ -36,7 +36,14 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 #  Locate converter modules (they live alongside this server.py)
 # ---------------------------------------------------------------------------
-SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    # Running as a PyInstaller-bundled exe.
+    # Electron sets cwd to resources/app/ (contains index.html, assets/, etc.)
+    # and also passes N2F_WEB_ROOT for safety. __file__ would be sys._MEIPASS
+    # which only has the extracted Python runtime — NOT the web files.
+    SERVER_DIR = os.environ.get('N2F_WEB_ROOT', os.getcwd())
+else:
+    SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_DIR = SERVER_DIR  # In STABLE, HTML/CSS/JS are at the root level
 
 # Make sure our converter scripts are importable

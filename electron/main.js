@@ -95,7 +95,7 @@ function startPythonServer() {
 
     pythonProcess = spawn(cmd, args, {
       cwd,
-      env: { ...process.env, N2F_PORT: String(SERVER_PORT), N2F_ELECTRON: '1' },
+      env: { ...process.env, N2F_PORT: String(SERVER_PORT), N2F_ELECTRON: '1', N2F_WEB_ROOT: cwd },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -122,9 +122,10 @@ function startPythonServer() {
       sendConsoleStatus('stopped', `Exited (code ${code})`);
     });
 
-    // Poll until the server responds
+    // Poll until the server responds.
+    // PyInstaller onefile extracts ~33 MB on first run — allow 90 s.
     const startTime = Date.now();
-    const TIMEOUT = 15000;
+    const TIMEOUT = 90000;
 
     function poll() {
       if (Date.now() - startTime > TIMEOUT) {
@@ -583,9 +584,12 @@ app.whenReady().then(async () => {
     sendConsoleStatus('running', `Running on port ${SERVER_PORT}`);
   } catch (err) {
     closeSplash();
+    const hint = app.isPackaged
+      ? 'The bundled server failed to start. Try running Next2Flash.exe as Administrator\nor check that your antivirus is not blocking server.exe.'
+      : 'Make sure Python 3.10+ is installed and on PATH.\nOr set the N2F_PYTHON environment variable.';
     dialog.showErrorBox(
-      'Failed to start Python server',
-      `${err.message}\n\nMake sure Python 3.10+ is installed and on PATH.\nOr set the N2F_PYTHON environment variable.`
+      'Failed to start server',
+      `${err.message}\n\n${hint}`
     );
     app.quit();
     return;
