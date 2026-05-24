@@ -253,12 +253,13 @@ function createServerConsoleWindow() {
 
   // Replay buffered log history and send current status once the window is ready
   serverConsoleWindow.webContents.once('did-finish-load', () => {
-    for (const entry of consoleLogBuffer) {
-      serverConsoleWindow.webContents.send('console:log', entry);
-    }
     const state = pythonProcess ? 'running' : 'stopped';
     const text = pythonProcess ? `Running on port ${SERVER_PORT}` : 'Stopped';
-    serverConsoleWindow.webContents.send('console:status', state, text);
+    serverConsoleWindow.webContents.send('console:bootstrap', {
+      entries: consoleLogBuffer,
+      state,
+      text,
+    });
   });
 
   serverConsoleWindow.on('closed', () => {
@@ -521,6 +522,7 @@ ipcMain.on('debug:log', (_event, msg) => {
   const line = msg + '\n';
   process.stdout.write(line);
   debugLogStream.write(line);
+  sendConsoleLog(line, 'system');
 });
 
 // IPC: open server console from renderer (e.g. on error)

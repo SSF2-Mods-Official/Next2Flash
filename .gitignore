@@ -1,5 +1,6 @@
 # Generated output
 app/converted/
+dist/
 
 # Dependencies
 app/node_modules/
@@ -7,13 +8,17 @@ electron/node_modules/
 node_modules/
 
 # Lock files
-package-lock.json
+app/package-lock.json
+electron/package-lock.json
 
 # Python bytecode
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+
+# Python virtual environment
+.venv/
 
 # Test artifacts
 app/test_*.txt
@@ -26,19 +31,9 @@ app/test_sound.txt
 app/test_response.json
 app/final_test.txt
 
-# Dev / debug scripts
+# Dev / debug scripts and data (not needed for release)
 app/_dev/
-app/_check_n2d.py
-app/trace_*.py
-app/verify_*.py
-app/debug_*.py
-app/diagnose_*.py
-app/scan_scales.py
-app/check_exported.py
-app/create_corrupt_test.py
-
-# Archive docs
-_archive_mds/
+_dev_docs/
 
 # OS files
 Thumbs.db

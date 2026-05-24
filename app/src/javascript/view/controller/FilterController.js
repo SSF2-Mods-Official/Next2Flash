@@ -820,6 +820,120 @@ class FilterController extends GradientFilterController
     }
 
     /**
+     * @description ColorMatrix(AdjustColor)の彩度を更新
+     *              Update ColorMatrix (AdjustColor) saturation
+     *
+     * @param  {string} value
+     * @return {number}
+     * @method
+     * @public
+     */
+    changeColorMatrixSaturation (value)
+    {
+        value = Util.$clamp(+value, -100, 100);
+
+        this.updateProperty("saturation", value);
+
+        return value;
+    }
+
+    /**
+     * @description ColorMatrix(AdjustColor)の明るさを更新
+     *              Update ColorMatrix (AdjustColor) brightness
+     *
+     * @param  {string} value
+     * @return {number}
+     * @method
+     * @public
+     */
+    changeColorMatrixBrightness (value)
+    {
+        value = Util.$clamp(+value, -100, 100);
+
+        this.updateProperty("brightness", value);
+
+        return value;
+    }
+
+    /**
+     * @description ColorMatrix(AdjustColor)のコントラストを更新
+     *              Update ColorMatrix (AdjustColor) contrast
+     *
+     * @param  {string} value
+     * @return {number}
+     * @method
+     * @public
+     */
+    changeColorMatrixContrast (value)
+    {
+        value = Util.$clamp(+value, -100, 100);
+
+        this.updateProperty("contrast", value);
+
+        return value;
+    }
+
+    /**
+     * @description ColorMatrix(AdjustColor)の色相を更新
+     *              Update ColorMatrix (AdjustColor) hue
+     *
+     * @param  {string} value
+     * @return {number}
+     * @method
+     * @public
+     */
+    changeColorMatrixHue (value)
+    {
+        value = Util.$clamp(+value, -180, 180);
+
+        this.updateProperty("hue", value);
+
+        return value;
+    }
+
+    /**
+     * @description ColorMatrix入力中のリアルタイム更新イベントを登録
+     *              Register realtime update event while ColorMatrix values are edited
+     *
+     * @param  {HTMLInputElement} element
+     * @return {void}
+     * @method
+     * @public
+     */
+    setColorMatrixLiveInputEvent (element)
+    {
+        if (!element) {
+            return ;
+        }
+
+        element.addEventListener("input", (event) =>
+        {
+            const rawValue = `${event.target.value}`;
+
+            // Ignore incomplete numeric typing states during live updates.
+            if (rawValue === "" || rawValue === "-") {
+                return ;
+            }
+
+            this._$currentTarget = event.target;
+
+            const value = this.executeFunction(
+                event.target.id,
+                rawValue
+            );
+
+            console.warn(
+                `[N2F-DBG] colorMatrix live id=${event.target.id} raw=${rawValue} clamped=${value} frame=${Util.$timelineFrame.currentFrame} zoom=${Util.$zoomScale}`
+            );
+
+            this._$currentTarget = null;
+
+            // updateProperty already disposes character cache.
+            this.reloadScreen();
+        });
+    }
+
+    /**
      * @description 指定プロパティーの値を更新
      *              Update the value of the specified property
      *
@@ -1078,7 +1192,7 @@ class FilterController extends GradientFilterController
      *              Generate filter objects and register them in the mapping
      *
      * @param  {function} filterClass
-     * @param  {DropShadowFilter|BlurFilter|GlowFilter|BevelFilter|GradientGlowFilter|GradientBevelFilter} [filter=null]
+    * @param  {DropShadowFilter|BlurFilter|GlowFilter|BevelFilter|ColorMatrixFilter|GradientGlowFilter|GradientBevelFilter} [filter=null]
      * @return {number}
      * @method
      * @public
@@ -1608,6 +1722,77 @@ ${FilterHTML.createHeaderHTML(id, "Bevel")}
         }
 
         // 内部キャッシュを削除
+        if (reload) {
+            this.disposeCharacterImage();
+        }
+
+        Util.$addModalEvent(
+            document.getElementById(`filter-id-${id}`)
+        );
+    }
+
+    /**
+     * @description ColorMatrixFilterの設定項目をコントローラーに追加
+     *              Added ColorMatrixFilter configuration item to controller
+     *
+     * @param  {ColorMatrixFilter} [filter=null]
+     * @param  {boolean} [reload=true]
+     * @return {void}
+     * @method
+     * @public
+     */
+    addColorMatrixFilter (filter = null, reload = true)
+    {
+        const element = document.getElementById("filter-setting-list");
+        if (!element) {
+            return ;
+        }
+
+        const id = this.createFilter(ColorMatrixFilter, filter);
+        if (0 > id) {
+            return ;
+        }
+
+        if (!filter) {
+            filter = this._$filters.get(id).filter;
+        }
+
+        const htmlTag = `
+${FilterHTML.createHeaderHTML(id, "ColorMatrix", true)}
+
+        <div class="filter-view-area-right">
+
+            ${FilterHTML.createColorMatrix(
+                id,
+                filter.brightness,
+                filter.contrast,
+                filter.hue,
+                filter.saturation,
+                filter.isCustomMatrix
+            )}
+
+        </div>
+    </div>
+</div>
+`;
+
+        element.insertAdjacentHTML("beforeend", htmlTag);
+
+        this.setCommonEvent(id);
+
+        const inputIds = [
+            `colorMatrix-brightness-${id}`,
+            `colorMatrix-contrast-${id}`,
+            `colorMatrix-hue-${id}`,
+            `colorMatrix-saturation-${id}`
+        ];
+
+        for (let idx = 0; idx < inputIds.length; ++idx) {
+            const input = document.getElementById(inputIds[idx]);
+            this.setInputEvent(input);
+            this.setColorMatrixLiveInputEvent(input);
+        }
+
         if (reload) {
             this.disposeCharacterImage();
         }

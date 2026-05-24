@@ -21,10 +21,18 @@ class Filter
         this._$name    = "";
 
         if (object) {
-            this.blurX   = object.blurX;
-            this.blurY   = object.blurY;
-            this.quality = object.quality | 0;
-            this.state   = object.state;
+            if (object.blurX !== undefined) {
+                this.blurX = object.blurX;
+            }
+            if (object.blurY !== undefined) {
+                this.blurY = object.blurY;
+            }
+            if (object.quality !== undefined) {
+                this.quality = object.quality | 0;
+            }
+            if (object.state !== undefined) {
+                this.state = object.state;
+            }
         }
     }
 

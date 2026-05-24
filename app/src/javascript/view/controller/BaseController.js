@@ -343,7 +343,9 @@ class BaseController
             return ;
         }
 
-        console.warn(`[N2F-DBG] reloadScreen EXECUTING frame=${Util.$timelineFrame.currentFrame}`);
+        console.warn(
+            `[N2F-DBG] reloadScreen EXECUTING frame=${Util.$timelineFrame.currentFrame} zoom=${Util.$zoomScale}`
+        );
         BaseController._$reloading = true;
         BaseController._$pendingReload = false;
 
@@ -360,8 +362,14 @@ class BaseController
                     this.reloadScreen();
                 }
             })
-            .catch(() =>
+            .catch((error) =>
             {
+                const message = error && error.message
+                    ? error.message
+                    : `${error}`;
+                console.warn(
+                    `[N2F-DBG] reloadScreen ERROR frame=${Util.$timelineFrame.currentFrame} zoom=${Util.$zoomScale} message=${message}`
+                );
                 BaseController._$reloading = false;
             });
     }
