@@ -17,6 +17,23 @@ Import a SWF, edit it visually, export it back to a working SWF — no Adobe Ani
 
 ---
 
+> ## ⚠️ Heads up — this is alpha software
+>
+> **Next2Flash is still very much a work in progress and is *not* production‑ready.**
+>
+> Expect:
+> - 🐛 **Bugs in nearly every workflow** — imports may drop characters, exports may produce SWFs that play differently than the original, undo/redo can desync, the editor can lag or freeze on large projects.
+> - 🧪 **Half‑finished features** — many controllers, tools, and menu items are wired up but not fully implemented or only work in narrow cases.
+> - 💾 **No guarantees about your project files** — save often, keep backups, and don't trust a single `.n2f` as your only copy. Autosave‑on‑close is currently *disabled*.
+> - 🔁 **Round‑trip is not byte‑perfect** — even untouched SWFs can come out structurally different. AS3 may fall back to the original bytecode if recompile fails.
+> - 🏗️ **Architecture is still moving** — APIs, project format, IPC channels, and folder layout can change between commits without notice.
+>
+> Getting all of the advertised "features" working flawlessly is going to take a **lot** more iteration. If you're here, you're an early tester — please open issues with reproducible cases, and don't be surprised when things break.
+>
+> **TL;DR:** cool toy, do not ship anything important with it yet.
+
+---
+
 ## ✨ What is it?
 
 **Next2Flash** is a desktop SWF authoring tool built on top of the [Next2D](https://next2d.app/) NoCode editor. It gives you a visual timeline + stage workflow for editing existing SWF files (shapes, bitmaps, movie clips, fonts, ActionScript 3) and writes a new, runnable SWF on export.
