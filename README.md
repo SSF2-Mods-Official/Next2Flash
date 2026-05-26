@@ -24,7 +24,7 @@ Import a SWF, edit it visually, export it back to a working SWF — no Adobe Ani
 > Expect:
 > - 🐛 **Bugs in nearly every workflow** — imports may drop characters, exports may produce SWFs that play differently than the original, undo/redo can desync, the editor can lag or freeze on large projects.
 > - 🧪 **Half‑finished features** — many controllers, tools, and menu items are wired up but not fully implemented or only work in narrow cases.
-> - 💾 **No guarantees about your project files** — save often, keep backups, and don't trust a single `.n2f` as your only copy. Autosave‑on‑close is currently *disabled*.
+> - 💾 **No guarantees about your project files** — save often, keep backups, and don't trust a single `.n2d` as your only copy. Autosave‑on‑close is currently *disabled*.
 > - 🔁 **Round‑trip is not byte‑perfect** — even untouched SWFs can come out structurally different. AS3 may fall back to the original bytecode if recompile fails.
 > - 🏗️ **Architecture is still moving** — APIs, project format, IPC channels, and folder layout can change between commits without notice.
 >
