@@ -3,6 +3,8 @@
 # Next2Flash
 
 **A modern desktop editor for round‑tripping SWF files.**
+<img width="2382" height="1359" alt="image" src="https://github.com/user-attachments/assets/7cb58e20-1c8b-4bd7-a6d8-865fc909b503" />
+
 
 Import a SWF, edit it visually, export it back to a working SWF — no Adobe Animate required.
 
