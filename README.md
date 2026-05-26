@@ -10,6 +10,9 @@ Import a SWF, edit it visually, export it back to a working SWF — no Adobe Ani
 [![Electron](https://img.shields.io/badge/Electron-desktop-2b2e3a?logo=electron)](#)
 [![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](#)
 [![License](https://img.shields.io/badge/license-See%20LICENSE-lightgrey)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/MaJFnhHpYx)
+
+### 💬 Questions, bug reports, or just want to chat? [**Join the Discord →**](https://discord.gg/MaJFnhHpYx)
 
 [Quick Start](#-quick-start) · [Features](#-features) · [Usage](#-usage) · [Building from Source](#-building-from-source) · [Project Layout](#-project-layout) · [Troubleshooting](#-troubleshooting)
 
