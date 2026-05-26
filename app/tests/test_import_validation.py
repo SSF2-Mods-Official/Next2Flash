@@ -20,9 +20,10 @@ import traceback
 # Ensure we can import from app/
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_SSF = (
-    r"C:\Users\glwex\Documents\GitHub\ssf2-idk-140x-original"
-    r"\src\Super Smash Flash 2 Beta v1.4.0.1\data\character\fox.ssf"
+# Set N2F_TEST_SWF env var or replace this path with your local SWF file
+DEFAULT_SSF = os.environ.get(
+    'N2F_TEST_SWF',
+    r'\path\to\your.swf'
 )
 
 

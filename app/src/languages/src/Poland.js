@@ -221,6 +221,7 @@ class Poland extends Language
             ["{{塗りのカラー}}", "Kolor farby"],
             ["{{線のカラー}}", "Kolor linii"],
             ["{{線の太さ}}", "grubość linii"],
+            ["{{新規プロジェクト}}", "Nowy projekt"],
             ["{{プロジェクトデータの読込}}", "Odczytywanie danych projektowych"],
             ["{{プロジェクトデータを保存}}", "Zapisz dane projektu."],
             ["{{書き出し}}", "zdanie wstępne lub akapit"],

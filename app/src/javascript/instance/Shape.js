@@ -1161,7 +1161,6 @@ class Shape extends Instance
         const { Graphics } = window.next2d.display;
 
         const index = Util.$hitColor.index;
-        console.warn(`[N2F-DBG] Shape.changeColor START shapeId=${this.id} style=${Util.$hitColor.style} index=${index} color_index=${color_index}`);
         switch (Util.$hitColor.style) {
 
             case Graphics.BITMAP_FILL:
@@ -1202,7 +1201,6 @@ class Shape extends Instance
                     const newAlpha = Util.$clamp((document
                         .getElementById("fill-alpha-value")
                         .value | 0) / 100 * 255, 0, 255);
-                    console.warn(`[N2F-DBG] FILL_STYLE update: idx=${index} R=${color.R} G=${color.G} B=${color.B} A=${newAlpha} (was R=${this._$recodes[index]} G=${this._$recodes[index+1]} B=${this._$recodes[index+2]} A=${this._$recodes[index+3]})`);
                     this._$recodes[index    ] = color.R;
                     this._$recodes[index + 1] = color.G;
                     this._$recodes[index + 2] = color.B;
@@ -1323,7 +1321,6 @@ class Shape extends Instance
 
         }
 
-        console.warn(`[N2F-DBG] Shape.changeColor END shapeId=${this.id} - calling cacheClear`);
         this.cacheClear();
     }
 
@@ -1350,16 +1347,12 @@ class Shape extends Instance
                     continue;
                 }
 
-                const hadCanvas = !!character._$canvas;
-                const hadTfCache = !!character._$transformCache;
                 character.disposeAll();
                 disposedCount++;
-                console.warn(`[N2F-DBG] cacheClear: disposed char libId=${character.libraryId} hadCanvas=${hadCanvas} hadTfCache=${hadTfCache} nowCanvas=${!!character._$canvas} nowTfCache=${!!character._$transformCache}`);
             }
         }
 
         this._$recodeVersion = (this._$recodeVersion || 0) + 1;
-        console.warn(`[N2F-DBG] cacheClear: shapeId=${this.id} disposed=${disposedCount} chars, recodeVersion=${this._$recodeVersion}, nulling _$graphicBuffer (was ${this._$graphicBuffer ? 'non-null len=' + this._$graphicBuffer.length : 'null'})`);
         this._$graphicBuffer = null;
     }
 
@@ -1861,9 +1854,6 @@ class Shape extends Instance
     {
         this.constructor._patchFastGetRecodes();
 
-        const _siPlayback = !Util.$timelinePlayer._$stopFlag;
-        const _siT0 = _siPlayback ? performance.now() : 0;
-
         const { Shape, Graphics } = window.next2d.display;
 
         const shape = new Shape();
@@ -1989,7 +1979,6 @@ class Shape extends Instance
             this._$graphicBuffer = null;
         }
 
-        const bufferWasNull = !this._$graphicBuffer;
         if (!this._$graphicBuffer) {
 
             // Resolve numeric bitmap library IDs to BitmapData objects.
@@ -2107,10 +2096,6 @@ class Shape extends Instance
             ) {
                 // Hydration can briefly provide empty recodes; keep prior drawable buffer until valid data arrives.
                 this._$graphicBuffer = previousGraphicBuffer;
-                console.warn(
-                    `[N2F-DBG] createInstance shapeId=${this.id} EMPTY_REBUILD_FALLBACK `
-                    + `prevBufferLen=${previousGraphicBuffer.length} hydrationVersion=${hydrationVersion}`
-                );
                 // Intentionally keep _$bufferVersion unchanged so we retry rebuilding on next draw.
             } else {
                 this._$graphicBuffer = rebuiltGraphicBuffer;
@@ -2118,30 +2103,6 @@ class Shape extends Instance
             }
         }
         graphics._$buffer = this._$graphicBuffer;
-
-        // Debug: log whether buffer was rebuilt for this shape
-        {
-            const { Graphics: _G } = window.next2d.display;
-            const _rc = graphics._$recode;
-            let _dbgFillInfo = '';
-            if (_rc) {
-                for (let _di = 0; _di < _rc.length; _di++) {
-                    if (_rc[_di] === _G.FILL_STYLE) {
-                        _dbgFillInfo += ` FILL@${_di}:R=${_rc[_di+1]},G=${_rc[_di+2]},B=${_rc[_di+3]},A=${_rc[_di+4]}`;
-                    }
-                }
-            }
-            console.warn(`[N2F-DBG] createInstance shapeId=${this.id} bufferRebuilt=${bufferWasNull} bufferLen=${this._$graphicBuffer ? this._$graphicBuffer.length : 'null'} recodeLen=${this._$recodes.length}${_dbgFillInfo}`);
-        }
-
-        if (_siPlayback) {
-            const _siT1 = performance.now();
-            const _siTotal = _siT1 - _siT0;
-            if (_siTotal > 10) {
-                const _msg = `[ShapeInstDbg] shape.id=${this.id} recodes=${this._$recodes.length} bufferCached=${this._$bufferVersion === (Util.$hydrationVersion|0)} total=${_siTotal.toFixed(1)}ms`;
-                if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.warn(_msg);
-            }
-        }
 
         return shape;
     }
@@ -2157,10 +2118,7 @@ class Shape extends Instance
             && data.recodes.length === 0
             && this._$recodes.length > 0
         ) {
-            console.warn(
-                `[N2F-DBG] Shape._applyHydratedData skip-empty-recodes shapeId=${this.id} `
-                + `existingLen=${this._$recodes.length}`
-            );
+            // empty recodes — skip override
         }
         if (data.bounds) {
             this.bounds = data.bounds;

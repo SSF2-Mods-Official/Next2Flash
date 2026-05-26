@@ -131,7 +131,7 @@ def build_define_edit_text(
                 log.warning("build_define_edit_text: font '%s' not found in font_map %s — using device font",
                             font_name, list(font_map.keys()))
             else:
-                log.debug("build_define_edit_text: font '%s' → charID %d", font_name, font_id)
+                log.debug("build_define_edit_text: font '%s' -> charID %d", font_name, font_id)
         body.write(struct.pack("<H", font_id))
 
     # FontHeight (UI16) in twips

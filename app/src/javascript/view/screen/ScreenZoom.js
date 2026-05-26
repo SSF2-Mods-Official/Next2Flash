@@ -105,16 +105,12 @@ class ScreenZoom extends BaseScreen
 
         const workSpace = Util.$currentWorkSpace();
 
-        // DisplayObjectのキャッシュを全て削除
+        // Re-render at the new zoom level.  cacheClear() disposes all cached
+        // character canvases so they are redrawn at the new renderScale
+        // (dpr × zoomScale) by Instance.draw().
         const frame = Util.$timelineFrame.currentFrame;
         const scene = workSpace.scene;
-        for (const layer of scene._$layers.values()) {
-            for (let idx = 0; idx < layer._$characters.length; ++idx) {
-                layer._$characters[idx].dispose();
-            }
-        }
-
-        // 再描画
+        scene.cacheClear();
         scene
             .changeFrame(frame)
             .then(() =>

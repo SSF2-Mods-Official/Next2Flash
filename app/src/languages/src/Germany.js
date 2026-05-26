@@ -221,6 +221,7 @@ class Germany extends Language
             ["{{塗りのカラー}}", "Farbe des Anstrichs"],
             ["{{線のカラー}}", "Farbe der Linie"],
             ["{{線の太さ}}", "Linienstärke"],
+            ["{{新規プロジェクト}}", "Neues Projekt"],
             ["{{プロジェクトデータの読込}}", "Lesen von Projektdaten"],
             ["{{プロジェクトデータを保存}}", "Projektdaten speichern."],
             ["{{書き出し}}", "Einleitungssatz oder Absatz"],

@@ -381,29 +381,18 @@ class MovieClip extends Instance
         }
 
         const isPlayback = !Util.$timelinePlayer.stopFlag;
-        const _frameT0 = isPlayback ? performance.now() : 0;
 
         const layers = Array.from(this._$layers.values());
 
-        let _dbgTotal = 0, _dbgSkipDisable = 0, _dbgSkipMask = 0, _dbgActive = 0;
         while (layers.length) {
             const layer = layers.pop();
-            _dbgTotal++;
             if (layer.disable) {
-                _dbgSkipDisable++;
                 continue;
             }
             if (layer.mode === LayerMode.MASK && layer.lock) {
-                _dbgSkipMask++;
                 continue;
             }
-            _dbgActive++;
             promises.push(layer.appendCharacter(frame));
-        }
-        if (!isPlayback) {
-            console.log('[MCDbg] changeFrame=' + frame + ' layers=' + _dbgTotal +
-                ' skipDisable=' + _dbgSkipDisable + ' skipMask=' + _dbgSkipMask +
-                ' active=' + _dbgActive + ' promises=' + promises.length);
         }
 
         this._$currentFrame = frame;
@@ -413,41 +402,16 @@ class MovieClip extends Instance
             {
                 // Unwrap settled results: extract values, skip rejected
                 const values = [];
-                let _dbgRejected = 0;
                 for (let ri = 0; ri < results.length; ri++) {
                     if (results[ri].status === "fulfilled") {
                         values.push(results[ri].value);
                     } else {
                         values.push(null);
-                        _dbgRejected++;
                     }
                 }
-
-                if (!isPlayback) {
-                    let _dbgNull = 0, _dbgObj = 0, _dbgArr = 0, _dbgArrNull = 0;
-                    for (let _vi = 0; _vi < values.length; _vi++) {
-                        var _v = values[_vi];
-                        if (!_v) { _dbgNull++; }
-                        else if (Array.isArray(_v)) {
-                            _dbgArr++;
-                            for (var _ai = 0; _ai < _v.length; _ai++) {
-                                if (!_v[_ai]) _dbgArrNull++;
-                            }
-                        }
-                        else { _dbgObj++; }
-                    }
-                    console.log('[MCDbg] results frame=' + frame +
-                        ' total=' + values.length + ' rejected=' + _dbgRejected +
-                        ' null=' + _dbgNull + ' obj=' + _dbgObj +
-                        ' arr=' + _dbgArr + ' arrNull=' + _dbgArrNull);
-                }
-
-                const _frameT1 = isPlayback ? performance.now() : 0;
 
                 // ステージのelementを全て削除
                 Util.$screen.clearStageArea();
-
-                const _frameT2 = isPlayback ? performance.now() : 0;
 
                 const pointers = [];
                 const children = element.children;
@@ -489,17 +453,6 @@ class MovieClip extends Instance
 
                 // During playback, skip editor UI updates (pointers, tween, transform)
                 if (isPlayback) {
-                    const _frameT3 = performance.now();
-                    const _renderTime = _frameT1 - _frameT0;
-                    const _clearTime = _frameT2 - _frameT1;
-                    const _domTime = _frameT3 - _frameT2;
-                    const _totalFrame = _frameT3 - _frameT0;
-                    let _cacheHits = 0, _cacheMisses = 0;
-                    for (let _vi = 0; _vi < values.length; _vi++) {
-                        if (values[_vi]) _cacheMisses++; else _cacheHits++;
-                    }
-                    const _msg = `[FrameDbg] frame=${frame} chars=${values.length} hits=${_cacheHits} misses=${_cacheMisses} | render=${_renderTime.toFixed(1)} clear=${_clearTime.toFixed(1)} dom=${_domTime.toFixed(1)} total=${_totalFrame.toFixed(1)}ms`;
-                    if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.warn(_msg);
                     while (Util.$sleepCanvases.length) {
                         Util.$poolCanvas(Util.$sleepCanvases.pop());
                     }
@@ -708,6 +661,7 @@ class MovieClip extends Instance
             ];
 
             const workSpace = Util.$currentWorkSpace();
+            if (!workSpace) { return; }
             for (let idx = 0; children.length > idx; ++idx) {
 
                 const node = children[idx];
@@ -793,6 +747,16 @@ class MovieClip extends Instance
             const layer = this.getLayer(
                 children[idx].dataset.layerId | 0
             );
+
+            // Defensive: timeline-content may contain a DOM row whose dataset.layerId
+            // points at a layer that no longer exists on this MovieClip (e.g. a stale
+            // row left behind from a previous workspace whose new-project flow did not
+            // call removeAll() before this MovieClip's stop() ran). Skip cleanly
+            // instead of throwing "Cannot read properties of undefined (reading
+            // '_$children')".
+            if (!layer) {
+                continue;
+            }
 
             // 内部キャッシュを初期化
             layer._$children.length = 0;
@@ -1416,6 +1380,21 @@ class MovieClip extends Instance
                 const endFrame   = character.endFrame;
 
                 const instance = workSpace._$libraries.get(character.libraryId);
+                if (!instance) {
+                    // Library item missing (deleted or not yet loaded) — skip this character
+                    if (layer.mode === LayerMode.MASK) {
+                        --index;
+                        if (-1 === index) {
+                            break;
+                        }
+                    } else {
+                        ++index;
+                        if (index === length) {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 if (!Util.$useIds.has(instance.id)) {
                     Util.$useIds.set(instance.id, true);
                 }
@@ -1717,10 +1696,19 @@ class MovieClip extends Instance
         for (let idx = 0; controller.length > idx; ++idx) {
 
             const tag = object.dictionary[controller[idx]];
+            if (!tag) {
+                continue;
+            }
 
             const instance = workSpace.getLibrary(tag.characterId);
+            if (!instance) {
+                continue;
+            }
 
             const place = object.placeObjects[placeMap[idx]];
+            if (!place) {
+                continue;
+            }
             if (!place.loop) {
                 place.loop = Util.$getDefaultLoopConfig();
             }

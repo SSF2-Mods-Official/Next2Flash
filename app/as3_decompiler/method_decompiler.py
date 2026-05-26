@@ -3712,7 +3712,7 @@ class MethodDecompiler:
 
         # If we found a logical operator at depth 0, wrap in !(...)
         if has_logical_op:
-            if cond.startswith('(') and cond.endswith(')'):
+            if _has_outer_parens(cond):
                 return f'!{cond}'
             return f'!({cond})'
 
@@ -3729,7 +3729,7 @@ class MethodDecompiler:
                 return f'{left} {op_neg[pos_op]} {right}'
 
         # Default: wrap in !()
-        if cond.startswith('(') and cond.endswith(')'):
+        if _has_outer_parens(cond):
             return f'!{cond}'
         # Simple expressions: function calls, property chains, identifiers — don't need wrapping
         if cond.endswith(')') or ').' in cond or cond.replace('.', '').replace('_', '').isalnum():

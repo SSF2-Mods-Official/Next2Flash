@@ -617,11 +617,10 @@ Util.$loadSaveData = () =>
 
                 } else {
 
-                    Util.$workSpaces.push(new WorkSpace());
-
-                    Util.$screenTab.run();
-
-                    Util.$initializeEnd();
+                    // No saved data — show welcome screen instead of blank tab
+                    Util.$screenTab.run(); // wires + and list buttons (no tabs yet)
+                    Util.$saveProgress.end();
+                    Util.$addModalEvent(document);
 
                 }
 
@@ -967,17 +966,12 @@ Util.$initialize = () =>
 
     window.addEventListener("beforeunload", (event) =>
     {
+        // Autosave-on-close disabled (per user request). Manual save via
+        // Ctrl+S is unaffected. Re-enable by restoring the Util.$autoSave()
+        // call and event.preventDefault() block below.
         if (Util.$updated) {
-
-            event.preventDefault();
-            event.stopPropagation();
-
-            event.returnValue = "データ保存中...";
-
-            // 保存を実行
-            Util.$autoSave();
-
-            return false;
+            // intentionally do nothing; user accepted that closing the window
+            // discards unsaved changes while autosave is off.
         }
     });
 
@@ -1036,6 +1030,9 @@ window.addEventListener("resize", () =>
 Util.$rebuildRuler = () =>
 {
     const workSpace = Util.$currentWorkSpace();
+    if (!workSpace) {
+        return;
+    }
     if (workSpace._$uiState.rulerX.length || workSpace._$uiState.rulerY.length) {
         Util.$screenRuler.rebuild();
     }
@@ -1579,6 +1576,9 @@ Util._$validateLibraries = function(libraries, source)
 
 Util.$loadWorkSpaceProgressively = async function(json, name)
 {
+    if (window.n2fElectron && window.n2fElectron.showServerConsoleAuto) {
+        window.n2fElectron.showServerConsoleAuto();
+    }
     console.time("[N2F] Progressive JSON.parse");
 
     const serverLog = (level, message) => {
@@ -1787,6 +1787,7 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
 
         // Re-initialize UI now that libraries are loaded
         console.log("[N2F] Refreshing UI with loaded libraries...");
+        workSpaces.stage.initialize();
         try {
             workSpaces.initialize(workSpaces.root);
             console.log("[N2F] UI refresh complete!");
@@ -1830,8 +1831,14 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
         
         // Initialize the workspace
         Util.$saveProgress.end();
+        if (window.n2fElectron && window.n2fElectron.hideServerConsoleAuto) {
+            window.n2fElectron.hideServerConsoleAuto();
+        }
         
     } catch (e) {
+        if (window.n2fElectron && window.n2fElectron.hideServerConsoleAuto) {
+            window.n2fElectron.hideServerConsoleAuto();
+        }
         console.error("[N2F] Progressive loading failed:", e);
         console.error("[N2F] Error stack:", e.stack);
         throw e;
@@ -1848,6 +1855,9 @@ Util.$loadWorkSpaceProgressively = async function(json, name)
  */
 Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
 {
+    if (window.n2fElectron && window.n2fElectron.showServerConsoleAuto) {
+        window.n2fElectron.showServerConsoleAuto();
+    }
     console.log(`[N2F] Progressive loading from object with ${object.libraries ? object.libraries.length : 0} libraries`);
 
     const serverLog = (level, message) => {
@@ -2050,6 +2060,7 @@ Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
 
         // Re-initialize UI now that libraries are loaded
         console.log("[N2F] Refreshing UI with loaded libraries...");
+        workSpaces.stage.initialize();
         try {
             workSpaces.initialize(workSpaces.root);
             console.log("[N2F] UI refresh complete!");
@@ -2093,8 +2104,14 @@ Util.$loadWorkSpaceProgressivelyFromObject = async function(object, name)
         
         // Initialize the workspace
         Util.$saveProgress.end();
+        if (window.n2fElectron && window.n2fElectron.hideServerConsoleAuto) {
+            window.n2fElectron.hideServerConsoleAuto();
+        }
         
     } catch (e) {
+        if (window.n2fElectron && window.n2fElectron.hideServerConsoleAuto) {
+            window.n2fElectron.hideServerConsoleAuto();
+        }
         console.error("[N2F] Progressive loading from object failed:", e);
         console.error("[N2F] Error stack:", e.stack);
         throw e;
@@ -2248,15 +2265,19 @@ Util.$unZlibWorker.onmessage = (event) =>
                 Util.$workSpaces.push(new WorkSpace(values[idx]));
             }
 
-            if (!Util.$workSpaces.length) {
-                Util.$workSpaces.push(new WorkSpace());
-            }
+            // If nothing loaded, show welcome screen rather than blank tab
+            // (Util.$workSpaces may still be empty — that is intentional)
 
             // タブセット
             Util.$screenTab.run();
 
             // end
-            Util.$initializeEnd();
+            if (Util.$workSpaces.length) {
+                Util.$initializeEnd();
+            } else {
+                Util.$saveProgress.end();
+                Util.$addModalEvent(document);
+            }
 
         }
 

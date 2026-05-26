@@ -922,10 +922,6 @@ class FilterController extends GradientFilterController
                 rawValue
             );
 
-            console.warn(
-                `[N2F-DBG] colorMatrix live id=${event.target.id} raw=${rawValue} clamped=${value} frame=${Util.$timelineFrame.currentFrame} zoom=${Util.$zoomScale}`
-            );
-
             this._$currentTarget = null;
 
             // updateProperty already disposes character cache.

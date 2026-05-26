@@ -746,6 +746,46 @@ def _overlay_external_bitmaps(n2d_json: dict, project_dir: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+#  Recents helpers
+# ---------------------------------------------------------------------------
+_RECENTS_FILE = os.path.join(SERVER_DIR, 'converted', '.n2f_recents.json')
+_RECENTS_LOCK = threading.Lock()
+
+
+def _load_recents_data():
+    """Load recents JSON, returning {projects:[...], imports:[...]}."""
+    try:
+        os.makedirs(os.path.join(SERVER_DIR, 'converted'), exist_ok=True)
+        if os.path.exists(_RECENTS_FILE):
+            with open(_RECENTS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {'projects': [], 'imports': []}
+
+
+def _save_recents_data(data):
+    """Persist recents JSON to disk (silent on error)."""
+    try:
+        os.makedirs(os.path.join(SERVER_DIR, 'converted'), exist_ok=True)
+        with open(_RECENTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        log.warning('Could not save recents: %s', e)
+
+
+def _add_recent_entry(key, path, name):
+    """Add an entry to the given key ('projects' or 'imports'). Max 100 kept."""
+    with _RECENTS_LOCK:
+        data = _load_recents_data()
+        entries = data.get(key, [])
+        entries = [e for e in entries if e.get('path') != path]  # remove duplicate
+        entries.insert(0, {'path': path, 'name': name, 'ts': int(time.time())})
+        data[key] = entries[:100]
+        _save_recents_data(data)
+
+
+# ---------------------------------------------------------------------------
 #  Request handler
 # ---------------------------------------------------------------------------
 class Next2FlashHandler(SimpleHTTPRequestHandler):
@@ -779,6 +819,12 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self._handle_system_fonts()
         elif self.path.startswith("/api/system-font-data/"):
             self._handle_system_font_data()
+        elif self.path == "/api/recents":
+            self._handle_get_recents()
+        elif self.path.startswith("/api/check-project-name"):
+            self._handle_check_project_name()
+        elif self.path == "/api/current-project-dir":
+            self._json_response({'projDir': Next2FlashHandler._current_project_dir or ''})
         else:
             super().do_GET()
 
@@ -813,6 +859,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self._handle_save_script()
         elif self.path == "/api/save-project":
             self._handle_save_project()
+        elif self.path == "/api/save-as-project":
+            self._handle_save_as_project()
         elif self.path == "/api/save-and-compile":
             self._handle_save_and_compile()
         elif self.path == "/api/compile-disk":
@@ -821,6 +869,16 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self._handle_import_swf_path()
         elif self.path == "/api/new-project":
             self._handle_new_project()
+        elif self.path == "/api/add-recent":
+            self._handle_add_recent()
+        elif self.path == "/api/remove-recent":
+            self._handle_remove_recent()
+        elif self.path == "/api/reveal-path":
+            self._handle_reveal_path()
+        elif self.path == "/api/import-asset":
+            self._handle_import_asset()
+        elif self.path == "/api/open-project-path":
+            self._handle_open_project_path()
         else:
             self.send_error(404, "Not found")
 
@@ -1053,6 +1111,9 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             name = client_name or (os.path.splitext(filename)[0] if filename else "converted")
             # Sanitize: strip path separators and dangerous characters
             name = os.path.basename(name).replace('..', '').strip('. ') or 'converted'
+            # Use client-provided save directory if given and valid absolute path
+            client_dir = (self._extract_form_field(body, "saveDir") or '').strip()
+            overwrite = (self._extract_form_field(body, "overwrite") or '').strip() in ('1', 'true', 'True')
             log.info('_handle_swf_to_project: converting %s (%d bytes)', filename, len(swf_data))
 
             _t0 = time.time()
@@ -1081,7 +1142,14 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             _tick(f"conversion complete: {len(n2d_json.get('libraries', []))} libs")
 
             # Save as project folder
-            project_dir = os.path.join(SERVER_DIR, "converted", name)
+            if client_dir and os.path.isabs(client_dir):
+                project_dir = os.path.join(client_dir, name)
+            else:
+                project_dir = os.path.join(SERVER_DIR, "converted", name)
+            if overwrite and os.path.isdir(project_dir):
+                import shutil as _shutil
+                _shutil.rmtree(project_dir)
+                log.info('_handle_swf_to_project: removed existing folder for overwrite: %s', project_dir)
             mod = _get_swf_to_n2d()
             mod.save_project_folder(n2d_json, project_dir)
             _tick("save_project_folder")
@@ -1199,8 +1267,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                 with self._project_lock:
                     Next2FlashHandler._current_project_dir = project_dir
                 log.info('_handle_open_project: found project folder at %s', project_dir)
-                # Overlay external bitmaps and re-read latest scripts from disk
-                _overlay_external_bitmaps(n2d_json, project_dir)
+                # Re-read latest scripts from disk (bitmaps already embedded in n2d)
                 scripts_refreshed = _read_scripts_from_disk(n2d_json, project_dir)
                 log.info('_handle_open_project: refreshed %d scripts from disk', scripts_refreshed)
                 
@@ -1298,6 +1365,52 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             log.error('_handle_save_script: %s', e)
             self._error_response(500, str(e))
 
+    def _handle_save_as_project(self):
+        """POST /api/save-as-project — Create a new project folder from a scratch N2D blob.
+
+        Accepts: multipart/form-data with 'n2d' (blob), 'name' (string), optional 'saveDir'.
+        Creates {saveDir}/{name}/project.n2d (or converted/{name}/ by default),
+        sets the active project dir, and returns { ok, projDir }.
+        """
+        try:
+            body = self._read_body()
+            if not body:
+                return self._error_response(400, 'No data received')
+
+            n2d_data, _ = self._extract_upload(body, 'n2d')
+            name = (self._extract_form_field(body, 'name') or '').strip() or 'untitled'
+            save_dir = (self._extract_form_field(body, 'saveDir') or '').strip()
+
+            # Sanitize name (prevent path traversal)
+            name = os.path.basename(name).replace('..', '').strip('. ') or 'untitled'
+
+            if save_dir and os.path.isabs(save_dir):
+                project_dir = os.path.join(save_dir, name)
+            else:
+                project_dir = os.path.join(SERVER_DIR, 'converted', name)
+
+            os.makedirs(project_dir, exist_ok=True)
+            n2d_path = os.path.join(project_dir, 'project.n2d')
+            with open(n2d_path, 'wb') as f:
+                f.write(n2d_data)
+
+            with self._project_lock:
+                Next2FlashHandler._current_project_dir = project_dir
+
+            log.info('_handle_save_as_project: created %s (%d bytes)', project_dir, len(n2d_data))
+            resp = json.dumps({'ok': True, 'projDir': project_dir})
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp.encode('utf-8'))
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_save_as_project: %s', e)
+            self._error_response(500, str(e))
+
     def _handle_save_project(self):
         """POST /api/save-project — Save the current editor state back to the project folder.
 
@@ -1327,7 +1440,11 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             import io as _io
             if n2d_data[:2] == b'PK':
                 with _zipfile.ZipFile(_io.BytesIO(n2d_data)) as zf:
-                    n2d_json = json.loads(zf.read('project.json'))
+                    names = zf.namelist()
+                    if 'project.msgpack' in names:
+                        n2d_json = msgpack.unpackb(zf.read('project.msgpack'), raw=False)
+                    else:
+                        n2d_json = json.loads(zf.read('project.json'))
             else:
                 decompressed = zlib.decompress(n2d_data)
                 text = decompressed.decode('utf-8')
@@ -1711,71 +1828,21 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             name = client_name or os.path.splitext(os.path.basename(swf_path))[0]
             # Sanitize: strip path separators and dangerous characters
             name = os.path.basename(name).replace('..', '').strip('. ') or 'converted'
+            # Use client-provided save directory if given and valid absolute path
+            client_dir = req.get('saveDir', '').strip()
+            overwrite = bool(req.get('overwrite', False))
 
             # Check for cached conversion on disk
-            project_dir = os.path.join(SERVER_DIR, 'converted', name)
+            if client_dir and os.path.isabs(client_dir):
+                project_dir = os.path.join(client_dir, name)
+            else:
+                project_dir = os.path.join(SERVER_DIR, 'converted', name)
+            if overwrite and os.path.isdir(project_dir):
+                import shutil as _shutil
+                _shutil.rmtree(project_dir)
+                log.info('_handle_import_swf_path: removed existing folder for overwrite: %s', project_dir)
             cached_n2d = os.path.join(project_dir, 'project.n2d')
-            skeleton_cache = os.path.join(project_dir, 'skeleton.n2d')
             n2d_json = None
-
-            # Fast path: if lazy and skeleton cache exists, serve immediately
-            if lazy and os.path.isfile(skeleton_cache):
-                swf_mtime = os.path.getmtime(swf_path)
-                cache_mtime = os.path.getmtime(skeleton_cache)
-                if cache_mtime >= swf_mtime:
-                    compressed = open(skeleton_cache, 'rb').read()
-                    _tick(f"serving cached skeleton: {len(compressed):,} bytes")
-
-                    # Read lib/script counts from the full N2D cache
-                    _skel_lib_count = 0
-                    _skel_script_count = 0
-                    _skel_fonts = []
-                    _full_n2d = os.path.join(project_dir, 'project.n2d')
-                    if os.path.isfile(_full_n2d):
-                        try:
-                            import zipfile as _zipfile
-                            import io as _io
-                            with _zipfile.ZipFile(_full_n2d, 'r') as _zf:
-                                _names = _zf.namelist()
-                                if 'project.msgpack' in _names:
-                                    _raw = _zf.read('project.msgpack')
-                                    _n2d = msgpack.unpackb(_raw, raw=False)
-                                elif 'project.json' in _names:
-                                    _raw = _zf.read('project.json')
-                                    _n2d = json.loads(_raw)
-                                else:
-                                    _n2d = {}
-                                _skel_lib_count = len(_n2d.get('libraries', []))
-                                _skel_script_count = len(_n2d.get('scripts', []))
-                                _skel_fonts = []
-                                for _lib in _n2d.get('libraries', []):
-                                    if _lib.get('isFont') and _lib.get('fontData'):
-                                        _skel_fonts.append({
-                                            'id': _lib['id'],
-                                            'faceName': _lib.get('fontFaceName', _lib.get('name', ''))
-                                        })
-                            _tick(f"skeleton lib count from full N2D: {_skel_lib_count}")
-                        except Exception as _e:
-                            _tick(f"could not read lib count from full N2D: {_e}")
-
-                    with self._project_lock:
-                        Next2FlashHandler._current_project_dir = project_dir
-
-                    self.send_response(200)
-                    self._cors_headers()
-                    self.send_header('Content-Type', 'application/octet-stream')
-                    self.send_header('Content-Disposition', f'attachment; filename="{name}.n2d"')
-                    self.send_header('X-N2D-Name', name)
-                    self.send_header('X-N2D-Libraries', str(_skel_lib_count))
-                    self.send_header('X-N2D-Scripts', str(_skel_script_count))
-                    self.send_header('X-N2D-Format', 'msgpack')
-                    self.send_header('X-Project-Dir', project_dir)
-                    if _skel_fonts:
-                        self.send_header('X-N2D-Fonts', json.dumps(_skel_fonts))
-                    self.send_header('Content-Length', str(len(compressed)))
-                    self.end_headers()
-                    self.wfile.write(compressed)
-                    return
 
             # Load from full cache or reconvert
             if os.path.isfile(cached_n2d):
@@ -1832,9 +1899,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             _HEAVY_FIELDS = ('buffer', 'recodes')
 
             if lazy:
-                # Build skeleton (first time — no cached skeleton existed)
-                skeleton_cache = os.path.join(project_dir, 'skeleton.n2d')
-
+                # Build skeleton in-memory from project.n2d (no separate skeleton file)
                 # Store full libraries server-side for on-demand loading
                 with self._lazy_lock:
                     Next2FlashHandler._lazy_libraries.clear()
@@ -1873,11 +1938,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                     zf.writestr('project.msgpack', msgpack_data)
                 compressed = zip_buffer.getvalue()
 
-                # Save skeleton cache for next time
-                os.makedirs(project_dir, exist_ok=True)
-                with open(skeleton_cache, 'wb') as f:
-                    f.write(compressed)
-                _tick(f"skeleton cached + ZIP: {len(compressed):,} bytes -> DONE")
+                _tick(f"skeleton ZIP: {len(compressed):,} bytes -> DONE")
             else:
                 msgpack_data = msgpack.packb(n2d_json, use_bin_type=True)
                 _tick(f"msgpack: {len(msgpack_data):,} bytes")
@@ -1955,6 +2016,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             else:
                 bg = int(bg_raw) & 0xFFFFFF
 
+            bg_hex = f'#{bg:06x}'
             n2d_json = {
                 'name': name,
                 'width': width,
@@ -1963,12 +2025,12 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                     'width': width,
                     'height': height,
                     'fps': fps,
-                    'bgColor': bg,
+                    'bgColor': bg_hex,
                     'lock': False,
                 },
                 'characterId': 0,
                 'swfVersion': 25,
-                'backgroundColor': bg,
+                'backgroundColor': bg_hex,
                 'frameRate': fps,
                 'libraries': [
                     {
@@ -2022,6 +2084,11 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self.send_header('X-N2D-Libraries', '1')
             self.send_header('X-N2D-Scripts', '0')
             self.send_header('X-N2D-Format', 'msgpack')
+            proj_dir_hdr = ''
+            if params.get('saveFolder'):
+                with self._project_lock:
+                    proj_dir_hdr = Next2FlashHandler._current_project_dir or ''
+            self.send_header('X-Project-Dir', proj_dir_hdr)
             self.send_header('Content-Length', str(len(compressed)))
             self.end_headers()
             self.wfile.write(compressed)
@@ -2030,6 +2097,299 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             traceback.print_exc()
             log.error('_handle_new_project: %s', e)
             self._error_response(500, f'New project creation failed: {e}')
+
+    # ------------------------------------------------------------------
+    # Recents helpers (module-level functions called by handlers)
+    # ------------------------------------------------------------------
+
+    def _handle_check_project_name(self):
+        """GET /api/check-project-name?name=X&saveDir=Y — Check if folder already exists."""
+        try:
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            name = (qs.get('name', [''])[0]).strip()
+            save_dir = (qs.get('saveDir', [''])[0]).strip()
+            if not name:
+                return self._json_response({'exists': False})
+            base = save_dir if save_dir else os.path.join(SERVER_DIR, 'converted')
+            target = os.path.join(base, name)
+            self._json_response({'exists': os.path.exists(target)})
+        except Exception as e:
+            self._error_response(500, str(e))
+
+    def _handle_remove_recent(self):
+        """POST /api/remove-recent — Remove an entry from recents. Body: {category, path}."""
+        try:
+            body = self._read_body()
+            data = json.loads(body.decode('utf-8')) if body else {}
+            category = str(data.get('category', 'project'))
+            path = str(data.get('path', ''))
+            if path:
+                key = 'projects' if category == 'project' else 'imports'
+                with _RECENTS_LOCK:
+                    recents = _load_recents_data()
+                    entries = recents.get(key, [])
+                    entries = [e for e in entries if e.get('path') != path]
+                    recents[key] = entries
+                    _save_recents_data(recents)
+            resp = json.dumps({'ok': True}).encode('utf-8')
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+        except Exception as e:
+            self._error_response(500, str(e))
+
+    def _handle_reveal_path(self):
+        """POST /api/reveal-path — Reveal a path in the OS file explorer."""
+        try:
+            import subprocess
+            import platform
+            body = self._read_body()
+            data = json.loads(body.decode('utf-8')) if body else {}
+            path = str(data.get('path', ''))
+            if path:
+                sys_name = platform.system()
+                norm = os.path.normpath(path)
+                if sys_name == 'Windows':
+                    # Use explorer /select, to highlight the item
+                    subprocess.Popen(['explorer', '/select,', norm])
+                elif sys_name == 'Darwin':
+                    subprocess.Popen(['open', '-R', norm])
+                else:
+                    # Linux: open parent directory
+                    parent = os.path.dirname(norm)
+                    subprocess.Popen(['xdg-open', parent])
+            self._json_response({'ok': True})
+        except Exception as e:
+            self._error_response(500, str(e))
+
+    def _handle_get_recents(self):
+        """GET /api/recents — Return {projects:[...], imports:[...]}."""
+        try:
+            data = _load_recents_data()
+            resp = json.dumps(data).encode('utf-8')
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+        except Exception as e:
+            self._error_response(500, str(e))
+
+    def _handle_add_recent(self):
+        """POST /api/add-recent — Add an entry to recents. Body: {category, path, name}."""
+        try:
+            body = self._read_body()
+            data = json.loads(body.decode('utf-8')) if body else {}
+            category = str(data.get('category', 'project'))
+            path = str(data.get('path', ''))
+            name = str(data.get('name', path.split(os.sep)[-1] if path else ''))
+            if path:
+                key = 'projects' if category == 'project' else 'imports'
+                _add_recent_entry(key, path, name)
+            resp = json.dumps({'ok': True}).encode('utf-8')
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+        except Exception as e:
+            self._error_response(500, str(e))
+
+    def _handle_import_asset(self):
+        """POST /api/import-asset — Copy uploaded files into {projectDir}/assets/."""
+        try:
+            body = self._read_body()
+            if not body:
+                return self._error_response(400, 'No data received')
+
+            project_dir = Next2FlashHandler._current_project_dir
+            if not project_dir:
+                return self._error_response(400, 'No active project folder — save or open a project first')
+
+            assets_dir = os.path.join(project_dir, 'assets')
+            os.makedirs(assets_dir, exist_ok=True)
+
+            content_type = self.headers.get('Content-Type', '')
+            boundary = None
+            for part in content_type.split(';'):
+                part = part.strip()
+                if part.startswith('boundary='):
+                    boundary = part[9:].strip('"')
+                    break
+
+            if not boundary:
+                return self._error_response(400, 'No multipart boundary')
+
+            boundary_bytes = f'--{boundary}'.encode()
+            parts = body.split(boundary_bytes)
+
+            saved_files = []
+            for part in parts:
+                if b'name="files"' not in part:
+                    continue
+                if b'filename=' not in part:
+                    continue
+                header_end = part.find(b'\r\n\r\n')
+                if header_end < 0:
+                    continue
+                header = part[:header_end].decode('utf-8', errors='replace')
+                filename = None
+                for line in header.split('\r\n'):
+                    if 'filename=' in line:
+                        try:
+                            start = line.index('filename="') + 10
+                            end = line.index('"', start)
+                            filename = line[start:end]
+                        except ValueError:
+                            pass
+                        break
+                if not filename:
+                    continue
+                file_data = part[header_end + 4:]
+                if file_data.endswith(b'\r\n'):
+                    file_data = file_data[:-2]
+                if file_data.endswith(b'--'):
+                    file_data = file_data[:-2]
+                if file_data.endswith(b'\r\n'):
+                    file_data = file_data[:-2]
+
+                safe_name = os.path.basename(filename).replace('..', '')
+                if not safe_name:
+                    continue
+                dest = os.path.join(assets_dir, safe_name)
+                with open(dest, 'wb') as f:
+                    f.write(file_data)
+                saved_files.append(safe_name)
+                log.info('Imported asset: %s (%d bytes)', safe_name, len(file_data))
+
+            resp = json.dumps({'ok': True, 'count': len(saved_files),
+                               'files': saved_files, 'folder': assets_dir}).encode('utf-8')
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_import_asset: %s', e)
+            self._error_response(500, str(e))
+
+    def _handle_open_project_path(self):
+        """POST /api/open-project-path — Open a project from a disk path (for Recent Projects).
+
+        Accepts JSON body: {"projDir": "...", "lazy": true/false}
+        When lazy=true (default), returns a skeleton project (no heavy buffer/recodes data)
+        and populates the server-side lazy library store for background hydration.
+        This makes project opening much faster since the client receives a small skeleton
+        immediately and loads full library data in the background.
+        """
+        try:
+            body = self._read_body()
+            params = json.loads(body.decode('utf-8')) if body else {}
+            proj_dir = str(params.get('projDir', '')).strip()
+            lazy = bool(params.get('lazy', True))  # lazy by default for fast open
+
+            if not proj_dir or not os.path.isdir(proj_dir):
+                return self._error_response(404, f'Project folder not found: {proj_dir}')
+
+            n2d_path = os.path.join(proj_dir, 'project.n2d')
+            if not os.path.exists(n2d_path):
+                return self._error_response(404, f'project.n2d not found in {proj_dir}')
+
+            with open(n2d_path, 'rb') as f:
+                n2d_data = f.read()
+
+            name = os.path.basename(proj_dir)
+
+            # Parse the N2D to get library data
+            import zipfile as _zf, io as _io2
+            n2d_json = None
+            try:
+                with _zf.ZipFile(_io2.BytesIO(n2d_data)) as zf:
+                    names = zf.namelist()
+                    if 'project.msgpack' in names:
+                        n2d_json = msgpack.unpackb(zf.read('project.msgpack'), raw=False)
+                    elif 'project.json' in names:
+                        n2d_json = json.loads(zf.read('project.json'))
+            except Exception as e:
+                log.warning('_handle_open_project_path: failed to parse n2d: %s', e)
+
+            with self._project_lock:
+                Next2FlashHandler._current_project_dir = proj_dir
+
+            lib_count = len(n2d_json.get('libraries', [])) if n2d_json else 0
+            script_count = len(n2d_json.get('scripts', [])) if n2d_json else 0
+            n2d_name = (n2d_json.get('name', name) if n2d_json else name)
+
+            # Build font manifest
+            font_manifest = []
+            if n2d_json:
+                for lib in n2d_json.get('libraries', []):
+                    if lib.get('isFont') and lib.get('fontData'):
+                        font_manifest.append({
+                            'id': lib['id'],
+                            'faceName': lib.get('fontFaceName', lib.get('name', ''))
+                        })
+
+            if lazy and n2d_json:
+                # Build skeleton and set up lazy library store for background hydration
+                _HEAVY_FIELDS = ('buffer', 'recodes')
+                with self._lazy_lock:
+                    Next2FlashHandler._lazy_libraries.clear()
+                    Next2FlashHandler._lazy_bulk_cache = None
+                    Next2FlashHandler._font_ttf_cache.clear()
+                    for lib in n2d_json.get('libraries', []):
+                        lib_id = lib.get('id')
+                        if lib_id is not None:
+                            Next2FlashHandler._lazy_libraries[int(lib_id)] = lib
+                log.info('_handle_open_project_path: stored %d libs in lazy store', len(Next2FlashHandler._lazy_libraries))
+
+                skeleton_libs = []
+                for lib in n2d_json.get('libraries', []):
+                    skel = {k: v for k, v in lib.items() if k not in _HEAVY_FIELDS}
+                    skel['_lazy'] = True
+                    skeleton_libs.append(skel)
+
+                skeleton = dict(n2d_json)
+                skeleton['libraries'] = skeleton_libs
+
+                msgpack_data = msgpack.packb(skeleton, use_bin_type=True)
+                import zipfile as _zipfile
+                zip_buffer = _io2.BytesIO()
+                with _zipfile.ZipFile(zip_buffer, 'w', _zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+                    zf.writestr('project.msgpack', msgpack_data)
+                response_data = zip_buffer.getvalue()
+                log.info('_handle_open_project_path: skeleton %d bytes (full was %d bytes)',
+                         len(response_data), len(n2d_data))
+            else:
+                response_data = n2d_data
+
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Disposition', f'attachment; filename="{n2d_name}.n2d"')
+            self.send_header('X-N2D-Name', n2d_name)
+            self.send_header('X-N2D-Libraries', str(lib_count))
+            self.send_header('X-N2D-Scripts', str(script_count))
+            self.send_header('X-Project-Dir', proj_dir)
+            if font_manifest:
+                self.send_header('X-N2D-Fonts', json.dumps(font_manifest))
+            self.send_header('Content-Length', str(len(response_data)))
+            self.end_headers()
+            self.wfile.write(response_data)
+
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_open_project_path: %s', e)
+            self._error_response(500, str(e))
 
     def _handle_lazy_library(self):
         """GET /api/lazy/library/<id> — Return full library data for on-demand loading.
@@ -2773,6 +3133,17 @@ def main():
     server = ThreadedServer((args.host, args.port), Next2FlashHandler)
     url = f"http://{args.host}:{args.port}"
     log.info('main: starting server at %s', url)
+
+    # Write PID file so the Electron main process can kill us on next startup
+    # if we were orphaned (e.g. Electron crashed without calling stopPythonServer).
+    pid_file = os.path.join(SERVER_DIR, 'server.pid')
+    import atexit
+    try:
+        with open(pid_file, 'w') as _pf:
+            _pf.write(str(os.getpid()))
+        atexit.register(lambda: os.remove(pid_file) if os.path.exists(pid_file) else None)
+    except OSError:
+        pass  # non-fatal if we can't write the PID file
 
     print(r"""
     _   _           _   ____  _____ _           _

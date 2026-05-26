@@ -36,6 +36,11 @@ class Character
         this._$transformCache    = null;
         this._$transformCacheKey = "";
 
+        // Bounds cache: avoids expensive recursive MovieClip.getBounds() on
+        // every character click.  Keyed by (frame, multiMatrix) — cleared in dispose().
+        this._$boundsCache    = null;
+        this._$boundsCacheKey = "";
+
         if (object) {
             this._$id         = object.id;
             this._$libraryId  = object.libraryId;
@@ -423,7 +428,6 @@ class Character
             frame = Util.$getFrame(place, range, frame, instance.totalFrame);
         }
 
-        // cache
         let multiMatrix = place.matrix;
         if (matrix) {
             multiMatrix = Util.$multiplicationMatrix(
@@ -432,7 +436,20 @@ class Character
             );
         }
 
-        return instance.getBounds(multiMatrix, frame);
+        // Fast path: return cached bounds when frame + effective matrix are unchanged.
+        // This eliminates the expensive recursive MovieClip.getBounds() traversal on
+        // repeated calls (e.g. every character click, every appendCharacter + draw pair).
+        // Cache is invalidated by dispose() whenever the character needs to re-render.
+        const mm = multiMatrix;
+        const cacheKey = `${frame},${mm[0]},${mm[1]},${mm[2]},${mm[3]},${mm[4]},${mm[5]}`;
+        if (this._$boundsCache && this._$boundsCacheKey === cacheKey) {
+            return this._$boundsCache;
+        }
+
+        const bounds = instance.getBounds(multiMatrix, frame);
+        this._$boundsCache    = bounds;
+        this._$boundsCacheKey = cacheKey;
+        return bounds;
     }
 
     /**
@@ -696,7 +713,6 @@ class Character
         const instance  = workSpace.getLibrary(this.libraryId);
 
         const isPlayback = !Util.$timelinePlayer.stopFlag;
-        const _charT0 = isPlayback ? performance.now() : 0;
 
         let frame = current_frame;
 
@@ -718,30 +734,41 @@ class Character
             this.dispose();
         }
 
+        // Build a lightweight filter signature so cache is busted when filters change
+        const filterSig = place.filter && place.filter.length
+            ? JSON.stringify(place.filter)
+            : '';
+
+        if (this._$canvas) {
+            // Also invalidate when filter changes (not covered by hydrationVersion)
+            if (this._$cacheFilterSig !== filterSig) {
+                this.dispose();
+            }
+        }
+
         if (this._$canvas) {
             if (canvas instanceof HTMLCanvasElement) {
                 Util.$poolCanvas(canvas);
             }
 
-            console.warn(`[N2F-DBG] Character.draw CANVAS_HIT libId=${this.libraryId} frame=${frame}`);
             return Promise.resolve(this._$canvas);
         }
 
         // Transform-signature cache: reuse canvas when only tx/ty changed
         const m = place.matrix;
         const ct = place.colorTransform;
-        const effectiveDpr = window.devicePixelRatio;
-        const tfKey = `${m[0]},${m[1]},${m[2]},${m[3]},${frame},${hydrationVersion},${Util.$zoomScale},${effectiveDpr},${ct[0]},${ct[1]},${ct[2]},${ct[3]},${ct[4]},${ct[5]},${ct[6]},${ct[7]},${place.blendMode}`;
+        // Include zoom in the cache key so cached canvases are invalidated
+        // when the user changes the zoom level.
+        const effectiveDpr = window.devicePixelRatio * (window.Util ? Util.$zoomScale : 1);
+        const tfKey = `${m[0]},${m[1]},${m[2]},${m[3]},${frame},${hydrationVersion},${effectiveDpr},${ct[0]},${ct[1]},${ct[2]},${ct[3]},${ct[4]},${ct[5]},${ct[6]},${ct[7]},${place.blendMode},${filterSig}`;
         if (this._$transformCache && this._$transformCacheKey === tfKey) {
             if (canvas instanceof HTMLCanvasElement) {
                 Util.$poolCanvas(canvas);
             }
             this._$canvas = this._$transformCache;
             this._$cacheVersion = hydrationVersion;
-            console.warn(`[N2F-DBG] Character.draw TF_CACHE_HIT libId=${this.libraryId} frame=${frame} key=${tfKey}`);
             return Promise.resolve(this._$canvas);
         }
-        console.warn(`[N2F-DBG] Character.draw CACHE_MISS libId=${this.libraryId} frame=${frame} hasCanvas=${!!this._$canvas} hasTfCache=${!!this._$transformCache} tfKeyMatch=${this._$transformCacheKey === tfKey}`);
 
         // シーンのフレームを更新
         if (instance.type === InstanceType.MOVIE_CLIP) {
@@ -809,14 +836,6 @@ class Character
         return promise
             .then((canvas) =>
             {
-                if (isPlayback) {
-                    const _charT1 = performance.now();
-                    const _charTotal = _charT1 - _charT0;
-                    if (_charTotal > 16) {
-                        const _msg = `[CharDbg] id=${this.libraryId} CACHE_MISS type=${instance.type} ${width}x${height} total=${_charTotal.toFixed(1)}ms`;
-                        if (window.n2fElectron) window.n2fElectron.logDebug(_msg); else console.warn(_msg);
-                    }
-                }
                 // set blend mode
                 if (place.blendMode !== "normal") {
                     switch (place.blendMode) {
@@ -857,6 +876,7 @@ class Character
                 this._$offsetY = canvas._$offsetY;
                 this._$canvas  = canvas;
                 this._$cacheVersion = hydrationVersion;
+                this._$cacheFilterSig = filterSig;
 
                 // Store in transform-signature cache
                 this._$transformCache    = canvas;
@@ -1128,7 +1148,7 @@ class Character
             const filters = [];
             for (let idx = 0; place.filter.length > idx; ++idx) {
                 const object = place.filter[idx];
-                filters.push(new Util.$filterClasses[object.name](object));
+                filters.push(new Util.$filterClasses[object.class || object.name](object));
             }
 
             place.filter = null;
@@ -1678,6 +1698,11 @@ class Character
         this._$canvas = null;
         this._$base64 = null;
         this._$cacheVersion = -1;
+        this._$cacheFilterSig = null;
+        // Bounds cache must be cleared when the character is re-rendered so that
+        // stale bounds are never returned after a transform or frame change.
+        this._$boundsCache    = null;
+        this._$boundsCacheKey = "";
     }
 
     /**

@@ -221,6 +221,7 @@ class Netherlands extends Language
             ["{{塗りのカラー}}", "Kleur van de verf"],
             ["{{線のカラー}}", "Lijnkleur"],
             ["{{線の太さ}}", "lijndikte"],
+            ["{{新規プロジェクト}}", "Nieuw project"],
             ["{{プロジェクトデータの読込}}", "Projectgegevens lezen"],
             ["{{プロジェクトデータを保存}}", "Projectgegevens opslaan."],
             ["{{書き出し}}", "openingszin of -alinea"],

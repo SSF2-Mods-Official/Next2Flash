@@ -221,6 +221,7 @@ class Spanish extends Language
             ["{{塗りのカラー}}", "Color de relleno"],
             ["{{線のカラー}}", "Color del trazo"],
             ["{{線の太さ}}", "Anchura de la carrera"],
+            ["{{新規プロジェクト}}", "Nuevo proyecto"],
             ["{{プロジェクトデータの読込}}", "Carga de los datos del proyecto"],
             ["{{プロジェクトデータを保存}}", "Guardar los datos del proyecto"],
             ["{{書き出し}}", "Exportar"],

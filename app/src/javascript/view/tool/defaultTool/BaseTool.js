@@ -210,8 +210,6 @@ class BaseTool extends CommonTool
         return Util
             .$currentWorkSpace()
             .scene
-            .changeFrame(
-                Util.$timelineFrame.currentFrame
-            );
+            .changeFrame(Util.$timelineFrame.currentFrame);
     }
 }

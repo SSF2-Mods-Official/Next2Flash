@@ -221,6 +221,7 @@ class Finland extends Language
             ["{{塗りのカラー}}", "Maalin väri"],
             ["{{線のカラー}}", "Viivan väri"],
             ["{{線の太さ}}", "viivan paksuus"],
+            ["{{新規プロジェクト}}", "Uusi projekti"],
             ["{{プロジェクトデータの読込}}", "Projektin tietojen lukeminen"],
             ["{{プロジェクトデータを保存}}", "Tallenna projektin tiedot."],
             ["{{書き出し}}", "avauslause tai -kappale"],

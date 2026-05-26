@@ -15,10 +15,16 @@ class Stage
     constructor (object = null)
     {
         if (object) {
-            this._$width   = object.width;
-            this._$height  = object.height;
-            this._$fps     = object.fps;
-            this._$bgColor = object.bgColor;
+            this._$width   = (object.width  > 0) ? object.width  : Stage.STAGE_DEFAULT_WIDTH;
+            this._$height  = (object.height > 0) ? object.height : Stage.STAGE_DEFAULT_HEIGHT;
+            this._$fps     = (object.fps    > 0) ? object.fps    : Stage.STAGE_DEFAULT_FPS;
+            // Normalise bgColor: may arrive as integer (legacy) or hex string
+            const raw = object.bgColor;
+            if (typeof raw === 'number') {
+                this._$bgColor = `#${(raw & 0xFFFFFF).toString(16).padStart(6, '0')}`;
+            } else {
+                this._$bgColor = `${raw}`.toLowerCase();
+            }
             this._$lock    = object.lock;
         } else {
             this._$width   = Stage.STAGE_DEFAULT_WIDTH;

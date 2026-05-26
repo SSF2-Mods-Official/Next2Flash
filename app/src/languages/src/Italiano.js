@@ -221,6 +221,7 @@ class Italiano extends Language
             ["{{塗りのカラー}}", "Colore di riempimento"],
             ["{{線のカラー}}", "Colore del tratto"],
             ["{{線の太さ}}", "Larghezza della corsa"],
+            ["{{新規プロジェクト}}", "Nuovo progetto"],
             ["{{プロジェクトデータの読込}}", "Caricamento dei dati del progetto"],
             ["{{プロジェクトデータを保存}}", "Salvare i dati del progetto"],
             ["{{書き出し}}", "Esportazione"],

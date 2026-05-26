@@ -221,6 +221,7 @@ class Romania extends Language
             ["{{塗りのカラー}}", "Culoarea vopselei"],
             ["{{線のカラー}}", "Culoarea liniei"],
             ["{{線の太さ}}", "grosimea liniei"],
+            ["{{新規プロジェクト}}", "Proiect nou"],
             ["{{プロジェクトデータの読込}}", "Citirea datelor proiectului"],
             ["{{プロジェクトデータを保存}}", "Salvați datele proiectului."],
             ["{{書き出し}}", "propoziție sau paragraf de deschidere"],

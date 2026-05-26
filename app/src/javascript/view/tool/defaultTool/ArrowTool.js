@@ -352,11 +352,10 @@ class ArrowTool extends BaseTool
     save ()
     {
         if (!this._$saved) {
+            const workSpace = Util.$currentWorkSpace();
+            if (!workSpace) { return; }
             this._$saved = true;
-
-            Util
-                .$currentWorkSpace()
-                .temporarilySaved();
+            workSpace.temporarilySaved();
         }
     }
 
@@ -557,6 +556,7 @@ class ArrowTool extends BaseTool
         const layerId = target.dataset.layerId | 0;
 
         const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) { return; }
 
         const scene = workSpace.scene;
         const layer = scene.getLayer(layerId);
@@ -1439,7 +1439,9 @@ class ArrowTool extends BaseTool
     {
         this.save();
 
-        const scene = Util.$currentWorkSpace().scene;
+        const workSpace = Util.$currentWorkSpace();
+        if (!workSpace) { return; }
+        const scene = workSpace.scene;
         const frame = Util.$timelineFrame.currentFrame;
 
         const dx = event ? event.pageX - this.pageX : this.pageX;

@@ -3,7 +3,8 @@ setlocal
 
 cd /d "%~dp0\.."
 
-set "SOURCE_DIR=C:\Users\glwex\Documents\GitHub\ssf2-idk-140x-original\src\Super Smash Flash 2 Beta v1.4.0.1\data"
+rem Set SOURCE_DIR to your local SWF source folder, or pass it as an argument:
+if "%~1" neq "" (set "SOURCE_DIR=%~1") else (set "SOURCE_DIR=C:\path\to\your\swf\data")
 set "REPORT=test\roundtrip_report.json"
 
 echo Running SWF roundtrip test...

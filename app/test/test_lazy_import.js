@@ -8,7 +8,8 @@ const puppeteer = require('puppeteer');
 const path = require('path');
 
 const PORT = 5000;
-const SSF_PATH = String.raw`C:\Users\glwex\Documents\GitHub\ssf2-idk-140x-original\src\Super Smash Flash 2 Beta v1.4.0.1\data\misc\ssf2intro_beta.ssf`;
+// Set the SWF path via environment variable or edit this line for your local setup:
+const SSF_PATH = process.env.N2F_TEST_SWF || String.raw`\path\to\your.swf`;
 const TIMEOUT = 300_000; // 5 minutes
 
 async function main() {

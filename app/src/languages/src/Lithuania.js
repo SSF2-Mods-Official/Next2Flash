@@ -221,6 +221,7 @@ class Lithuania extends Language
             ["{{塗りのカラー}}", "Dažų spalva"],
             ["{{線のカラー}}", "Linijos spalva"],
             ["{{線の太さ}}", "linijos storis"],
+            ["{{新規プロジェクト}}", "Naujas projektas"],
             ["{{プロジェクトデータの読込}}", "Projekto duomenų skaitymas"],
             ["{{プロジェクトデータを保存}}", "Išsaugoti projekto duomenis."],
             ["{{書き出し}}", "įžanginis sakinys arba pastraipa"],

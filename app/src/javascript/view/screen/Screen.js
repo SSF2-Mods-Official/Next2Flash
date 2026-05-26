@@ -777,19 +777,6 @@ class Screen extends BaseScreen
             character.dispose();
         }
 
-        if (Util.$timelinePlayer.stopFlag && character._$canvas && !doUpdate) {
-            var _cw = character._$canvas.width;
-            var _ch = character._$canvas.height;
-            console.log('[ScrDbg] CACHED lib=' + character.libraryId +
-                ' layer=' + layer_id +
-                ' frame=' + frame +
-                ' type=' + instance.type +
-                ' name=' + (instance.name || '') +
-                ' canvasSize=' + _cw + 'x' + _ch +
-                ' mode=' + (layer.mode || 0) +
-                ' maskId=' + layer.maskId);
-        }
-
         const matrix = Util.$sceneChange.concatenatedMatrix;
         const bounds = character.getBounds(matrix, parent_scene ? frame : 0);
 
@@ -806,11 +793,6 @@ class Screen extends BaseScreen
                 // Suppress drawImage errors from stale character data.
                 // Track sparse diagnostics for bitmap-related misses.
                 try {
-                    if (Util.$timelinePlayer.stopFlag) {
-                        console.warn('[ScrDbg] DrawFail lib=' + character.libraryId +
-                            ' layer=' + layer_id + ' frame=' + frame +
-                            ' err=' + (error && error.message ? error.message : 'unknown'));
-                    }
                     const key = `${character.libraryId}:${instance.type}`;
                     const count = (this._$drawFailCounts.get(key) || 0) + 1;
                     this._$drawFailCounts.set(key, count);
@@ -838,11 +820,6 @@ class Screen extends BaseScreen
             {
                 // Guard: skip if canvas is invalid (e.g. after tab close/reimport)
                 if (!canvas) {
-                    if (Util.$timelinePlayer.stopFlag) {
-                        console.warn('[ScrDbg] NullCanvas lib=' + character.libraryId +
-                            ' layer=' + layer_id + ' frame=' + frame +
-                            ' type=' + instance.type + ' name=' + (instance.name || ''));
-                    }
                     return null;
                 }
 
@@ -944,33 +921,17 @@ class Screen extends BaseScreen
                 divStyle += `left: ${tx}px;`;
                 divStyle += `top: ${ty}px;`;
 
-                let currentCanvasStyle = "";
-                if (canvas.hasAttribute("style")) {
-                    currentCanvasStyle = canvas.getAttribute("style");
+                // Always update zoom-dependent canvas CSS.
+                // Using individual property assignment preserves other renderer-set
+                // styles (mix-blend-mode, filter) while correctly overwriting any
+                // stale dimensions from a previously-cached canvas.
+                canvas.style.width  = `${canvas._$width  * Util.$zoomScale}px`;
+                canvas.style.height = `${canvas._$height * Util.$zoomScale}px`;
+                if (character.offsetX) {
+                    canvas.style.left = `${character.offsetX * Util.$zoomScale}px`;
                 }
-
-                let canvasStyle = "";
-                if (currentCanvasStyle.indexOf("width") === -1) {
-                    canvasStyle += `width: ${canvas._$width * Util.$zoomScale}px;`;
-                }
-
-                if (currentCanvasStyle.indexOf("height") === -1) {
-                    canvasStyle += `height: ${canvas._$height * Util.$zoomScale}px;`;
-                }
-
-                if (character.offsetX && currentCanvasStyle.indexOf("left") === -1) {
-                    canvasStyle += `left: ${character.offsetX * Util.$zoomScale}px;`;
-                }
-
-                if (character.offsetY && currentCanvasStyle.indexOf("top") === -1) {
-                    canvasStyle += `top: ${character.offsetY * Util.$zoomScale}px;`;
-                }
-
-                if (canvasStyle) {
-                    if (currentCanvasStyle) {
-                        canvasStyle += currentCanvasStyle;
-                    }
-                    canvas.setAttribute("style", canvasStyle);
+                if (character.offsetY) {
+                    canvas.style.top  = `${character.offsetY * Util.$zoomScale}px`;
                 }
 
                 const promises = [];

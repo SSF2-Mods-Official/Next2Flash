@@ -221,6 +221,7 @@ class Latvia extends Language
             ["{{塗りのカラー}}", "Krāsas krāsa"],
             ["{{線のカラー}}", "Līniju krāsa"],
             ["{{線の太さ}}", "līnijas biezums"],
+            ["{{新規プロジェクト}}", "Jauns projekts"],
             ["{{プロジェクトデータの読込}}", "Projekta datu lasīšana"],
             ["{{プロジェクトデータを保存}}", "Saglabājiet projekta datus."],
             ["{{書き出し}}", "ievadteikums vai rindkopa"],

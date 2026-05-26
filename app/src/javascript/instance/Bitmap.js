@@ -252,7 +252,7 @@ class Bitmap extends Instance
             "width":     this.width,
             "height":    this.height,
             "imageType": this.imageType,
-            "buffer":    this._$buffer || this.buffer
+            "buffer":    this.buffer
         };
     }
 

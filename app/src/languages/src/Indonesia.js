@@ -221,6 +221,7 @@ class Indonesia extends Language
             ["{{塗りのカラー}}", "Warna cat"],
             ["{{線のカラー}}", "Warna garis"],
             ["{{線の太さ}}", "ketebalan garis"],
+            ["{{新規プロジェクト}}", "Proyek baru"],
             ["{{プロジェクトデータの読込}}", "Membaca data proyek"],
             ["{{プロジェクトデータを保存}}", "Menyimpan data proyek."],
             ["{{書き出し}}", "kalimat atau paragraf pembuka"],

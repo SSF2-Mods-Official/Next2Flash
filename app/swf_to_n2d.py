@@ -4920,7 +4920,15 @@ def save_project_folder(data: dict, folder_path: str):
             lib['externalFile'] = f'bitmaps/{fname}'
             return 1
 
-        if buf.startswith('b64:'):
+        if isinstance(buf, dict):
+            # JS JSON.stringify(Uint8Array) produces {"0":255,"1":200,...}
+            n = len(buf)
+            rgba = bytes(buf[str(k)] for k in range(n))
+        elif isinstance(buf, (list, tuple)):
+            rgba = bytes(buf)
+        elif isinstance(buf, (bytes, bytearray)):
+            rgba = bytes(buf)
+        elif buf.startswith('b64:'):
             rgba = base64.b64decode(buf[4:])
         else:
             rgba = buf.encode('latin-1')
@@ -4968,7 +4976,15 @@ def save_project_folder(data: dict, folder_path: str):
         buf = lib.get('buffer', b'')
         if not buf:
             return 0
-        audio_bytes = buf if isinstance(buf, (bytes, bytearray)) else base64.b64decode(buf)
+        if isinstance(buf, (bytes, bytearray)):
+            audio_bytes = buf
+        elif isinstance(buf, str):
+            try:
+                audio_bytes = base64.b64decode(buf)
+            except (ValueError, UnicodeEncodeError):
+                audio_bytes = buf.encode('latin-1')
+        else:
+            audio_bytes = b''
         ext = _detect_audio_ext(audio_bytes)
         fname = f"{cid}_{name}.{ext}"
         fpath = os.path.join(sounds_dir, fname)

@@ -21,8 +21,6 @@ class WorkSpace
         this._$revision     = [];
         this._$currentData  = null;
         this._$position     = 0;
-        this._$wsDbgId      = (WorkSpace._$wsDbgCounter = (WorkSpace._$wsDbgCounter || 0) + 1);
-        console.log(`[UNDO-DBG] new WorkSpace instance id=${this._$wsDbgId}`);
 
         // Command Pattern Undo/Redo (M6 refactoring)
         // Use this for efficient command-based undo instead of snapshot-based
@@ -164,19 +162,19 @@ class WorkSpace
     get _$nameMap ()
     {
         // Return a proxy Map that delegates to repository's name index
-        // Since repository's nameIndex is private, we create a wrapper
+        // Since repository's nameIndex is private, we create a wrapper.
+        // NOTE: set()/clear() are intentional no-ops — repository.add() keeps
+        // the index in sync automatically. Warnings were removed because legacy
+        // call-sites fire them in hot loops (hundreds per project load), and
+        // each console.warn in Electron with DevTools open is expensive
+        // (stack-trace capture + IPC dispatch). Use grep on "_$nameMap" if
+        // you need to find legacy callers; do not re-enable the warns.
         return {
-            clear: () => {
-                // Name index is part of repository state
-                // Clearing it would require clearing the whole repository
-                // For now, just log a warning
-                console.warn('WorkSpace._$nameMap.clear() is deprecated. Use repository methods instead.');
-            },
+            clear: () => {},
             get: (name) => this._$project.repository.findByName(name),
             has: (name) => this._$project.repository.findByName(name) !== undefined,
             set: (name, instance) => {
-                // This is handled automatically by repository.add()
-                console.warn('WorkSpace._$nameMap.set() is deprecated. Repository manages name index automatically.');
+                // No-op: repository.add() maintains the name index.
             },
             delete: (name) => {
                 const library = this._$project.repository.findByName(name);
@@ -452,6 +450,14 @@ class WorkSpace
 
         // 初期化
         this.initialize(this.root);
+
+        // Explicitly render the stage after all setup is complete.
+        // The TimelineState.scene setter fires scene.initialize() → changeFrame()
+        // as a side-effect, but that render may be stale or race with other init
+        // work.  Calling changeFrame() here (after all synchronous init is done)
+        // guarantees a fresh render with the correct frame and workspace state.
+        const frame = Util.$timelineFrame.currentFrame || 1;
+        this.root.changeFrame(frame);
     }
 
     /**
@@ -540,7 +546,6 @@ class WorkSpace
         // restored state back onto the stack, clobbering redo and turning
         // every subsequent undo into a no-op.
         if (this._$reloadInProgress) {
-            console.log(`[UNDO-DBG] temporarilySaved SUPPRESSED (reload in progress)`);
             return;
         }
 
@@ -551,30 +556,25 @@ class WorkSpace
         }
 
         if (this._$position !== this._$revision.length) {
-            console.log(`[UNDO-DBG] temporarilySaved TRUNCATE revision from ${this._$revision.length} to ${this._$position}`);
             this._$revision.length = this._$position;
         }
 
-        const stack = (new Error()).stack.split('\n').slice(2, 5).map(s => s.trim()).join(' | ');
         const json = this.toJSON(true);
 
         // De-duplicate: if the top snapshot is identical to the new one, skip.
         // (Happens when both a pre-edit and a post-edit save fire for the
         // same logical action without any actual state change in between.)
         if (this._$revision.length && this._$revision[this._$revision.length - 1] === json) {
-            console.log(`[UNDO-DBG] temporarilySaved DEDUPE (same as top) caller=${stack}`);
             return;
         }
 
         this._$revision.push(json);
         this._$position++;
-        console.log(`[UNDO-DBG] temporarilySaved PUSH wsId=${this._$wsDbgId} pos=${this._$position} revLen=${this._$revision.length} jsonLen=${json.length} caller=${stack}`);
 
         // remove old data
         if (this._$revision.length > Util.REVISION_LIMIT) {
             this._$revision.shift();
             this._$position = this._$revision.length;
-            console.log(`[UNDO-DBG] temporarilySaved LIMIT_HIT pos=${this._$position}`);
         }
     }
 
@@ -587,16 +587,13 @@ class WorkSpace
      */
     undo ()
     {
-        console.log(`[UNDO-DBG] undo() ENTER wsId=${this._$wsDbgId} pos=${this._$position} revLen=${this._$revision.length} hasCurrentData=${!!this._$currentData}`);
         if (!this._$position) {
-            console.log(`[UNDO-DBG] undo() ABORT pos=0`);
             return ;
         }
 
         const currentJson = this.toJSON(true);
         if (!this._$currentData) {
             this._$currentData = currentJson;
-            console.log(`[UNDO-DBG] undo() captured currentData len=${this._$currentData.length}`);
         }
 
         // Skip snapshots that match the current state — these are post-edit
@@ -610,18 +607,14 @@ class WorkSpace
                 data = candidate;
                 break;
             }
-            console.log(`[UNDO-DBG] undo() SKIP same-as-current at pos=${this._$position}`);
         }
 
         if (!data) {
-            console.log(`[UNDO-DBG] undo() ABORT - no distinct prior state found`);
             return ;
         }
 
-        console.log(`[UNDO-DBG] undo() RESTORING pos=${this._$position} dataLen=${data.length}`);
         this.reloadData(data);
         Util.$timelineFrame.currentFrame = 0;
-        console.log(`[UNDO-DBG] undo() DONE pos=${this._$position}`);
     }
 
     /**
@@ -633,11 +626,9 @@ class WorkSpace
      */
     redo ()
     {
-        console.log(`[UNDO-DBG] redo() ENTER wsId=${this._$wsDbgId} pos=${this._$position} revLen=${this._$revision.length} hasCurrentData=${!!this._$currentData}`);
         if (!this._$revision.length
             || this._$position === this._$revision.length
         ) {
-            console.log(`[UNDO-DBG] redo() ABORT - at top of stack`);
             return ;
         }
 
@@ -651,25 +642,20 @@ class WorkSpace
                 data = candidate;
                 break;
             }
-            console.log(`[UNDO-DBG] redo() SKIP same-as-current at pos=${this._$position - 1}`);
         }
 
         // Fall through to stashed currentData if at top
         if (!data && this._$currentData && this._$currentData !== currentJson) {
             data = this._$currentData;
             this._$currentData = null;
-            console.log(`[UNDO-DBG] redo() using stashed currentData`);
         }
 
         if (!data) {
-            console.log(`[UNDO-DBG] redo() ABORT - no distinct forward state`);
             return ;
         }
 
-        console.log(`[UNDO-DBG] redo() RESTORING pos=${this._$position} dataLen=${data.length}`);
         this.reloadData(data);
         Util.$timelineFrame.currentFrame = 0;
-        console.log(`[UNDO-DBG] redo() DONE pos=${this._$position}`);
     }
 
     /**
@@ -682,7 +668,6 @@ class WorkSpace
      */
     reloadData (data)
     {
-        console.log(`[UNDO-DBG] reloadData() ENTER dataType=${typeof data} dataLen=${typeof data === 'string' ? data.length : 'N/A'} sceneId=${this._$scene && this._$scene.id} curFrame=${Util.$timelineFrame && Util.$timelineFrame.currentFrame}`);
         this._$reloadInProgress = true;
         // 選択中のレイヤーを保持
         const layerIds = [];
@@ -754,16 +739,9 @@ class WorkSpace
         try {
             const self = this;
             if (Util.$screenZoom && typeof Util.$screenZoom.execute === "function") {
-                console.log(`[UNDO-DBG] reloadData() invoking ScreenZoom.execute(0)`);
                 Util.$screenZoom.execute(0);
-                // ScreenZoom.execute fires changeFrame asynchronously without
-                // returning the promise. Clear the reload guard on the next
-                // microtask tick — by then the dispose loop has already run
-                // and only the async DOM reset remains, which doesn't call
-                // temporarilySaved.
                 Promise.resolve().then(() => {
                     self._$reloadInProgress = false;
-                    console.log(`[UNDO-DBG] reloadData() ASYNC DONE`);
                 });
             } else {
                 // Fallback: direct changeFrame
@@ -783,9 +761,7 @@ class WorkSpace
             }
         } catch (e) {
             this._$reloadInProgress = false;
-            console.warn("[UNDO-DBG] reloadData: redraw failed", e);
         }
-        console.log(`[UNDO-DBG] reloadData() EXIT (async pending)`);
     }
 
     /**

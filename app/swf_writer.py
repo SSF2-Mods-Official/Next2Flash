@@ -494,6 +494,10 @@ def _normalize_filter(f: dict) -> dict:
             f.get('strength', 1.0), f.get('quality', 1),
             gtype, f.get('knockout', False),
         ]}
+    elif name == 'ColorMatrixFilter':
+        return {'class': 'ColorMatrixFilter', 'params': [
+            None, f.get('matrix', [1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,1,0]),
+        ]}
     return f  # unknown, pass through as-is
 
 
@@ -502,6 +506,131 @@ def encode_filter_list(filters: list) -> bytes:
     Encode a list of Next2D ISurfaceFilter objects into SWF FilterList bytes.
     """
     log.debug("encode_filter_list: %d filters", len(filters))
+    if not filters:
+        return b""
+
+    # Encode each filter into a separate buffer first so we can write an
+    # accurate count (unknown filter types are silently skipped instead of
+    # producing a malformed tag with count > encoded entries).
+    encoded_filters = []
+    for f in filters:
+        f = _normalize_filter(f)
+        fbuf = io.BytesIO()
+        cls = f.get("class", "")
+        params = f.get("params", [])
+        p = params[1:] if params and params[0] is None else params
+
+        if cls == "BlurFilter":
+            fbuf.write(struct.pack("<B", SWF_FILTER_BLUR))
+            blur_x = _to_fixed16(p[0] if len(p) > 0 else 4.0)
+            blur_y = _to_fixed16(p[1] if len(p) > 1 else 4.0)
+            quality = p[2] if len(p) > 2 else 1
+            fbuf.write(struct.pack("<IIB", blur_x, blur_y, (quality << 3)))
+            encoded_filters.append(fbuf.getvalue())
+
+        elif cls == "GlowFilter":
+            fbuf.write(struct.pack("<B", SWF_FILTER_GLOW))
+            color = int(p[0]) if len(p) > 0 else 0xFF0000
+            alpha = p[1] if len(p) > 1 else 1.0
+            blur_x = _to_fixed16(p[2] if len(p) > 2 else 4.0)
+            blur_y = _to_fixed16(p[3] if len(p) > 3 else 4.0)
+            strength = _to_fixed8(p[4] if len(p) > 4 else 2.0)
+            quality = p[5] if len(p) > 5 else 1
+            inner = p[6] if len(p) > 6 else False
+            knockout = p[7] if len(p) > 7 else False
+            r, g, b = (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF
+            a = int(round(alpha * 255))
+            fbuf.write(struct.pack("<BBBB", r, g, b, a))
+            fbuf.write(struct.pack("<II", blur_x, blur_y))
+            fbuf.write(struct.pack("<H", strength))
+            flags = (int(inner) << 7) | (int(knockout) << 6) | (quality & 0x1F)
+            fbuf.write(struct.pack("<B", flags))
+            encoded_filters.append(fbuf.getvalue())
+
+        elif cls == "DropShadowFilter":
+            fbuf.write(struct.pack("<B", SWF_FILTER_DROPSHADOW))
+            distance = p[0] if len(p) > 0 else 4.0
+            angle_deg = p[1] if len(p) > 1 else 45.0
+            color = int(p[2]) if len(p) > 2 else 0x000000
+            alpha = p[3] if len(p) > 3 else 1.0
+            blur_x = _to_fixed16(p[4] if len(p) > 4 else 4.0)
+            blur_y = _to_fixed16(p[5] if len(p) > 5 else 4.0)
+            strength = _to_fixed8(p[6] if len(p) > 6 else 1.0)
+            quality = p[7] if len(p) > 7 else 1
+            inner = p[8] if len(p) > 8 else False
+            knockout = p[9] if len(p) > 9 else False
+            hide_obj = p[10] if len(p) > 10 else False
+            r, g, b = (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF
+            a = int(round(alpha * 255))
+            fbuf.write(struct.pack("<BBBB", r, g, b, a))
+            fbuf.write(struct.pack("<II", blur_x, blur_y))
+            dist_fixed = _to_fixed16(distance)
+            angle_fixed = _to_fixed16(angle_deg * math.pi / 180.0)
+            fbuf.write(struct.pack("<II", dist_fixed, angle_fixed))
+            fbuf.write(struct.pack("<H", strength))
+            flags = (int(inner) << 7) | (int(knockout) << 6) | \
+                    (int(hide_obj) << 5) | (quality & 0x1F)
+            fbuf.write(struct.pack("<B", flags))
+            encoded_filters.append(fbuf.getvalue())
+
+        elif cls == "BevelFilter":
+            fbuf.write(struct.pack("<B", SWF_FILTER_BEVEL))
+            distance = p[0] if len(p) > 0 else 4.0
+            angle_deg = p[1] if len(p) > 1 else 45.0
+            highlight_color = int(p[2]) if len(p) > 2 else 0xFFFFFF
+            highlight_alpha = p[3] if len(p) > 3 else 1.0
+            shadow_color = int(p[4]) if len(p) > 4 else 0x000000
+            shadow_alpha = p[5] if len(p) > 5 else 1.0
+            blur_x = _to_fixed16(p[6] if len(p) > 6 else 4.0)
+            blur_y = _to_fixed16(p[7] if len(p) > 7 else 4.0)
+            strength = _to_fixed8(p[8] if len(p) > 8 else 1.0)
+            quality = p[9] if len(p) > 9 else 1
+            bevel_type = p[10] if len(p) > 10 else "full"
+            knockout = p[11] if len(p) > 11 else False
+            hr, hg, hb = (highlight_color >> 16) & 0xFF, (highlight_color >> 8) & 0xFF, highlight_color & 0xFF
+            ha = int(round(highlight_alpha * 255))
+            sr, sg, sb = (shadow_color >> 16) & 0xFF, (shadow_color >> 8) & 0xFF, shadow_color & 0xFF
+            sa = int(round(shadow_alpha * 255))
+            fbuf.write(struct.pack("<BBBB", sr, sg, sb, sa))
+            fbuf.write(struct.pack("<BBBB", hr, hg, hb, ha))
+            fbuf.write(struct.pack("<II", blur_x, blur_y))
+            fbuf.write(struct.pack("<II", _to_fixed16(distance), _to_fixed16(angle_deg * math.pi / 180.0)))
+            fbuf.write(struct.pack("<H", strength))
+            on_top = 0
+            inner_flag = 0
+            if bevel_type == "inner":
+                inner_flag = 1
+            elif bevel_type == "full":
+                inner_flag = 1
+                on_top = 1
+            flags = (int(inner_flag) << 7) | (int(knockout) << 6) | \
+                    (int(on_top) << 4) | (quality & 0x0F)
+            fbuf.write(struct.pack("<B", flags))
+            encoded_filters.append(fbuf.getvalue())
+
+        elif cls == "ColorMatrixFilter":
+            fbuf.write(struct.pack("<B", SWF_FILTER_COLORMATRIX))
+            matrix = p[0] if len(p) > 0 else [1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,1,0]
+            for val in matrix:
+                fbuf.write(struct.pack("<f", float(val)))
+            encoded_filters.append(fbuf.getvalue())
+
+        else:
+            log.warning("encode_filter_list: unknown filter class %r — skipping", cls)
+            # Do not append — skip unknown filter to avoid malformed count
+
+    if not encoded_filters:
+        return b""
+
+    result = io.BytesIO()
+    result.write(struct.pack("<B", len(encoded_filters)))
+    for fb in encoded_filters:
+        result.write(fb)
+    return result.getvalue()
+
+
+def _encode_filter_list_UNUSED(filters: list) -> bytes:
+    """Old implementation kept for reference — replaced by encode_filter_list above."""
     if not filters:
         return b""
 

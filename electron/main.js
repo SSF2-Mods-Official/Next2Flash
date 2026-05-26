@@ -98,6 +98,49 @@ function startPythonServer() {
       return;
     }
 
+    // Kill any process currently occupying SERVER_PORT (handles multiple orphans and
+    // cases where the PID file was missing or stale). Windows-only; on other platforms
+    // fall back to the PID file approach.
+    const pidFile = path.join(APP_DIR, 'server.pid');
+    let spawnDelay = 0;
+    if (process.platform === 'win32') {
+      try {
+        const { execSync } = require('child_process');
+        const netout = execSync(
+          `netstat -ano 2>nul | findstr ":${SERVER_PORT} " | findstr LISTENING`,
+          { shell: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+        );
+        const pids = new Set();
+        for (const line of netout.split('\n')) {
+          const m = line.trim().match(/(\d+)\s*$/);
+          if (m) pids.add(m[1]);
+        }
+        for (const pid of pids) {
+          try {
+            execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' });
+            console.log(`[N2F] Killed orphaned server process PID ${pid} on port ${SERVER_PORT}`);
+            spawnDelay = 800;
+          } catch (_) {}
+        }
+      } catch (_) {}
+    } else {
+      // Non-Windows: fall back to PID file
+      if (fs.existsSync(pidFile)) {
+        try {
+          const oldPid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+          if (oldPid && !isNaN(oldPid)) {
+            try {
+              process.kill(oldPid, 0);
+              process.kill(oldPid);
+              spawnDelay = 800;
+            } catch (_) {}
+          }
+        } catch (_) {}
+      }
+    }
+    // Clean up PID file regardless
+    try { fs.unlinkSync(pidFile); } catch (_) {}
+
     // Packaged: run the bundled server.exe (no Python needed on host).
     // Dev: run `python server.py` as before.
     let cmd, args, cwd;
@@ -114,6 +157,7 @@ function startPythonServer() {
     }
     console.log(`[N2F] APP_DIR = ${APP_DIR}`);
 
+    setTimeout(() => {
     pythonProcess = spawn(cmd, args, {
       cwd,
       env: { ...process.env, N2F_PORT: String(SERVER_PORT), N2F_ELECTRON: '1', N2F_WEB_ROOT: cwd },
@@ -167,6 +211,7 @@ function startPythonServer() {
 
     // Give the process a moment to start before first poll
     setTimeout(poll, 500);
+    }, spawnDelay); // delay if we just killed an old server (port release)
   });
 }
 
@@ -209,6 +254,24 @@ function createWindow() {
     mainWindow.show();
   });
 
+  // Unsaved-changes dialog: fires when the renderer calls event.preventDefault() in beforeunload
+  mainWindow.webContents.on('will-prevent-unload', (event) => {
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'question',
+      buttons: ['Leave Without Saving', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Unsaved Changes',
+      message: 'You have unsaved changes.',
+      detail: 'Leave without saving?',
+    });
+    if (choice === 0) {
+      // Override the page's prevention — allow the window to close
+      event.preventDefault();
+    }
+    // choice === 1 (Cancel): do nothing → window stays open
+  });
+
   // Prevent the tool's auto-save from persisting closed projects to IndexedDB.
   // On close, mark Util.$updated = false so the beforeunload handler skips
   // auto-save, then delete the IndexedDB store so no stale project loads on restart.
@@ -226,6 +289,12 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    // Closing the main window quits the entire app, including any auxiliary
+    // windows (profiler, server console) that would otherwise keep the app
+    // process alive because window-all-closed wouldn't fire.
+    if (!app.isQuitting) {
+      app.quit();
+    }
   });
 
   // Open external links in the OS browser
@@ -405,6 +474,11 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+Shift+O',
           click: () => handleOpenProject(),
         },
+        {
+          label: 'Open Recent...',
+          accelerator: 'CmdOrCtrl+Shift+R',
+          click: () => mainWindow?.webContents.send('menu:open-recent'),
+        },
         { type: 'separator' },
         {
           label: 'Save Project',
@@ -474,8 +548,8 @@ function buildMenu() {
             dialog.showMessageBox(mainWindow, {
               type: 'info',
               title: 'About Next2Flash',
-              message: 'Next2Flash v1.0.0',
-              detail: 'Desktop SWF authoring tool.\nPowered by Electron + Next2D + Python.',
+              message: 'Next2Flash 1st Edition v0.1',
+              detail: 'Desktop SWF authoring tool.\nPowered by Electron + Next2D + Python.\nMasterWex',
             });
           },
         },
@@ -486,15 +560,64 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// ── Per-dialog last-used directory persistence ────────────────────────────
+// Each dialog key maps to the last directory the user navigated to.
+// Stored in a small JSON file inside userData so it persists across sessions.
+
+let _settingsPath = null;  // resolved after app.setPath('userData') is called
+let _lastDirs = {};        // in-memory cache
+
+function getSettingsPath() {
+  if (!_settingsPath) {
+    _settingsPath = path.join(app.getPath('userData'), 'dialog-dirs.json');
+  }
+  return _settingsPath;
+}
+
+function loadLastDirs() {
+  try {
+    const raw = fs.readFileSync(getSettingsPath(), 'utf8');
+    _lastDirs = JSON.parse(raw);
+  } catch (_) {
+    _lastDirs = {};
+  }
+}
+
+function saveLastDirs() {
+  try {
+    fs.writeFileSync(getSettingsPath(), JSON.stringify(_lastDirs), 'utf8');
+  } catch (_) { /* non-fatal */ }
+}
+
+/**
+ * Return the last directory used for a named dialog key,
+ * or undefined if none has been recorded yet.
+ */
+function lastDir(key) {
+  if (!Object.keys(_lastDirs).length) loadLastDirs();
+  return _lastDirs[key] || undefined;
+}
+
+/**
+ * Record the directory from a chosen file path for a named dialog key.
+ */
+function rememberDir(key, filePath) {
+  if (!filePath) return;
+  _lastDirs[key] = path.dirname(filePath);
+  saveLastDirs();
+}
+
 // ── IPC handlers (native dialogs, filesystem) ──────────────────────────────
 
 async function handleImportSWF() {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Import SWF File',
+    defaultPath: lastDir('importSwf'),
     filters: [{ name: 'SWF Files', extensions: ['swf'] }],
     properties: ['openFile'],
   });
   if (!result.canceled && result.filePaths.length > 0) {
+    rememberDir('importSwf', result.filePaths[0]);
     mainWindow.webContents.send('file:import-swf', result.filePaths[0]);
   }
 }
@@ -502,10 +625,12 @@ async function handleImportSWF() {
 async function handleOpenProject() {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Open N2D Project',
+    defaultPath: lastDir('openProject'),
     filters: [{ name: 'N2D Files', extensions: ['n2d'] }],
     properties: ['openFile'],
   });
   if (!result.canceled && result.filePaths.length > 0) {
+    rememberDir('openProject', result.filePaths[0]);
     mainWindow.webContents.send('file:open-project', result.filePaths[0]);
   }
 }
@@ -520,26 +645,34 @@ ipcMain.handle('dialog:save-file', async (_event, options) => {
 });
 
 ipcMain.handle('dialog:save-swf', async (_event, defaultName) => {
+  const dir = lastDir('exportSwf');
   const result = await dialog.showSaveDialog(mainWindow, {
     title: 'Export SWF',
-    defaultPath: defaultName || 'output.swf',
+    defaultPath: dir ? path.join(dir, defaultName || 'output.swf') : (defaultName || 'output.swf'),
     filters: [
       { name: 'SWF Files', extensions: ['swf'] },
       { name: 'SSF Files', extensions: ['ssf'] },
     ],
   });
+  if (!result.canceled && result.filePath) {
+    rememberDir('exportSwf', result.filePath);
+  }
   return result.canceled ? null : result.filePath;
 });
 
 ipcMain.handle('dialog:open-swf', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Import SWF File',
+    defaultPath: lastDir('importSwf'),
     filters: [
       { name: 'SWF Files', extensions: ['swf', 'ssf'] },
       { name: 'All Files', extensions: ['*'] },
     ],
     properties: ['openFile'],
   });
+  if (!result.canceled && result.filePaths.length) {
+    rememberDir('importSwf', result.filePaths[0]);
+  }
   return (result.canceled || !result.filePaths.length) ? null : result.filePaths[0];
 });
 
@@ -554,6 +687,10 @@ ipcMain.handle('fs:write-file', async (_event, filePath, data) => {
 
 ipcMain.handle('fs:exists', async (_event, filePath) => {
   return fs.existsSync(filePath);
+});
+
+ipcMain.handle('shell:show-item-in-folder', (_event, filePath) => {
+  shell.showItemInFolder(filePath);
 });
 
 // ── Debug log file ─────────────────────────────────────────────────────────
@@ -584,6 +721,21 @@ ipcMain.on('show-server-console', () => {
     // If already loaded, send immediately too
     serverConsoleWindow.webContents.send('console:scroll-to-error');
   }
+});
+
+// IPC: auto-show server console during import/open; track if we opened it
+let _consoleAutoOpened = false;
+ipcMain.on('show-server-console-auto', () => {
+  _consoleAutoOpened = !serverConsoleWindow || serverConsoleWindow.isDestroyed();
+  createServerConsoleWindow();
+});
+
+// IPC: auto-hide server console after import/open finishes (only if we opened it)
+ipcMain.on('hide-server-console-auto', () => {
+  if (_consoleAutoOpened && serverConsoleWindow && !serverConsoleWindow.isDestroyed()) {
+    serverConsoleWindow.close();
+  }
+  _consoleAutoOpened = false;
 });
 
 // IPC: profiler events from renderer → profiler window + log file
@@ -639,5 +791,14 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  app.isQuitting = true;
+  // Force-close auxiliary windows (profiler, server console) so the process can
+  // actually exit. Without this, closing them via [X] after a quit signal could
+  // hang on their renderer's beforeunload.
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win !== mainWindow && !win.isDestroyed()) {
+      win.destroy();
+    }
+  }
   stopPythonServer();
 });

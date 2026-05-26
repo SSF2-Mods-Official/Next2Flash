@@ -3,7 +3,7 @@
 Compile a next2D .n2D file into an AS3 SWF.
 
 Usage:
-    python compile_n2d.py <input.n2D> -o <output.swf> --shared <shared_dir>
+    python compile_n2d.py <input.n2D> -o <output.swf> [--shared <shared_dir>]
 
 This script:
   1. Loads the .n2D file (zlib-compressed, URI-encoded JSON)
@@ -82,6 +82,18 @@ def _decode_raw_body(s) -> bytes:
         return b''
     if isinstance(s, (bytes, bytearray)):
         return bytes(s)
+    # Dict: Node.js Buffer.toJSON() → {"type": "Buffer", "data": [...]}
+    # or Uint8Array JSON → {"0": 255, "1": 128, ...}
+    if isinstance(s, dict):
+        if s.get("type") == "Buffer" and isinstance(s.get("data"), list):
+            return bytes(s["data"])
+        # Numeric-keyed dict (Uint8Array serialised as object)
+        try:
+            length = len(s)
+            return bytes(s[str(i)] for i in range(length))
+        except (KeyError, TypeError, ValueError):
+            pass
+        raise ValueError(f"Unexpected dict format for raw body: {list(s.keys())[:5]}")
     # Strip 'b64:' prefix if present
     if isinstance(s, str) and s.startswith('b64:'):
         s = s[4:]
@@ -710,18 +722,71 @@ def _remap_edit_text_raw_body(raw_body: bytes,
 
 
 # ── SDK detection ────────────────────────────────────────────────────────
-SDK_SEARCH_PATHS = [
+# Fallback search paths (used only if no bundled SDK and no env var is set)
+SDK_FALLBACK_PATHS = [
     r"C:\aflex_sdk",
     r"C:\flex_sdk",
     r"C:\apache-flex-sdk",
 ]
 
 
+def find_java_exe() -> Optional[str]:
+    """Return the path to the java executable for running mxmlc.
+
+    Priority:
+    1. Bundled JRE in flex_sdk/jre/ (created by build-release.bat via jlink)
+    2. JAVA_HOME / JRE_HOME environment variable
+    3. System java on PATH
+    """
+    _candidate_bases = [
+        os.path.dirname(os.path.abspath(__file__)),    # source mode: app/
+        os.environ.get("N2F_WEB_ROOT", ""),             # packaged mode: resources/app/
+        os.getcwd(),                                    # last resort: cwd
+    ]
+    for _base in _candidate_bases:
+        if not _base:
+            continue
+        for _java_name in ("java.exe", "java"):
+            _java_exe = os.path.join(_base, "flex_sdk", "jre", "bin", _java_name)
+            if os.path.isfile(_java_exe):
+                return _java_exe
+
+    for _env_var in ("JAVA_HOME", "JRE_HOME"):
+        _env = os.environ.get(_env_var)
+        if _env:
+            _java_name = "java.exe" if sys.platform == "win32" else "java"
+            _java_exe = os.path.join(_env, "bin", _java_name)
+            if os.path.isfile(_java_exe):
+                return _java_exe
+
+    return shutil.which("java")
+
+
 def find_sdk() -> Optional[str]:
+    # 1. Explicit env var override
     env = os.environ.get("FLEX_HOME") or os.environ.get("AIR_SDK_HOME")
     if env and os.path.isdir(env):
         return env
-    for p in SDK_SEARCH_PATHS:
+
+    # 2. Bundled SDK shipped with Next2Flash (app/flex_sdk/).
+    #    Check multiple base directories because under PyInstaller server.exe,
+    #    __file__ resolves to sys._MEIPASS (temp extraction dir), not app/.
+    #    N2F_WEB_ROOT is set by Electron main.js to the app resource dir.
+    _candidate_bases = [
+        os.path.dirname(os.path.abspath(__file__)),    # source mode: app/
+        os.environ.get("N2F_WEB_ROOT", ""),             # packaged mode: resources/app/
+        os.getcwd(),                                    # last resort: cwd
+    ]
+    for _base in _candidate_bases:
+        if not _base:
+            continue
+        bundled = os.path.join(_base, "flex_sdk")
+        if os.path.isfile(os.path.join(bundled, "bin", "mxmlc.bat")) or \
+           os.path.isfile(os.path.join(bundled, "bin", "mxmlc")):
+            return bundled
+
+    # 3. System-wide installations as last resort
+    for p in SDK_FALLBACK_PATHS:
         if os.path.isdir(p):
             return p
     return None
@@ -2404,8 +2469,270 @@ def generate_symbol_stubs(
     return sym_to_class, fla_classes
 
 
+# ── Known AIR-only types not present in playerglobal.swc 25.0 ───────────────
+_KNOWN_AIR_TYPES: Dict[str, str] = {
+    'ExtensionContext':              'flash.external.ExtensionContext',
+    'DatagramSocketDataEvent':       'flash.events.DatagramSocketDataEvent',
+    'ServerSocketConnectEvent':      'flash.events.ServerSocketConnectEvent',
+    'NativeWindowDisplayStateEvent': 'flash.desktop.NativeWindowDisplayStateEvent',
+    'File':                          'flash.filesystem.File',
+    'FileStream':                    'flash.filesystem.FileStream',
+    'FileMode':                      'flash.filesystem.FileMode',
+    'NativeApplication':             'flash.desktop.NativeApplication',
+    'NativeWindow':                  'flash.desktop.NativeWindow',
+    'NativeMenu':                    'flash.desktop.NativeMenu',
+    'NativeMenuItem':                'flash.desktop.NativeMenuItem',
+    'NativeWindowInitOptions':       'flash.display.NativeWindowInitOptions',
+    'SQLConnection':                 'flash.data.SQLConnection',
+    'SQLStatement':                  'flash.data.SQLStatement',
+    'SQLResult':                     'flash.data.SQLResult',
+    'StorageVolume':                 'flash.filesystem.StorageVolume',
+    'StorageVolumeChangeEvent':      'flash.events.StorageVolumeChangeEvent',
+    'ServerSocket':                  'flash.net.ServerSocket',
+    'DatagramSocket':                'flash.net.DatagramSocket',
+}
+
+
+def _find_fqn_for_type(source_file: str, type_name: str) -> Optional[str]:
+    """
+    Determine the fully-qualified class name for an unresolved type.
+
+    1. Check the known AIR-types table first (fast path).
+    2. Look for an explicit ``import some.package.TypeName;`` in the file.
+    3. Infer from the file's own package declaration (same-package reference).
+    """
+    # 1. Known AIR type (fast path, no file I/O needed)
+    if type_name in _KNOWN_AIR_TYPES:
+        return _KNOWN_AIR_TYPES[type_name]
+
+    try:
+        with open(source_file, 'r', encoding='utf-8', errors='ignore') as f:
+            src = f.read()
+    except Exception:
+        return None
+
+    # 2. Explicit import
+    m = re.search(r'import\s+([\w.]+\.' + re.escape(type_name) + r')\s*;', src)
+    if m:
+        return m.group(1)
+
+    # 3. Same-package inference from the package declaration
+    pm = re.search(r'^\s*package\s+([\w.]+)\s*\{', src, re.MULTILINE)
+    if pm:
+        return f"{pm.group(1)}.{type_name}"
+
+    return None
+
+
+def _generate_as3_stub(stub_dir: str, fqn: str) -> bool:
+    """Write a minimal AS3 stub for ``fqn`` into ``stub_dir``. Returns True if created."""
+    parts = fqn.rsplit('.', 1)
+    package, classname = (parts[0], parts[1]) if len(parts) == 2 else ('', fqn)
+
+    path = os.path.join(stub_dir, *package.split('.'), classname + '.as') if package \
+        else os.path.join(stub_dir, classname + '.as')
+
+    if os.path.exists(path):
+        return False  # already there
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    pkg_decl = f'package {package}' if package else 'package'
+    content = f'{pkg_decl} {{\n    public class {classname} {{\n    }}\n}}\n'
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(content)
+    log.debug('_generate_as3_stub: %s -> %s', fqn, path)
+    return True
+
+
+def _apply_mxmlc_error_fixes(error_output: str, stub_dir: str) -> bool:
+    """
+    Parse mxmlc error output and apply in-place fixes so a retry can succeed.
+
+    Handles:
+      • "Type was not found" → generate a stub for the missing type.
+      • "Can not resolve a multiname reference unambiguously" → add an
+        explicit import to the offending file.
+      • "Method marked override must override another method" → strip the
+        ``override`` keyword from the offending file.
+
+    Returns True if at least one fix was applied.
+    """
+    fixed = False
+
+    # ── Pattern 1: missing type ──────────────────────────────────────────
+    # "C:\...\Foo.as(33): col: 48 Error: Type was not found ... : TypeName."
+    _type_re = re.compile(
+        r'([^\r\n:]+\.as)(?:\(\d+\))?[^:]*:\s*(?:col:\s*\d+\s+)?'
+        r'Error: Type was not found[^:]+:\s*(\w+)\.'
+    )
+    for m in _type_re.finditer(error_output):
+        src_file, type_name = m.group(1).strip(), m.group(2)
+        if not os.path.isfile(src_file):
+            continue
+        fqn = _find_fqn_for_type(src_file, type_name)
+        if fqn and _generate_as3_stub(stub_dir, fqn):
+            print(f"  Auto-stub: {fqn}")
+            fixed = True
+
+    # ── Pattern 2: multiname ambiguity ───────────────────────────────────
+    # "C:\...\Foo.as: Error: Can not resolve a multiname reference ...
+    #  PackageA:TypeName (from ...) and PackageB:TypeName ..."
+    # Fix: remove the flash.* conflicting import from the file (the project's
+    # own class should win automatically within its package).
+    _multi_re = re.compile(
+        r'([^\n]+?\.as)[^\n]*?'
+        r'Can not resolve a multiname reference unambiguously[.\s]*?'
+        r'([\w.]+):(\w+)\s+\(from[^)]+\)\s+and\s+([\w.]+):(\w+)',
+        re.DOTALL
+    )
+    for m in _multi_re.finditer(error_output):
+        src_file = m.group(1).strip()
+        pkg1, type1 = m.group(2), m.group(3)
+        pkg2, type2 = m.group(4), m.group(5)
+        if not os.path.isfile(src_file):
+            continue
+        # Determine which of the two is a flash.* type
+        flash_pkg = pkg1 if pkg1.startswith('flash.') else (pkg2 if pkg2.startswith('flash.') else None)
+        if flash_pkg is None:
+            continue
+        flash_type = type1 if pkg1 == flash_pkg else type2
+        flash_fqn = f"{flash_pkg}.{flash_type}"
+        # Remove the conflicting flash import so the project's own class wins.
+        # Try both explicit import and wildcard import.
+        flash_parent_pkg = flash_pkg  # e.g. "flash.ui"
+        try:
+            src = open(src_file, 'r', encoding='utf-8', errors='ignore').read()
+            new_src = src
+            # 1. Remove exact import: import flash.ui.Keyboard;
+            new_src = re.sub(
+                r'\bimport\s+' + re.escape(flash_fqn) + r'\s*;[\t ]*\r?\n?',
+                '', new_src
+            )
+            # 2. Remove wildcard import: import flash.ui.*;
+            wildcard = flash_parent_pkg + '.*'
+            new_src = re.sub(
+                r'\bimport\s+' + re.escape(wildcard).replace(r'\.\*', r'\.\*') + r'\s*;[\t ]*\r?\n?',
+                '', new_src
+            )
+            if new_src != src:
+                open(src_file, 'w', encoding='utf-8').write(new_src)
+                print(f"  Auto-fix multiname: removed flash import ({flash_fqn} / {wildcard}) from {os.path.basename(src_file)}")
+                fixed = True
+            else:
+                # Flash import not found literally — add explicit project import
+                project_pkg = pkg2 if pkg1.startswith('flash.') else pkg1
+                project_type = type2 if pkg1.startswith('flash.') else type1
+                project_fqn = f"{project_pkg}.{project_type}"
+                pm = re.search(r'package(?:\s+[\w.]+)?\s*\{', src)
+                if pm:
+                    imp_line = f'\nimport {project_fqn};'
+                    new_src = src[:pm.end()] + imp_line + src[pm.end():]
+                    open(src_file, 'w', encoding='utf-8').write(new_src)
+                    print(f"  Auto-fix multiname: added import {project_fqn} in {os.path.basename(src_file)}")
+                    fixed = True
+        except Exception:
+            pass
+
+    # ── Pattern 3b: non-reference assignment (decompiler artifact) ───────
+    # "C:\...\Foo.as(524): col: 28 Error: Cannot assign to a non-reference value."
+    # Caused by patterns like:  x || y || null.slot7 = null;
+    _nonref_re = re.compile(
+        r'([^\n]+?\.as)(?:\(\d+\))?[^\n]*'
+        r'Error: Cannot assign to a non-reference value'
+    )
+    _nonref_files: Set[str] = set()
+    for m in _nonref_re.finditer(error_output):
+        _nonref_files.add(m.group(1).strip())
+
+    for src_file in _nonref_files:
+        if not os.path.isfile(src_file):
+            continue
+        try:
+            src = open(src_file, 'r', encoding='utf-8', errors='ignore').read()
+            # Replace: anything || null.slotN = expr;
+            new_src = re.sub(
+                r'[^\n;]+\|\|\s*null\.\w+\s*=\s*[^;]+;',
+                ';  /* stubbed: non-ref assign artifact */',
+                src
+            )
+            # Replace bare: null.slotN = expr;
+            new_src = re.sub(
+                r'\bnull\.\w+\s*=\s*[^;]+;',
+                ';  /* stubbed: non-ref assign artifact */',
+                new_src
+            )
+            if new_src != src:
+                open(src_file, 'w', encoding='utf-8').write(new_src)
+                print(f"  Auto-fix non-ref assign: {os.path.basename(src_file)}")
+                fixed = True
+        except Exception:
+            pass
+
+    # ── Pattern 3: bad override ──────────────────────────────────────────
+    # "C:\...\Foo.as(16): col: 34 Error: Method marked override must override..."
+    _override_re = re.compile(
+        r'([^\r\n:]+\.as)(?:\(\d+\))?[^:]*:\s*(?:col:\s*\d+\s+)?'
+        r'Error: Method marked override must override another method'
+    )
+    _override_files: Set[str] = set()
+    for m in _override_re.finditer(error_output):
+        _override_files.add(m.group(1).strip())
+
+    for src_file in _override_files:
+        if not os.path.isfile(src_file):
+            continue
+        try:
+            src = open(src_file, 'r', encoding='utf-8', errors='ignore').read()
+            new_src = re.sub(
+                r'\boverride\s+((?:public|protected|private|internal)\s+function\b)',
+                r'\1', src
+            )
+            if new_src != src:
+                open(src_file, 'w', encoding='utf-8').write(new_src)
+                print(f"  Auto-fix override: {os.path.basename(src_file)}")
+                fixed = True
+        except Exception:
+            pass
+
+    # ── Pattern 4: return value in void function ─────────────────────────
+    # "C:\...\Foo.as(61): col: 97 Error: Return value must be undefined."
+    # Fix: strip the `return` keyword, leaving the expression as a statement.
+    _retval_re = re.compile(
+        r'([^\n]+?\.as)\((\d+)\)[^\n]*Error: Return value must be undefined'
+    )
+    _retval_fixes: Dict[str, List[int]] = {}
+    for m in _retval_re.finditer(error_output):
+        src_file = m.group(1).strip()
+        lineno = int(m.group(2))
+        _retval_fixes.setdefault(src_file, []).append(lineno)
+
+    for src_file, linenos in _retval_fixes.items():
+        if not os.path.isfile(src_file):
+            continue
+        try:
+            lines = open(src_file, 'r', encoding='utf-8', errors='ignore').read().split('\n')
+            changed = False
+            for lineno in linenos:
+                idx = lineno - 1
+                if 0 <= idx < len(lines):
+                    new_line = re.sub(r'^\s*return\s+', lambda m2: m2.group(0).replace('return ', ''), lines[idx], count=1)
+                    # Actually just remove the leading `return ` word
+                    new_line = re.sub(r'\breturn\s+(?=\S)', '', lines[idx], count=1)
+                    if new_line != lines[idx]:
+                        lines[idx] = new_line
+                        changed = True
+            if changed:
+                open(src_file, 'w', encoding='utf-8').write('\n'.join(lines))
+                print(f"  Auto-fix void-return: {os.path.basename(src_file)}")
+                fixed = True
+        except Exception:
+            pass
+
+    return fixed
+
+
 def compile_as3(
-    shared_dir: str,
+    shared_dir: Optional[str],
     sdk_path: str,
     libs: List[dict],
     main_class: str = "Main",
@@ -2419,11 +2746,37 @@ def compile_as3(
     Returns: (doabc_tag_bytes, symbol_to_classname_map, fla_classes_map)
     """
     log.info("compile_as3: main_class=%s project=%s sdk=%s", main_class, project_name, sdk_path)
-    mxmlc = os.path.join(sdk_path, "bin", "mxmlc.bat")
-    if not os.path.isfile(mxmlc):
-        mxmlc = os.path.join(sdk_path, "bin", "mxmlc")
-    if not os.path.isfile(mxmlc):
-        raise RuntimeError(f"mxmlc not found in {sdk_path}/bin/")
+
+    # Build the mxmlc invocation. Prefer calling java directly with the
+    # bundled (or system) JRE so we don't depend on mxmlc.bat or PATH.
+    java_exe = find_java_exe()
+    if java_exe:
+        mxmlc_jar = os.path.join(sdk_path, "lib", "mxmlc.jar")
+        frameworks_path = os.path.join(sdk_path, "frameworks")
+        _mxmlc_cmd_prefix = [
+            java_exe,
+            "-Xmx768m",
+            "-Dsun.io.useCanonCaches=false",
+            "-Djava.util.Arrays.useLegacyMergeSort=true",
+            "-XX:+UseG1GC",
+            "-jar", mxmlc_jar,
+            f"+flexlib={frameworks_path}",
+        ]
+        _use_shell = False
+        log.info("compile_as3: using java=%s", java_exe)
+    else:
+        # No java found — fall back to mxmlc.bat / mxmlc script
+        _mxmlc_bat = os.path.join(sdk_path, "bin", "mxmlc.bat")
+        if not os.path.isfile(_mxmlc_bat):
+            _mxmlc_bat = os.path.join(sdk_path, "bin", "mxmlc")
+        if not os.path.isfile(_mxmlc_bat):
+            raise RuntimeError(
+                f"mxmlc not found in {sdk_path}/bin/ and no java executable found. "
+                "Install Java or set JAVA_HOME."
+            )
+        _mxmlc_cmd_prefix = [_mxmlc_bat]
+        _use_shell = True
+        log.info("compile_as3: using mxmlc script (java not found in bundled JRE or PATH)")
 
     with tempfile.TemporaryDirectory(prefix="n2d_as3_") as tmp_dir:
         # Generate class stubs in a subdirectory
@@ -2457,6 +2810,52 @@ def compile_as3(
                 msg += f" (skipped {skipped_linkage} linkage-generated)"
             print(msg)
 
+        # Sanitize decompiler artifacts in embedded scripts that would cause
+        # mxmlc syntax errors (e.g. "new ._PrivateClass()", numeric-literal
+        # used as an object "12345.method()", dangling anonymous functions).
+        # Replace any such file with a minimal empty class stub so compilation
+        # can proceed.  The class body will be empty but the type will exist.
+        _artifact_re = re.compile(
+            r'new\s+\._[A-Za-z]'   # new ._ClassName() — private class ctor artifact
+            r'|\b\d{4,}\.[a-zA-Z]',  # 12345.method() — numeric literal as object
+            re.MULTILINE,
+        )
+        _pkg_re  = re.compile(r'package\s+([\w.]+)\s*\{')
+        _cls_re  = re.compile(r'public\s+(?:class|interface)\s+(\w+)')
+        sanitized_count = 0
+        if os.path.isdir(embedded_dir):
+            for _root, _dirs, _files in os.walk(embedded_dir):
+                for _fn in _files:
+                    if not _fn.endswith('.as'):
+                        continue
+                    _fpath = os.path.join(_root, _fn)
+                    try:
+                        with open(_fpath, 'r', encoding='utf-8', errors='ignore') as _sf:
+                            _src = _sf.read()
+                    except Exception:
+                        continue
+                    if not _artifact_re.search(_src):
+                        continue
+                    # Build a minimal empty stub preserving package + class name
+                    _pkg_m = _pkg_re.search(_src)
+                    _cls_m = _cls_re.search(_src)
+                    if _pkg_m and _cls_m:
+                        _stub = (
+                            f'package {_pkg_m.group(1)} {{\n'
+                            f'    public class {_cls_m.group(1)} {{\n'
+                            f'    }}\n'
+                            f'}}\n'
+                        )
+                    else:
+                        # Top-level or unparseable — write an empty default-pkg stub
+                        _bare = _fn[:-3]
+                        _stub = f'package {{\n    public class {_bare} {{\n    }}\n}}\n'
+                    with open(_fpath, 'w', encoding='utf-8') as _sf:
+                        _sf.write(_stub)
+                    sanitized_count += 1
+        if sanitized_count:
+            print(f"  Sanitized {sanitized_count} embedded script(s) with decompiler artifacts")
+
         # Build class-name inventory from embedded scripts so we can avoid
         # generating synthetic stubs for classes that already have real
         # imported/decompiled source.
@@ -2488,57 +2887,63 @@ def compile_as3(
         player_home = os.path.join(sdk_path, "frameworks", "libs", "player")
         env["PLAYERGLOBAL_HOME"] = player_home
 
-        # Filter out known redundant top-level shared classes that duplicate
-        # internal class declarations from package files. Keeping both can emit
-        # an extra standalone class in RT (for example, XFormData).
-        compile_shared_dir = shared_dir
-        class_decl_re = re.compile(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b")
-        shared_top_level = [
-            fn for fn in os.listdir(shared_dir)
-            if fn.endswith('.as') and os.path.isfile(os.path.join(shared_dir, fn))
-        ]
-        shared_nested_declared_classes: Set[str] = set()
-        for dirpath, _dirnames, filenames in os.walk(shared_dir):
-            rel = os.path.relpath(dirpath, shared_dir)
-            if rel == '.':
-                continue
-            for fn in filenames:
-                if not fn.endswith('.as'):
+        # Use shared_dir if it exists; otherwise fall back to an empty temp dir.
+        _real_shared = shared_dir if (shared_dir and os.path.isdir(shared_dir)) else None
+        if _real_shared is None:
+            compile_shared_dir = os.path.join(tmp_dir, "shared_empty")
+            os.makedirs(compile_shared_dir, exist_ok=True)
+        else:
+            # Filter out known redundant top-level shared classes that duplicate
+            # internal class declarations from package files. Keeping both can emit
+            # an extra standalone class in RT (for example, XFormData).
+            compile_shared_dir = _real_shared
+            class_decl_re = re.compile(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+            shared_top_level = [
+                fn for fn in os.listdir(_real_shared)
+                if fn.endswith('.as') and os.path.isfile(os.path.join(_real_shared, fn))
+            ]
+            shared_nested_declared_classes: Set[str] = set()
+            for dirpath, _dirnames, filenames in os.walk(_real_shared):
+                rel = os.path.relpath(dirpath, _real_shared)
+                if rel == '.':
                     continue
-                fpath = os.path.join(dirpath, fn)
+                for fn in filenames:
+                    if not fn.endswith('.as'):
+                        continue
+                    fpath = os.path.join(dirpath, fn)
+                    try:
+                        with open(fpath, 'r', encoding='utf-8', errors='ignore') as sf:
+                            src = sf.read()
+                    except Exception:
+                        continue
+                    for match in class_decl_re.finditer(src):
+                        shared_nested_declared_classes.add(match.group(1))
+
+            exclude_shared_top_level: List[str] = []
+            for fn in shared_top_level:
+                cls_name = fn[:-3]
+                if cls_name not in shared_nested_declared_classes:
+                    continue
+                fpath = os.path.join(_real_shared, fn)
                 try:
-                    with open(fpath, 'r', encoding='utf-8', errors='ignore') as sf:
-                        src = sf.read()
+                    with open(fpath, 'r', encoding='utf-8', errors='ignore') as tf:
+                        top_src = tf.read()
                 except Exception:
                     continue
-                for match in class_decl_re.finditer(src):
-                    shared_nested_declared_classes.add(match.group(1))
+                if len(class_decl_re.findall(top_src)) >= 2:
+                    exclude_shared_top_level.append(fn)
 
-        exclude_shared_top_level: List[str] = []
-        for fn in shared_top_level:
-            cls_name = fn[:-3]
-            if cls_name not in shared_nested_declared_classes:
-                continue
-            fpath = os.path.join(shared_dir, fn)
-            try:
-                with open(fpath, 'r', encoding='utf-8', errors='ignore') as tf:
-                    top_src = tf.read()
-            except Exception:
-                continue
-            if len(class_decl_re.findall(top_src)) >= 2:
-                exclude_shared_top_level.append(fn)
-
-        if exclude_shared_top_level:
-            compile_shared_dir = os.path.join(tmp_dir, "shared_filtered")
-            shutil.copytree(shared_dir, compile_shared_dir)
-            for fn in exclude_shared_top_level:
-                fpath = os.path.join(compile_shared_dir, fn)
-                if os.path.isfile(fpath):
-                    os.remove(fpath)
-            print(
-                "  Filtered redundant shared top-level classes: "
-                + ", ".join(sorted(fn[:-3] for fn in exclude_shared_top_level))
-            )
+            if exclude_shared_top_level:
+                compile_shared_dir = os.path.join(tmp_dir, "shared_filtered")
+                shutil.copytree(_real_shared, compile_shared_dir)
+                for fn in exclude_shared_top_level:
+                    fpath = os.path.join(compile_shared_dir, fn)
+                    if os.path.isfile(fpath):
+                        os.remove(fpath)
+                print(
+                    "  Filtered redundant shared top-level classes: "
+                    + ", ".join(sorted(fn[:-3] for fn in exclude_shared_top_level))
+                )
 
         # Prefer embedded Main.as (user-edited) over shared/original.
         # If shared was filtered, resolve Main.as against filtered directory.
@@ -2546,10 +2951,42 @@ def compile_as3(
         if not os.path.isfile(main_as):
             main_as = os.path.join(compile_shared_dir, main_class + ".as")
         if not os.path.isfile(main_as):
-            raise RuntimeError(f"Main class not found: {main_as}")
+            # Before generating a top-level stub, check for a sub-package Main.as
+            # in embedded_dir (e.g. com/foo/Main.as).  Generating a default-package
+            # stub alongside it causes mxmlc multiname ambiguity in every file that
+            # references "Main" unqualified.
+            import glob as _glob
+            _existing = [
+                f for f in _glob.glob(
+                    os.path.join(embedded_dir, '**', main_class + '.as'),
+                    recursive=True,
+                )
+                if os.path.normcase(f) != os.path.normcase(
+                    os.path.join(embedded_dir, main_class + '.as')
+                )
+            ]
+            if _existing:
+                # Reuse the sub-package Main.as as the entry point — no stub needed.
+                main_as = _existing[0]
+                print(f"  Using existing sub-package {main_class}.as (skipping top-level stub): {main_as}")
+            else:
+                # Safe to generate a default-package stub; put it in stub_dir so it
+                # does NOT shadow any embedded package class by the same name.
+                main_as = os.path.join(stub_dir, main_class + ".as")
+                with open(main_as, "w", encoding="utf-8") as _mf:
+                    _mf.write(
+                        f"package {{\n"
+                        f"    import flash.display.MovieClip;\n"
+                        f"    public class {main_class} extends MovieClip {{\n"
+                        f"        public function {main_class}() {{\n"
+                        f"            super();\n"
+                        f"        }}\n"
+                        f"    }}\n"
+                        f"}}\n"
+                    )
+                print(f"  Generated minimal {main_class}.as stub in stub_dir (not found in shared or embedded)")
 
-        cmd = [
-            mxmlc,
+        cmd = _mxmlc_cmd_prefix + [
             f"-source-path+={embedded_dir}",
             f"-source-path+={compile_shared_dir}",
             f"-source-path+={stub_dir}",
@@ -2682,9 +3119,22 @@ def compile_as3(
         total_stubs = len(sym_to_class) + len(fla_classes)
         total_includes = total_stubs + len(include_framework_classes) + len(embedded_classes) + len(embedded_top_level_classes)
         print(f"  Compiling {main_class}.as + {total_stubs} stubs + {len(include_framework_classes)} framework + {len(embedded_classes) + len(embedded_top_level_classes)} embedded classes with mxmlc...")
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, env=env, shell=True,
-        )
+
+        # Run mxmlc with up to 3 auto-fix retries (each pass can reveal new missing types)
+        result = None
+        for _attempt in range(8):
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, env=env, shell=_use_shell,
+            )
+            if result.returncode == 0:
+                break
+            if _attempt < 7:
+                error_text = (result.stderr or '') + '\n' + (result.stdout or '')
+                _fixed = _apply_mxmlc_error_fixes(error_text, stub_dir)
+                if _fixed:
+                    print(f"  Retrying mxmlc after auto-fixes (pass {_attempt+1})...")
+                else:
+                    break  # nothing fixable
 
         if result.returncode != 0:
             print(f"  mxmlc stdout: {result.stdout}", file=sys.stderr)
@@ -2763,11 +3213,11 @@ def extract_doabc_tags(swf_path: str) -> bytes:
 # ── Main compiler class ──────────────────────────────────────────────────
 
 class N2DCompiler:
-    def __init__(self, n2d_path: str, shared_dir: str,
-                 output_path: str, sdk_path: Optional[str] = None):
+    def __init__(self, n2d_path: str, shared_dir: Optional[str] = None,
+                 output_path: str = "", sdk_path: Optional[str] = None):
         log.debug('N2DCompiler.__init__: n2d=%s, shared=%s, output=%s', n2d_path, shared_dir, output_path)
         self.n2d_path = n2d_path
-        self.shared_dir = os.path.abspath(shared_dir)
+        self.shared_dir = os.path.abspath(shared_dir) if shared_dir else None
         self.output_path = output_path
         self.sdk_path = sdk_path or find_sdk()
 

@@ -176,9 +176,8 @@ def roundtrip_file(swf_path):
 
 # ── Main ──
 
-swf_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-    r"C:\Users\glwex\Documents\GitHub\ssf2-idk-140x-original\src",
-    r"Super Smash Flash 2 Beta v1.4.0.1\data\menu\menu_characters.ssf")
+# Set N2F_TEST_SWF env var or pass the SWF path as a command-line argument
+swf_path = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('N2F_TEST_SWF', r'\path\to\your.swf')
 
 print(f"Analyzing: {swf_path}")
 print()

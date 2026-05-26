@@ -23,7 +23,8 @@ TAG_NAMES = {
     84: 'DefineMorphShape2', 86: 'SceneFrameLabel', 88: 'DefineFontName',
 }
 
-swf_path = r"C:\Users\glwex\Documents\GitHub\ssf2-idk-140x-original\src\Super Smash Flash 2 Beta v1.4.0.1\data\menu\menu_characters.ssf"
+# Set N2F_TEST_SWF env var or replace this path with your local SWF file
+swf_path = os.environ.get('N2F_TEST_SWF', r'\path\to\your.swf')
 
 with open(swf_path, 'rb') as f:
     orig_data = f.read()

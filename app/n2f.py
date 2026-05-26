@@ -156,7 +156,8 @@ def cmd_compile(args):
     else:
         name = os.path.splitext(os.path.basename(n2d_path))[0]
     output = args.output or name + ".swf"
-    shared = args.shared or os.path.join(SCRIPT_DIR, "shared")
+    _default_shared = os.path.join(SCRIPT_DIR, "shared")
+    shared = args.shared or (_default_shared if os.path.isdir(_default_shared) else None)
 
     t0 = time.time()
     print(f"Compiling {n2d_path} -> {output} ...", flush=True)

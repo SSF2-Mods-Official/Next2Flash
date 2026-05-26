@@ -39,6 +39,16 @@ class ScreenTab
             this.createElement(Util.$workSpaces[idx], idx);
         }
 
+        // ホームボタン
+        const homeButton = document.getElementById("view-tab-home");
+        if (homeButton) {
+            homeButton.addEventListener("click", () =>
+            {
+                const evt = new CustomEvent("n2f:show-welcome", { bubbles: false });
+                document.dispatchEvent(evt);
+            });
+        }
+
         // タブの追加ボタン
         const button = document
             .getElementById("view-tab-add");
@@ -309,7 +319,10 @@ class ScreenTab
     activeTab (event, move_tab = false)
     {
         // playerの全てのキャッシュを初期化
-        Util.$root._$stage._$player.stop();
+        // Guard against uninitialized player (e.g. no workspace running yet).
+        if (Util.$root && Util.$root._$stage && Util.$root._$stage._$player) {
+            Util.$root._$stage._$player.stop();
+        }
 
         // モーダルを非表示にする
         Util.$endMenu();
@@ -416,27 +429,22 @@ class ScreenTab
         const tool = Util.$tools.getDefaultTool("arrow");
         tool.clear();
 
-        // タブが0になった場合は空のタブを追加する
+        // Clear the stage canvas content immediately so the old project's
+        // visuals don't persist while the next workspace loads.
+        Util.$screen.clearStageArea();
+
+        // タブが0になった場合はウェルカムスクリーンを表示する
         const parent = document.getElementById("view-tab-area");
         if (!parent.children.length) {
 
-            // reset
+            // reset state — no active workspace
             Util.$workSpaces.length = 0;
             Util.$activeWorkSpaceId = 0;
 
-            // new WorkSpace
-            const workSpace = new WorkSpace();
-            Util.$workSpaces.push(workSpace);
-
-            // create tab
-            this.createElement(workSpace, 0);
-
-            // start — defer heavy teardown so the UI updates first
-            const element = parent.children[0];
-            element.setAttribute("class", "tab active");
+            // Stop the deleted workspace and signal the integration layer
             setTimeout(() => {
                 deleteWorkSpace.stop();
-                workSpace.run();
+                document.dispatchEvent(new CustomEvent('n2f:no-workspaces'));
             }, 0);
 
         } else {
@@ -548,6 +556,13 @@ class ScreenTab
 
         // 親のイベントを中止
         event.stopPropagation();
+
+        // Let the integration layer intercept this to show the New Project dialog.
+        const customEvt = new CustomEvent('n2f:add-tab-requested', { cancelable: true, bubbles: false });
+        document.dispatchEvent(customEvt);
+        if (customEvt.defaultPrevented) {
+            return; // integration layer handled it
+        }
 
         this.save();
 

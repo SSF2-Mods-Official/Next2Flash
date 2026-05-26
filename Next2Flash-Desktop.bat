@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 title Next2Flash (Desktop)
 echo.
 echo  Starting Next2Flash...
@@ -24,12 +25,18 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Check if a server is already running on port 5000
-powershell -NoProfile -Command "try{$r=Invoke-WebRequest -Uri 'http://127.0.0.1:5000/api/health' -TimeoutSec 1 -UseBasicParsing -EA Stop; if($r.StatusCode -eq 200){exit 0}}catch{} exit 1" >nul 2>&1
-if not errorlevel 1 (
-    echo  Server already running on port 5000, reusing it.
-    goto :launch_electron
+:: Kill any process currently listening on port 5000 (handles multiple orphans, not just PID file)
+echo  Checking for existing processes on port 5000...
+for /f "tokens=5" %%P in ('netstat -ano 2^>nul ^| findstr /C:":5000 " ^| findstr "LISTENING"') do (
+    echo  Killing process %%P on port 5000...
+    taskkill /PID %%P /F >nul 2>&1
 )
+:: Also clean up PID file if present
+if exist "%APP_DIR%\server.pid" (
+    del /f /q "%APP_DIR%\server.pid" 2>nul
+)
+:: Give OS a moment to release the port
+powershell -NoProfile -Command "Start-Sleep -Milliseconds 800" >nul 2>&1
 
 :: Start Python server in a minimized background window
 echo  Starting Python server...

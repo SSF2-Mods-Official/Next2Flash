@@ -176,15 +176,35 @@ class Project
                     workSpace.name = name;
                     workSpace.loadFromObject(jsonData);
 
+                    // Stop the currently-active workspace before activating the new
+                    // one. Skipping this leaves the old MovieClip's _$scene alive
+                    // with stale layer-id DOM nodes, which later crashes with
+                    // "Cannot read properties of undefined (reading '_$children')"
+                    // when the old scene's stop() finally runs (e.g. on tab switch
+                    // back) against the new workspace's timeline DOM.
+                    const prevWs = Util.$currentWorkSpace();
+                    if (prevWs) {
+                        prevWs.stop();
+                    }
+
+                    const newIdx = Util.$workSpaces.length;
                     Util.$workSpaces.push(workSpace);
-                    Util.$screenTab.createElement(workSpace, Util.$workSpaces.length - 1);
-                    Util.$screenTab.activeTab({
-                        "currentTarget": {
-                            "dataset": {
-                                "tabId": Util.$workSpaces.length - 1
-                            }
-                        }
-                    });
+                    Util.$screenTab.createElement(workSpace, newIdx);
+
+                    // Activate tab visually without calling activeTab() — it skips
+                    // changeWorkSpace/run() when activeWorkSpaceId already === newIdx.
+                    const prevTabEl = document.getElementById(`tab-id-${Util.$activeWorkSpaceId}`);
+                    if (prevTabEl) {
+                        prevTabEl.classList.remove("active");
+                        prevTabEl.classList.add("disable");
+                    }
+                    const newTabEl = document.getElementById(`tab-id-${newIdx}`);
+                    if (newTabEl) {
+                        newTabEl.classList.remove("disable");
+                        newTabEl.classList.add("active");
+                    }
+                    Util.$activeWorkSpaceId = newIdx;
+                    workSpace.run();
                 } else {
                     throw new Error("Unexpected response format");
                 }
@@ -195,15 +215,29 @@ class Project
                 const workSpace = new WorkSpace();
                 workSpace.name = params.name;
 
+                // Stop the currently-active workspace before activating the new one
+                // (see comment in the success branch above).
+                const prevWs = Util.$currentWorkSpace();
+                if (prevWs) {
+                    prevWs.stop();
+                }
+
+                const newIdx = Util.$workSpaces.length;
                 Util.$workSpaces.push(workSpace);
-                Util.$screenTab.createElement(workSpace, Util.$workSpaces.length - 1);
-                Util.$screenTab.activeTab({
-                    "currentTarget": {
-                        "dataset": {
-                            "tabId": Util.$workSpaces.length - 1
-                        }
-                    }
-                });
+                Util.$screenTab.createElement(workSpace, newIdx);
+
+                const prevTabEl = document.getElementById(`tab-id-${Util.$activeWorkSpaceId}`);
+                if (prevTabEl) {
+                    prevTabEl.classList.remove("active");
+                    prevTabEl.classList.add("disable");
+                }
+                const newTabEl = document.getElementById(`tab-id-${newIdx}`);
+                if (newTabEl) {
+                    newTabEl.classList.remove("disable");
+                    newTabEl.classList.add("active");
+                }
+                Util.$activeWorkSpaceId = newIdx;
+                workSpace.run();
             });
     }
 
@@ -367,19 +401,61 @@ class Project
                             workSpace.name = file.name.replace(".n2d", "");
                             workSpace.loadFromObject(jsonData);
                             console.timeEnd('[N2F] WorkSpace creation from object');
-                            
-                            Util.$workSpaces.push(workSpace);
-                            
-                            Util.$screenTab.createElement(workSpace, Util.$workSpaces.length - 1);
-                            
-                            Util.$screenTab.activeTab({
-                                "currentTarget": {
-                                    "dataset": {
-                                        "tabId": Util.$workSpaces.length - 1
-                                    }
+
+                            // If integration layer is loading from the welcome screen and the
+                            // active workspace is a blank "Untitled-N" placeholder, replace it
+                            // in-place so only one tab is shown.
+                            const existingIdx = Util.$activeWorkSpaceId;
+                            const existingWs  = Util.$workSpaces[existingIdx];
+                            const replaceBlank = window.__n2f_loading_from_welcome &&
+                                existingWs && /^Untitled-\d+$/.test(existingWs.name);
+
+                            delete window.__n2f_loading_from_welcome;
+
+                            if (replaceBlank) {
+                                Util.$workSpaces[existingIdx] = workSpace;
+                                const tabText  = document.getElementById(`tab-text-id-${existingIdx}`);
+                                const tabInput = document.getElementById(`tab-input-id-${existingIdx}`);
+                                if (tabText)  tabText.textContent = workSpace.name;
+                                if (tabInput) tabInput.value      = workSpace.name;
+                                existingWs.stop();
+                                workSpace.run();
+                            } else {
+                                // Stop the currently-active workspace before
+                                // activating the new one — same reason as in
+                                // newProject(): leaving the old scene live with
+                                // stale layer-id DOM rows causes a later
+                                // "Cannot read properties of undefined (reading
+                                // '_$children')" crash in MovieClip.stop().
+                                const prevWs = Util.$currentWorkSpace();
+                                if (prevWs) {
+                                    prevWs.stop();
                                 }
-                            });
-                            
+
+                                const newIdx = Util.$workSpaces.length;
+                                Util.$workSpaces.push(workSpace);
+
+                                Util.$screenTab.createElement(workSpace, newIdx);
+
+                                // Activate the new tab visually. We do NOT call
+                                // activeTab() here because that calls player.stop()
+                                // unconditionally — which crashes when no workspace
+                                // is currently running (e.g. first project from welcome).
+                                const prevTabEl = document.getElementById(`tab-id-${Util.$activeWorkSpaceId}`);
+                                if (prevTabEl && prevTabEl.dataset.tabId !== String(newIdx)) {
+                                    prevTabEl.classList.remove("active");
+                                    prevTabEl.classList.add("disable");
+                                }
+                                const newTabEl = document.getElementById(`tab-id-${newIdx}`);
+                                if (newTabEl) {
+                                    newTabEl.classList.remove("disable");
+                                    newTabEl.classList.add("active");
+                                }
+
+                                Util.$activeWorkSpaceId = newIdx;
+                                workSpace.run();
+                            }
+
                             Util.$saveProgress.end();
                         }
                         
@@ -427,6 +503,11 @@ class Project
     save ()
     {
         if (Util.$saveProgress.active) {
+            return ;
+        }
+
+        if (!Util.$currentWorkSpace()) {
+            alert("No project is open. Please create or open a project first.");
             return ;
         }
 

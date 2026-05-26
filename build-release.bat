@@ -35,7 +35,7 @@ if errorlevel 1 (
 )
 
 :: ---------- Step 1: Install Python deps + PyInstaller --------------------
-echo  [1/6] Installing Python dependencies...
+echo  [1/7] Installing Python dependencies...
 python -m pip install --quiet -r "%APP_DIR%\requirements.txt"
 if errorlevel 1 ( echo  ERROR: pip install failed. & goto :fail )
 python -m pip install --quiet pyinstaller
@@ -44,7 +44,7 @@ echo  Python deps OK.
 echo.
 
 :: ---------- Step 2: Bundle server.py into server.exe ---------------------
-echo  [2/6] Bundling Python server into server.exe...
+echo  [2/7] Bundling Python server into server.exe...
 echo  (Takes 1-3 minutes on first run)
 echo.
 
@@ -74,7 +74,7 @@ echo  server.exe OK.
 echo.
 
 :: ---------- Step 3: Smoke-test server.exe --------------------------------
-echo  [3/6] Smoke-testing server.exe...
+echo  [3/7] Smoke-testing server.exe...
 set "SMOKE_DIR=%TEMP%\n2f_smoke"
 if exist "%SMOKE_DIR%" rmdir /s /q "%SMOKE_DIR%"
 mkdir "%SMOKE_DIR%"
@@ -83,7 +83,19 @@ echo ^<!DOCTYPE html^>^<html^>^<body^>test^</body^>^</html^> > "%SMOKE_DIR%\inde
 set N2F_WEB_ROOT=%SMOKE_DIR%
 set N2F_PORT=15099
 set N2F_ELECTRON=1
-start /b "" "%APP_DIR%\dist\server.exe"
+
+:: Launch server.exe and capture its PID so we can kill *only* that instance
+:: (taskkill /im server.exe would also kill any installed Next2Flash server).
+set "SMOKE_PID_FILE=%TEMP%\n2f_smoke_pid.txt"
+if exist "%SMOKE_PID_FILE%" del /f /q "%SMOKE_PID_FILE%"
+powershell -NoProfile -Command "$p = Start-Process -FilePath '%APP_DIR%\dist\server.exe' -WindowStyle Hidden -PassThru; $p.Id | Out-File -FilePath '%SMOKE_PID_FILE%' -Encoding ascii"
+set SMOKE_PID=
+if exist "%SMOKE_PID_FILE%" set /p SMOKE_PID=<"%SMOKE_PID_FILE%"
+if "%SMOKE_PID%"=="" (
+    echo  ERROR: Failed to launch server.exe for smoke test.
+    goto :fail
+)
+echo  Started server.exe (PID %SMOKE_PID%).
 
 :: Wait for server.exe to respond (up to 90 seconds - PyInstaller extracts on first run)
 echo  Waiting for server.exe to start (first run may take ~60s)...
@@ -99,8 +111,14 @@ for /l %%i in (1,1,90) do (
     )
 )
 
-:: Kill the smoke-test server process
-taskkill /f /im server.exe >nul 2>&1
+:: Kill ONLY the smoke-test server we spawned (by PID), plus any children.
+:: Tries graceful first, then force. Safe to run even if it already exited.
+if defined SMOKE_PID (
+    taskkill /pid %SMOKE_PID% /t >nul 2>&1
+    timeout /t 1 /nobreak >nul
+    taskkill /f /pid %SMOKE_PID% /t >nul 2>&1
+)
+if exist "%SMOKE_PID_FILE%" del /f /q "%SMOKE_PID_FILE%"
 if exist "%SMOKE_DIR%" rmdir /s /q "%SMOKE_DIR%"
 
 if !SMOKE_OK!==0 (
@@ -112,7 +130,7 @@ echo  Smoke test passed.
 echo.
 
 :: ---------- Step 4: Build the web UI assets ------------------------------
-echo  [4/6] Building web UI assets (gulp)...
+echo  [4/7] Building web UI assets (gulp)...
 pushd "%APP_DIR%"
 if not exist node_modules (
     echo  Installing app node dependencies...
@@ -127,7 +145,7 @@ echo  Web UI OK.
 echo.
 
 :: ---------- Step 5: Install Electron dependencies ------------------------
-echo  [5/6] Installing Electron dependencies...
+echo  [5/7] Installing Electron dependencies...
 pushd "%ELECTRON_DIR%"
 call npm install
 set NPMERR=%ERRORLEVEL%
@@ -136,8 +154,33 @@ if %NPMERR% neq 0 ( echo  ERROR: npm install failed. & goto :fail )
 echo  Electron deps OK.
 echo.
 
-:: ---------- Step 6: Package + Zip ----------------------------------------
-echo  [6/6] Packaging Electron app...
+:: ---------- Step 6: Create bundled JRE via jlink -------------------------
+echo  [6/7] Creating bundled JRE (flex_sdk\jre)...
+where jlink >nul 2>&1
+if errorlevel 1 goto :no_jlink
+
+if exist "%APP_DIR%\flex_sdk\jre" rmdir /s /q "%APP_DIR%\flex_sdk\jre"
+jlink --no-header-files --no-man-pages --compress=2 --add-modules java.base,java.compiler,java.desktop,java.logging,java.management,java.naming,java.xml --output "%APP_DIR%\flex_sdk\jre"
+if errorlevel 1 (
+    echo  ERROR: jlink failed.
+    goto :fail
+)
+
+set "JRESIZE=?"
+for /f "usebackq delims=" %%s in (`powershell -NoProfile -Command "[int]((Get-ChildItem -Path '%APP_DIR%\flex_sdk\jre' -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB)"`) do set "JRESIZE=%%s"
+echo  Bundled JRE OK ^(~%JRESIZE% MB^).
+goto :step7
+
+:no_jlink
+echo  WARNING: jlink not found on PATH - skipping bundled JRE.
+echo  Users will need Java installed to use AS3 script recompilation.
+echo  To include a bundled JRE, ensure the JDK bin folder is on PATH.
+
+:step7
+echo.
+
+:: ---------- Step 7: Package + Zip ----------------------------------------
+echo  [7/7] Packaging Electron app...
 echo.
 
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"

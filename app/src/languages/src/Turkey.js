@@ -221,6 +221,7 @@ class Turkey extends Language
             ["{{塗りのカラー}}", "Boya rengi"],
             ["{{線のカラー}}", "Çizgi rengi"],
             ["{{線の太さ}}", "çizgi kalınlığı"],
+            ["{{新規プロジェクト}}", "Yeni proje"],
             ["{{プロジェクトデータの読込}}", "Proje verilerinin okunması"],
             ["{{プロジェクトデータを保存}}", "Proje verilerini kaydedin."],
             ["{{書き出し}}", "açılış cümlesi veya paragrafı"],

@@ -11,7 +11,8 @@ const path = require('path');
 const http = require('http');
 
 const PORT = 5111; // Use a non-default port to avoid conflicts
-const SWF_PATH = String.raw`C:\Users\glwex\Documents\GitHub\ssf2-idk-140x-original\src\Super Smash Flash 2 Beta v1.4.0.1\data\character\fox.ssf`;
+// Set SWF_PATH via environment variable or edit this line for your local setup:
+const SWF_PATH = process.env.N2F_TEST_SWF || String.raw`\path\to\your.swf`;
 const SERVER_DIR = path.resolve(__dirname, '..');
 const TIMEOUT = 120_000; // 2 minutes max
 

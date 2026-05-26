@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('n2fElectron', {
   showSaveSWFDialog: (defaultName) => ipcRenderer.invoke('dialog:save-swf', defaultName),
   /** Show native "Open SWF" dialog and return the chosen path (or null). */
   showOpenSWFDialog: () => ipcRenderer.invoke('dialog:open-swf'),
+  /** Reveal a file or folder in the OS file explorer. */
+  showItemInFolder: (filePath) => ipcRenderer.invoke('shell:show-item-in-folder', filePath),
 
   // ── Menu events (main → renderer) ─────────────────────────────────────
   onMenuSave: (callback) => {
@@ -40,6 +42,9 @@ contextBridge.exposeInMainWorld('n2fElectron', {
   onMenuRedo: (callback) => {
     ipcRenderer.on('menu:redo', () => callback());
   },
+  onMenuOpenRecent: (callback) => {
+    ipcRenderer.on('menu:open-recent', () => callback());
+  },
   onImportSWF: (callback) => {
     ipcRenderer.on('file:import-swf', (_event, filePath) => callback(filePath));
   },
@@ -51,6 +56,8 @@ contextBridge.exposeInMainWorld('n2fElectron', {
   logDebug: (msg) => ipcRenderer.send('debug:log', msg),
   // ── Server console ────────────────────────────────────────────────
   showServerConsole: () => ipcRenderer.send('show-server-console'),
+  showServerConsoleAuto: () => ipcRenderer.send('show-server-console-auto'),
+  hideServerConsoleAuto: () => ipcRenderer.send('hide-server-console-auto'),
   // ── Profiler bridge ───────────────────────────────────────────────────
   sendProfilerEvent: (event) => {
     ipcRenderer.send('profiler:send-event', event);

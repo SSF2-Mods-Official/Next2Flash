@@ -221,6 +221,7 @@ class Hungary extends Language
             ["{{塗りのカラー}}", "A festék színe"],
             ["{{線のカラー}}", "Vonal színe"],
             ["{{線の太さ}}", "vonalvastagság"],
+            ["{{新規プロジェクト}}", "Új projekt"],
             ["{{プロジェクトデータの読込}}", "Projektadatok olvasása"],
             ["{{プロジェクトデータを保存}}", "Projektadatok mentése."],
             ["{{書き出し}}", "nyitó mondat vagy bekezdés"],

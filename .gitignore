@@ -4,6 +4,18 @@ app/build_tmp/
 dist/
 build/
 
+# Bundled JRE (created at build time by jlink — ~70 MB, not committed)
+app/flex_sdk/jre/
+# Entire Flex SDK is a binary toolchain (~70+ MB), fetched separately, not committed
+app/flex_sdk/
+
+# Server runtime files
+app/server.pid
+server.pid
+
+# Local scratch / one-off test scripts
+_test_export.py
+
 # Dependencies
 app/node_modules/
 electron/node_modules/

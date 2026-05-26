@@ -260,7 +260,8 @@ class TimelinePlayer extends BaseTimeline
                 this._$baseOffsetHalfWidth = element.offsetWidth / 2;
                 this._$clientWidth = element.clientWidth;
 
-                this._$fps = 1000 / (document.getElementById("stage-fps").value | 0);
+                const _rawFps = document.getElementById("stage-fps").value | 0;
+                this._$fps = 1000 / (_rawFps || 24);
 
                 // Extended pre-warm: render first N frames to populate
                 // shape buffers and container caches so the initial heavy

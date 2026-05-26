@@ -136,7 +136,7 @@ class Instance
         const workSpace = Util.$currentWorkSpace();
 
         let path = this._$name;
-        if (this._$folderId) {
+        if (this._$folderId && workSpace) {
             let parent = this;
             while (parent._$folderId) {
                 parent = workSpace.getLibrary(parent._$folderId);
@@ -484,19 +484,21 @@ class Instance
         }
 
         // BitmapDataオブジェクトを作成
+        // Render at physical resolution: DPR × zoom so the canvas has enough
+        // pixels and never gets stretched by CSS.  canvas._$width keeps the
+        // logical size so Screen.appendCharacter can apply the correct CSS.
+        const renderScale = dpr * Util.$zoomScale;
         const bitmapData = this.createBitmapData(
-            object.width, object.height, preview, dpr
+            object.width, object.height, preview, renderScale
         );
 
         const _dbgT3 = isPlayback ? performance.now() : 0;
 
-        canvas.width  = object.width;
-        canvas.height = object.height;
+        canvas.width  = Math.ceil(object.width  * renderScale);
+        canvas.height = Math.ceil(object.height * renderScale);
 
-        const sacle = dpr;
-        const ratio = !preview
-            ? dpr * Util.$zoomScale
-            : dpr;
+        const sacle = renderScale;
+        const ratio = renderScale;
 
         const drawBounds = container.getBounds(container);
 
@@ -679,13 +681,8 @@ class Instance
         const sprite = new Sprite();
         sprite.addChild(instance);
 
-        let ratio = 1;
-        if (!preview) {
-            ratio *= Util.$zoomScale;
-        }
-
-        sprite.scaleX = ratio;
-        sprite.scaleY = ratio;
+        sprite.scaleX = 1;
+        sprite.scaleY = 1;
 
         const container = new Sprite();
         container.addChild(sprite);
@@ -709,9 +706,6 @@ class Instance
         const { BitmapData } = window.next2d.display;
 
         let ratio = customDpr !== null ? customDpr : window.devicePixelRatio;
-        if (!preview) {
-            ratio *= Util.$zoomScale;
-        }
 
         // Cap dimensions to prevent OOM on large MovieClips
         const MAX_DIM = 4096;

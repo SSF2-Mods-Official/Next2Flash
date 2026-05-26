@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Next2Flash Integration — Server-backed SWF conversion for the Next2D tool.
  *
  * When running under the Next2Flash server (http://localhost:5000), this
@@ -13,12 +13,73 @@
 (function () {
   'use strict';
 
-  var _log = window.__N2F_DEBUG ? window.__N2F_DEBUG.logger('Integration') : { trace:function(){},debug:function(){},info:function(){},warn:function(){},error:function(){},time:function(){},timeEnd:function(){},group:function(){},groupEnd:function(){} };
+  // _log: routes to browser devtools via __N2F_DEBUG, and also forwards
+  // INFO/WARN/ERROR to the server console via _serverLog (hoisted below).
+  var _log = (function () {
+    var base = window.__N2F_DEBUG ? window.__N2F_DEBUG.logger('Integration')
+      : {trace:function(){},debug:function(){},info:function(){},warn:function(){},error:function(){},time:function(){},timeEnd:function(){},group:function(){},groupEnd:function(){}};
+    function _fwd(lvl, args) {
+      try {
+        _serverLog(lvl, Array.prototype.map.call(args, function (a) {
+          return (a == null) ? String(a) : (typeof a === 'object') ? JSON.stringify(a) : String(a);
+        }).join(' '));
+      } catch (e) { /* ignore */ }
+    }
+    return {
+      trace:    function () { base.trace    && base.trace.apply(base, arguments); },
+      debug:    function () { base.debug    && base.debug.apply(base, arguments); },
+      info:     function () { base.info     && base.info.apply(base, arguments);  _fwd('INFO',  arguments); },
+      warn:     function () { base.warn     && base.warn.apply(base, arguments);  _fwd('WARN',  arguments); },
+      error:    function () { base.error    && base.error.apply(base, arguments); _fwd('ERROR', arguments); },
+      time:     function () { base.time     && base.time.apply(base, arguments); },
+      timeEnd:  function () { base.timeEnd  && base.timeEnd.apply(base, arguments); },
+      group:    function () { base.group    && base.group.apply(base, arguments); },
+      groupEnd: function () { base.groupEnd && base.groupEnd.apply(base, arguments); },
+    };
+  })();
 
   var API_BASE = '';  // same origin when served by Next2Flash server
   var serverOnline = false;
   var _importedN2DBlob = null;  // stored for fallback during export
   var _currentProjectName = '';  // user-chosen project name from import popup
+  var _isDirty = false;          // unsaved changes since last save
+  var _autosaveTimer = null;     // setInterval handle for background autosave
+  var _autosaveWorker = null;    // persistent worker for off-thread serialization
+  var _dirtyPollTimer = null;    // setInterval for watching workspace revision
+  var _lastRevision = 0;         // workspace revision snapshot
+  var _recentProjects = [];      // cached recent project list from server
+  var _recentImports = [];       // cached recent imports list from server
+
+  /* ------------------------------------------------------------------ */
+  /*  Document title & dirty state helpers                               */
+  /* ------------------------------------------------------------------ */
+  function _setDocumentTitle(name, dirty) {
+    if (name === '') { document.title = 'Next2Flash'; return; }
+    var n = (name !== undefined && name !== null) ? name : (_currentProjectName || 'Untitled');
+    document.title = (dirty ? '\u2022 ' : '') + n + ' \u2014 Next2Flash';
+  }
+  function _markDirty() {
+    if (!_isDirty) { _isDirty = true; _setDocumentTitle(undefined, true); }
+  }
+  function _markClean() {
+    _isDirty = false; _setDocumentTitle(undefined, false);
+  }
+  function _startDirtyPoll() {
+    if (_dirtyPollTimer) return;
+    _dirtyPollTimer = setInterval(function () {
+      if (!_currentProjectDir) return;
+      try {
+        var ws = window.Util && window.Util.$currentWorkSpace && window.Util.$currentWorkSpace();
+        if (!ws) return;
+        var rev = (ws._$revision ? ws._$revision.length : 0);
+        if (rev !== _lastRevision) { _lastRevision = rev; _markDirty(); }
+      } catch (e) { /* ignore */ }
+    }, 2000);
+  }
+
+  function _stopDirtyPoll() {
+    if (_dirtyPollTimer) { clearInterval(_dirtyPollTimer); _dirtyPollTimer = null; }
+  }
 
   /* ================================================================== */
   /*  Init                                                               */
@@ -97,7 +158,7 @@
       '  display:inline-block; margin-right:2px; }',
       '#n2f-toolbar .n2f-label { font:11px/1.4 Arial,sans-serif; color:#888; }',
       '#n2f-progress { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);',
-      '  z-index:200000; background:#222; color:#ccc; border:1px solid #555; border-radius:8px;',
+      '  z-index:320000; background:#222; color:#ccc; border:1px solid #555; border-radius:8px;',
       '  padding:24px 32px; font:13px/1.6 Arial,sans-serif; text-align:center;',
       '  box-shadow:0 8px 32px rgba(0,0,0,.5); min-width:320px; }',
       '#n2f-progress-bar-track { width:100%; height:8px; background:#333; border-radius:4px;',
@@ -109,9 +170,9 @@
       '@keyframes n2f-indeterminate { 0%{margin-left:0;width:30%} 50%{margin-left:35%;width:30%} 100%{margin-left:70%;width:30%} }',
       '#n2f-progress-pct { font-size:11px; color:#888; margin-top:2px; }',
       '#n2f-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0;',
-      '  z-index:199999; background:rgba(0,0,0,.4); }',
+      '  z-index:310000; background:rgba(0,0,0,.4); }',
       '#n2f-name-modal { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);',
-      '  z-index:200001; background:#222; color:#ccc; border:1px solid #555; border-radius:8px;',
+      '  z-index:330000; background:#222; color:#ccc; border:1px solid #555; border-radius:8px;',
       '  padding:24px 32px; font:13px/1.6 Arial,sans-serif; text-align:center;',
       '  box-shadow:0 8px 32px rgba(0,0,0,.5); min-width:320px; }',
       '#n2f-name-modal h3 { margin:0 0 12px; font-size:15px; color:#eee; }',
@@ -121,6 +182,68 @@
       '#n2f-name-modal input:focus { border-color:#7af; }',
       '#n2f-name-modal .n2f-modal-buttons { display:flex; gap:8px; justify-content:center; }',
       '#n2f-name-modal .n2f-btn { min-width:80px; justify-content:center; }',
+      '#n2f-name-modal .n2f-label-row { text-align:left; font-size:11px; color:#aaa; margin-bottom:3px; }',
+      '#n2f-name-modal .n2f-dir-row { display:flex; gap:6px; margin-bottom:16px; align-items:center; }',
+      '#n2f-name-modal .n2f-dir-row input { flex:1; box-sizing:border-box; padding:8px 10px;',
+      '  background:#333; border:1px solid #555; border-radius:4px; color:#eee;',
+      '  font:13px Arial,sans-serif; outline:none; }',
+      '#n2f-name-modal .n2f-dir-row input:focus { border-color:#7af; }',
+      '#n2f-name-error { color:#f66; font-size:11px; margin:-10px 0 8px; display:none; text-align:left; }',
+      '#n2f-name-overwrite { display:none; margin-top:8px; border-color:#e80; color:#e80; }',
+      '#n2f-name-overwrite.confirm { border-color:#e33; color:#e33; font-weight:bold; }',
+      '#n2f-name-overwrite:hover { background:#3a1a00; }',
+      '#n2f-name-overwrite.confirm:hover { background:#3a0000; }',
+      /* Welcome screen */
+      '#n2f-welcome { display:none; position:fixed; top:0; left:0; right:0; bottom:0;',
+      '  z-index:300000; background:#111; align-items:center; justify-content:center; }',
+      '#n2f-welcome-box { width:860px; max-width:95vw; max-height:93vh; overflow-y:auto;',
+      '  padding:44px; position:relative; }',
+      '#n2f-welcome-close { position:absolute; top:8px; right:12px; background:none; border:none;',
+      '  color:#444; font-size:22px; cursor:pointer; padding:4px 8px; border-radius:4px; line-height:1; }',
+      '#n2f-welcome-close:hover { background:#222; color:#aaa; }',
+      '#n2f-welcome-brand { text-align:center; margin-bottom:36px; }',
+      '#n2f-welcome-brand h1 { font:bold 34px/1 Arial,sans-serif; color:#7af; margin:0; }',
+      '#n2f-welcome-brand p { font:13px Arial,sans-serif; color:#555; margin:8px 0 0; }',
+      '#n2f-welcome-actions { display:flex; gap:16px; justify-content:center; margin-bottom:40px; }',
+      '.n2f-wcard { background:#1e1e1e; border:1px solid #333; border-radius:10px;',
+      '  padding:22px 16px; text-align:center; cursor:pointer; width:148px;',
+      '  transition:background .18s,border-color .18s,transform .14s; }',
+      '.n2f-wcard:hover { background:#252525; border-color:#7af; transform:translateY(-3px); }',
+      '.n2f-wcard-icon { font-size:32px; margin-bottom:10px; }',
+      '.n2f-wcard-title { font:bold 13px Arial,sans-serif; color:#ddd; margin-bottom:5px; }',
+      '.n2f-wcard-desc { font:11px Arial,sans-serif; color:#666; }',
+      '#n2f-welcome-recents { display:flex; gap:28px; }',
+      '.n2f-recents-col { flex:1; min-width:0; max-height:280px; overflow-y:auto; }',
+      '.n2f-recents-hdr { font:bold 10px Arial,sans-serif; color:#555; text-transform:uppercase;',
+      '  letter-spacing:.8px; margin-bottom:10px; padding-bottom:6px;',
+      '  border-bottom:1px solid #222; }',
+      '.n2f-recent-item { display:flex; align-items:center; padding:7px 8px; border-radius:4px;',
+      '  cursor:pointer; transition:background .12s; }',
+      '.n2f-recent-item:hover { background:#1e1e1e; }',
+      '.n2f-ri-info { min-width:0; flex:1; }',
+      '.n2f-ri-name { font:bold 12px Arial,sans-serif; color:#bbb; overflow:hidden;',
+      '  text-overflow:ellipsis; white-space:nowrap; }',
+      '.n2f-ri-path { font:10px Arial,sans-serif; color:#444; overflow:hidden;',
+      '  text-overflow:ellipsis; white-space:nowrap; margin-top:1px; }',
+      '.n2f-ri-actions { display:flex; gap:2px; margin-left:6px; flex-shrink:0; opacity:0; transition:opacity .12s; }',
+      '.n2f-recent-item:hover .n2f-ri-actions { opacity:1; }',
+      '.n2f-ri-btn { background:none; border:none; color:#555; cursor:pointer; font-size:12px;',
+      '  padding:2px 5px; border-radius:3px; line-height:1; }',
+      '.n2f-ri-btn:hover { background:#2a2a2a; color:#aaa; }',
+      '.n2f-recent-empty { font:italic 11px Arial,sans-serif; color:#333; padding:6px 8px; }',
+      /* Error dialog */
+      '#n2f-export-error-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0;',
+      '  z-index:340000; background:rgba(0,0,0,.55); }',
+      '#n2f-export-error { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);',
+      '  z-index:340001; background:#1a1a1a; color:#ccc; border:1px solid #c33; border-radius:8px;',
+      '  padding:28px 32px; font:13px/1.6 Arial,sans-serif; box-shadow:0 8px 32px rgba(0,0,0,.7);',
+      '  min-width:420px; max-width:700px; max-height:80vh; flex-direction:column; gap:14px; }',
+      '#n2f-export-error h3 { margin:0; font-size:16px; color:#f77; display:flex; align-items:center; gap:8px; }',
+      '#n2f-export-error .n2f-err-msg { background:#111; border:1px solid #333; border-radius:4px;',
+      '  padding:12px; font:11px/1.5 monospace; color:#e99; overflow-y:auto; max-height:280px;',
+      '  white-space:pre-wrap; word-break:break-all; user-select:text; }',
+      '#n2f-export-error .n2f-err-hint { font:11px Arial,sans-serif; color:#666; line-height:1.5; }',
+      '#n2f-export-error .n2f-err-buttons { display:flex; gap:8px; }',
     ].join('\n');
     document.head.appendChild(style);
 
@@ -132,16 +255,19 @@
       '<span class="n2f-label">Next2Flash</span></div>' +
       '<button class="n2f-btn" id="n2f-import-swf" title="Import SWF into editable project folder (PNG/WAV/AS)">' +
         '\u{1F4E5} Import SWF</button>' +
-      '<button class="n2f-btn" id="n2f-open-project" title="Open an N2D file (can be in a project folder with assets)">' +
-        '\u{1F4C2} Import Project</button>' +
+      '<button class="n2f-btn" id="n2f-open-project" title="Open a saved .n2d project folder">' +
+        '\u{1F4C2} Open Project</button>' +
       '<button class="n2f-btn" id="n2f-refresh-assets" title="Refresh external assets from project folder" disabled>' +
         '\u{1F504} Refresh Assets</button>' +
-      '<button class="n2f-btn" id="n2f-save-project" title="Save current project to server folder" disabled>' +
+      '<button class="n2f-btn" id="n2f-import-asset" title="Import image/audio files into the active project assets/ folder">' +
+        '\u{1F5BC} Import Asset</button>' +
+      '<button class="n2f-btn" id="n2f-save-project" title="Save project (prompts for name/location if new)">' +
         '\u{1F4BE} Save Project</button>' +
       '<button class="n2f-btn primary" id="n2f-export-swf" title="Export current project as SWF">' +
         '\u{1F4E4} Export SWF</button>' +
       '<input type="file" id="n2f-swf-input" accept=".swf,.ssf" style="display:none">' +
-      '<input type="file" id="n2f-n2d-input" accept=".n2d" style="display:none">';
+      '<input type="file" id="n2f-n2d-input" accept=".n2d" style="display:none">' +
+      '<input type="file" id="n2f-asset-input" accept="image/*,audio/*" multiple style="display:none">';
 
     // Insert as fixed-position toolbar at top of page
     document.body.appendChild(toolbar);
@@ -163,21 +289,87 @@
     nameModal.id = 'n2f-name-modal';
     nameModal.innerHTML =
       '<h3>Enter Project Name</h3>' +
+      '<div class="n2f-label-row">Project Name</div>' +
       '<input type="text" id="n2f-name-input" placeholder="Project name" autocomplete="off">' +
+      '<div class="n2f-label-row">Save Location</div>' +
+      '<div class="n2f-dir-row">' +
+        '<input type="text" id="n2f-dir-input" placeholder="Default (server converted/ folder)">' +
+        '<button class="n2f-btn" id="n2f-dir-browse" style="display:none">Browse...</button>' +
+      '</div>' +
+      '<div id="n2f-name-error"></div>' +
       '<div class="n2f-modal-buttons">' +
         '<button class="n2f-btn primary" id="n2f-name-ok">OK</button>' +
+        '<button class="n2f-btn" id="n2f-name-overwrite">Overwrite?</button>' +
         '<button class="n2f-btn" id="n2f-name-cancel">Cancel</button>' +
       '</div>';
     document.body.appendChild(nameModal);
+
+    // Welcome screen
+    var welcome = document.createElement('div');
+    welcome.id = 'n2f-welcome';
+    welcome.innerHTML =
+      '<div id="n2f-welcome-box">' +
+        '<button id="n2f-welcome-close">\u00d7</button>' +
+        '<div id="n2f-welcome-brand"><h1>Next2Flash</h1><p>SWF Animation Studio</p></div>' +
+        '<div id="n2f-welcome-actions">' +
+          '<div class="n2f-wcard" id="n2f-wc-new">' +
+            '<div class="n2f-wcard-icon">\ud83d\udcc4</div>' +
+            '<div class="n2f-wcard-title">New Project</div>' +
+            '<div class="n2f-wcard-desc">Start from scratch</div>' +
+          '</div>' +
+          '<div class="n2f-wcard" id="n2f-wc-import">' +
+            '<div class="n2f-wcard-icon">\ud83d\udce5</div>' +
+            '<div class="n2f-wcard-title">Import SWF</div>' +
+            '<div class="n2f-wcard-desc">Edit an existing SWF</div>' +
+          '</div>' +
+          '<div class="n2f-wcard" id="n2f-wc-open">' +
+            '<div class="n2f-wcard-icon">\ud83d\udcc2</div>' +
+            '<div class="n2f-wcard-title">Open Project</div>' +
+            '<div class="n2f-wcard-desc">Load a saved .n2d project</div>' +
+          '</div>' +
+        '</div>' +
+        '<div id="n2f-welcome-recents">' +
+          '<div class="n2f-recents-col">' +
+            '<div class="n2f-recents-hdr">Recent Projects</div>' +
+            '<div id="n2f-recent-projects"><div class="n2f-recent-empty">Loading\u2026</div></div>' +
+          '</div>' +
+          '<div class="n2f-recents-col">' +
+            '<div class="n2f-recents-hdr">Recent Imports</div>' +
+            '<div id="n2f-recent-imports"><div class="n2f-recent-empty">Loading\u2026</div></div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(welcome);
 
     // Wire events
     document.getElementById('n2f-import-swf').addEventListener('click', onImportSWF);
     document.getElementById('n2f-open-project').addEventListener('click', onOpenProject);
     document.getElementById('n2f-refresh-assets').addEventListener('click', onRefreshAssets);
+    document.getElementById('n2f-import-asset').addEventListener('click', onImportAsset);
     document.getElementById('n2f-save-project').addEventListener('click', onSaveProject);
     document.getElementById('n2f-export-swf').addEventListener('click', onExportSWF);
     document.getElementById('n2f-swf-input').addEventListener('change', onSWFFileSelected);
     document.getElementById('n2f-n2d-input').addEventListener('change', onN2DFileSelected);
+    document.getElementById('n2f-asset-input').addEventListener('change', onAssetFileSelected);
+    document.getElementById('n2f-welcome-close').addEventListener('click', _hideWelcomeScreen);
+    document.getElementById('n2f-wc-new').addEventListener('click', function () {
+      _onNewProject();
+    });
+    document.getElementById('n2f-wc-import').addEventListener('click', function () {
+      onImportSWF();
+    });
+    document.getElementById('n2f-wc-open').addEventListener('click', function () {
+      onOpenProject();
+    });
+
+    // Warn before leaving the page if there are unsaved changes
+    window.onbeforeunload = function (e) {
+      if (_isDirty && _currentProjectDir) {
+        e.preventDefault();
+        e.returnValue = 'You have unsaved changes. Leave without saving?';
+        return e.returnValue;
+      }
+    };
 
     // Wire Electron menu events
     if (window.n2fElectron) {
@@ -196,26 +388,113 @@
           if (ws) ws.redo();
         });
       }
+      if (window.n2fElectron.onMenuOpenRecent) {
+        window.n2fElectron.onMenuOpenRecent(function () { _showWelcomeScreen(); });
+      }
       _log.info('Electron bridge detected — native menu/dialogs active');
     }
+
+    // Forward console.error calls to the server console so errors from
+    // tool source code appear in the N2F Server Console window.
+    (function () {
+      var _orig = console.error;
+      console.error = function () {
+        _orig.apply(console, arguments);
+        try {
+          _serverLog('ERROR', Array.prototype.map.call(arguments, function (a) {
+            return (a instanceof Error) ? (a.stack || a.message) :
+              (a == null) ? String(a) :
+              (typeof a === 'object') ? JSON.stringify(a) : String(a);
+          }).join(' '));
+        } catch (e) { /* ignore */ }
+      };
+    })();
+
+    // Forward uncaught JS errors and unhandled promise rejections to the server console.
+    window.onerror = function (msg, src, line, col, err) {
+      _serverLog('ERROR', 'Uncaught: ' + msg +
+        ' @ ' + (src || '?') + ':' + (line || 0) +
+        (err && err.stack ? '\n' + err.stack : ''));
+      return false;
+    };
+    window.addEventListener('unhandledrejection', function (e) {
+      var r = e.reason;
+      _serverLog('ERROR', 'UnhandledRejection: ' +
+        (r ? (r.stack || r.message || String(r)) : 'unknown'));
+    });
+
+    // Intercept the + tab button to open New Project dialog instead of blank workspace.
+    document.addEventListener('n2f:add-tab-requested', function (e) {
+      e.preventDefault();
+      _onNewProject();
+    });
+
+    // Home button: show welcome screen.
+    document.addEventListener('n2f:show-welcome', function () {
+      _showWelcomeScreen();
+    });
+
+    // When the last tab is closed, show the welcome screen.
+    document.addEventListener('n2f:no-workspaces', function () {
+      _stopAutosave();
+      _stopDirtyPoll();
+      _currentProjectDir = '';
+      _currentProjectName = '';
+      _isDirty = false;
+      _setDocumentTitle('', false);
+      _showWelcomeScreen();
+    });
+
+    // Show welcome screen when no project is loaded
+    _showWelcomeScreen();
   }
 
   /* ================================================================== */
   /*  Import SWF                                                         */
   /* ================================================================== */
   /**
-   * Show a styled modal prompting user for a project name.
-   * Returns a Promise that resolves with the name string, or null if cancelled.
+   * Show a styled modal prompting user for a project name and optional save location.
+   * Returns a Promise that resolves with { name, saveDir } or null if cancelled.
    */
   function _promptProjectName(defaultName) {
     return new Promise(function (resolve) {
       var modal = document.getElementById('n2f-name-modal');
       var overlay = document.getElementById('n2f-overlay');
       var input = document.getElementById('n2f-name-input');
+      var dirInput = document.getElementById('n2f-dir-input');
+      var dirBrowse = document.getElementById('n2f-dir-browse');
       var okBtn = document.getElementById('n2f-name-ok');
       var cancelBtn = document.getElementById('n2f-name-cancel');
+      var overwriteBtn = document.getElementById('n2f-name-overwrite');
+      var errEl = document.getElementById('n2f-name-error');
+
+      var _overwriteStep = 0; // 0=hidden, 1=first shown, 2=confirmed
 
       input.value = defaultName || '';
+      dirInput.value = '';
+      if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+      if (overwriteBtn) { overwriteBtn.style.display = 'none'; overwriteBtn.textContent = 'Overwrite?'; overwriteBtn.classList.remove('confirm'); }
+
+      // Show native folder-picker button only in Electron
+      if (window.n2fElectron) {
+        dirBrowse.style.display = 'inline-flex';
+        dirInput.readOnly = true;
+        dirInput.style.cursor = 'default';
+      } else {
+        dirBrowse.style.display = 'none';
+        dirInput.readOnly = false;
+        dirInput.style.cursor = '';
+      }
+
+      function onBrowse() {
+        window.n2fElectron.openFileDialog({ properties: ['openDirectory'] })
+          .then(function (result) {
+            if (!result.canceled && result.filePaths && result.filePaths.length > 0) {
+              dirInput.value = result.filePaths[0];
+            }
+          });
+      }
+
       modal.style.display = 'block';
       overlay.style.display = 'block';
       input.focus();
@@ -226,12 +505,63 @@
         overlay.style.display = 'none';
         okBtn.removeEventListener('click', onOk);
         cancelBtn.removeEventListener('click', onCancel);
+        if (overwriteBtn) overwriteBtn.removeEventListener('click', onOverwrite);
         input.removeEventListener('keydown', onKey);
+        input.removeEventListener('input', onInput);
+        dirInput.removeEventListener('input', onInput);
+        dirBrowse.removeEventListener('click', onBrowse);
+      }
+      function onInput() {
+        if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+        // Reset overwrite prompt if the user edits the name
+        if (overwriteBtn) { overwriteBtn.style.display = 'none'; overwriteBtn.textContent = 'Overwrite?'; overwriteBtn.classList.remove('confirm'); }
+        _overwriteStep = 0;
+      }
+      function onOverwrite() {
+        if (_overwriteStep === 1) {
+          // Second click — confirm
+          if (errEl) {
+            errEl.textContent = '\u26a0 This will permanently delete the existing project folder. Click again to confirm.';
+            errEl.style.display = 'block';
+          }
+          overwriteBtn.textContent = '\u2620 Yes, delete & replace';
+          overwriteBtn.classList.add('confirm');
+          _overwriteStep = 2;
+        } else if (_overwriteStep === 2) {
+          // Third click — execute
+          var nameVal = input.value.trim() || defaultName;
+          var dirVal = dirInput.value.trim() || null;
+          cleanup();
+          resolve({ name: nameVal, saveDir: dirVal, overwrite: true });
+        }
       }
       function onOk() {
-        cleanup();
-        var val = input.value.trim();
-        resolve(val || defaultName);
+        var nameVal = input.value.trim() || defaultName;
+        var dirVal = dirInput.value.trim() || null;
+        var url = API_BASE + '/api/check-project-name?name=' + encodeURIComponent(nameVal);
+        if (dirVal) url += '&saveDir=' + encodeURIComponent(dirVal);
+        fetch(url)
+          .then(function (r) { return r.ok ? r.json() : { exists: false }; })
+          .then(function (data) {
+            if (data.exists) {
+              if (errEl) {
+                errEl.textContent = '\u26a0 A project named \u201c' + nameVal + '\u201d already exists. Rename it, or click \u201cOverwrite?\u201d to replace it.';
+                errEl.style.display = 'block';
+              }
+              if (overwriteBtn) {
+                overwriteBtn.style.display = 'inline-flex';
+                _overwriteStep = 1;
+              }
+            } else {
+              cleanup();
+              resolve({ name: nameVal, saveDir: dirVal });
+            }
+          })
+          .catch(function () {
+            // Server unreachable — proceed anyway
+            cleanup();
+            resolve({ name: nameVal, saveDir: dirVal });
+          });
       }
       function onCancel() {
         cleanup();
@@ -243,7 +573,11 @@
       }
       okBtn.addEventListener('click', onOk);
       cancelBtn.addEventListener('click', onCancel);
+      if (overwriteBtn) overwriteBtn.addEventListener('click', onOverwrite);
       input.addEventListener('keydown', onKey);
+      input.addEventListener('input', onInput);
+      dirInput.addEventListener('input', onInput);
+      dirBrowse.addEventListener('click', onBrowse);
     });
   }
 
@@ -268,20 +602,24 @@
     var fileName = swfPath.split(/[\\/]/).pop();
     var defaultName = fileName.replace(/\.\w+$/, '');
 
-    _promptProjectName(defaultName).then(function (projectName) {
-      if (projectName === null) return;
-      _doImportSWFByPath(swfPath, fileName, projectName);
+    _promptProjectName(defaultName).then(function (result) {
+      if (result === null) return;
+      _doImportSWFByPath(swfPath, fileName, result.name, result.saveDir, result.overwrite);
     });
   }
 
-  function _doImportSWFByPath(swfPath, fileName, projectName) {
-    _log.info('Importing SWF by path:', swfPath, 'as:', projectName);
+  function _doImportSWFByPath(swfPath, fileName, projectName, saveDir, overwrite) {
+    _log.info('Importing SWF by path:', swfPath, 'as:', projectName, saveDir ? ('-> ' + saveDir) : '(default location)');
     showProgress('Sending SWF path to server...', 5);
+
+    var reqBody = { swfPath: swfPath, lazy: true, projectName: projectName };
+    if (saveDir) reqBody.saveDir = saveDir;
+    if (overwrite) reqBody.overwrite = true;
 
     fetch(API_BASE + '/api/import-swf-path', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ swfPath: swfPath, lazy: true, projectName: projectName }),
+      body: JSON.stringify(reqBody),
     })
       .then(function (r) {
         updateProgress('Server reading SWF file...', 15);
@@ -317,10 +655,17 @@
         _saveImportedBlobToIDB(_importedN2DBlob);
         updateProgress('Loading project into editor...', 90);
         _currentProjectName = projectName;
+        _setDocumentTitle(projectName, false);
+        _markClean();
+        _startAutosave();
+        _startDirtyPoll();
+        _addRecentImport(swfPath, fileName);
+        _addRecentProject(result.projDir, projectName);
         _feedN2DToTool(result.blob, projectName);
 
         updateProgress('Finalizing...', 98);
         hideProgress();
+        _hideWelcomeWhenTabReady();
         toast('Project created: ' + projectName + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)\nFolder: ' + _currentProjectDir);
 
         // Start background hydration of lazy libraries
@@ -328,6 +673,7 @@
       })
       .catch(function (err) {
         hideProgress();
+        _hideWelcomeScreen();
         _log.error('SWF import failed:', err.message);
         toast('Import failed: ' + err.message, true);
       });
@@ -367,7 +713,10 @@
         return setTimeout(waitForRepo, POLL_INTERVAL);
       }
 
-      var ws = Util.$currentWorkSpace && Util.$currentWorkSpace();
+      // Target the specific workspace that was just loaded (wsCountBefore is the
+      // index of the new workspace), not the currently-active one — which may have
+      // changed if the user switched tabs while the import was running.
+      var ws = Util.$workSpaces[wsCountBefore] || (Util.$currentWorkSpace && Util.$currentWorkSpace());
       if (!ws && Util.$workSpaces.length) {
         ws = Util.$workSpaces[Util.$workSpaces.length - 1];
       }
@@ -511,8 +860,12 @@
               function triggerHydrationRedraw(attempt) {
                 var Util = window.Util;
                 var stageArea = document.getElementById('stage-area');
+                if (attempt === 1) {
+                  console.warn('[N2F-Hydration] triggerHydrationRedraw starting (attempt 1)');
+                }
                 if (!Util || !Util.$currentWorkSpace) {
                   if (attempt === 1 || attempt === maxAttempts) {
+                    console.warn('[N2F-Hydration] redraw attempt ' + attempt + ': Util not ready');
                     _serverLog('INFO', '[LazyDiag] redraw attempt ' + attempt + ': Util not ready');
                   }
                   if (attempt < maxAttempts) {
@@ -527,6 +880,7 @@
                 var scene = ws && ws.scene;
                 if (!scene || !stageArea) {
                   if (attempt === 1 || attempt === maxAttempts) {
+                    console.warn('[N2F-Hydration] redraw attempt ' + attempt + ': scene/stage not ready');
                     _serverLog('INFO', '[LazyDiag] redraw attempt ' + attempt + ': scene/stage not ready');
                   }
                   if (attempt < maxAttempts) {
@@ -536,6 +890,12 @@
                   _serverLog('WARN', '[Lazy] Redraw skipped: scene/stage not ready after retries');
                   return;
                 }
+
+                var hydrVer = window.Util ? (window.Util.$hydrationVersion | 0) : -1;
+                var wsSeq   = (ws && ws.root && ws.root._$renderSeq) ? ws.root._$renderSeq : '?';
+                _serverLog('INFO', '[LazyDiag] triggerHydrationRedraw attempt=' + attempt +
+                  ' frame=' + (Util.$timelineFrame ? Util.$timelineFrame.currentFrame : '?') +
+                  ' hydrVer=' + hydrVer + ' wsSeq=' + wsSeq);
 
                 try {
                   if (typeof scene.cacheClear === 'function') {
@@ -558,6 +918,9 @@
                   ? Util.$timelineFrame.currentFrame
                   : 1;
 
+                var wsSeqAfterClear = (ws && ws.root && ws.root._$renderSeq) ? ws.root._$renderSeq : '?';
+                _serverLog('INFO', '[LazyDiag] before changeFrame frame=' + frame + ' seqAfterClear=' + wsSeqAfterClear);
+
                 var renderPromise = null;
                 try {
                   if (typeof scene.changeFrame === 'function') {
@@ -571,8 +934,18 @@
 
                 Promise.resolve(renderPromise)
                   .then(function() {
+                    var wsSeqFinal = (ws && ws.root && ws.root._$renderSeq) ? ws.root._$renderSeq : '?';
+                    var stageChildren = stageArea ? stageArea.querySelectorAll('canvas').length : -1;
+                    // If stage has no canvases the changeFrame was likely STALE (a newer
+                    // render incremented _$renderSeq before our .then() ran).  Retry.
+                    if (stageChildren === 0 && attempt < maxAttempts) {
+                      console.warn('[N2F-Hydration] Stage empty after attempt ' + attempt + ' (likely stale render), retrying...');
+                      return setTimeout(function() { triggerHydrationRedraw(attempt + 1); }, 250);
+                    }
+                    console.warn('[N2F-Hydration] Hydration redraw complete: ' + stageChildren + ' canvas(es) on stage (attempt ' + attempt + ')');
                     _log.info('[Lazy] Canvas re-render triggered at frame ' + frame + ' (attempt ' + attempt + ')');
-                    _serverLog('INFO', '[Lazy] Canvas re-render triggered at frame ' + frame + ' (attempt ' + attempt + ')');
+                    _serverLog('INFO', '[Lazy] Canvas re-render triggered at frame ' + frame +
+                      ' (attempt ' + attempt + ') seqFinal=' + wsSeqFinal + ' stageCanvases=' + stageChildren);
                     logHydrationSnapshot('after-rerender-immediate');
                     setTimeout(function() {
                       logHydrationSnapshot('after-rerender-1000ms');
@@ -613,13 +986,13 @@
     e.target.value = '';  // reset for re-selecting same file
 
     var defaultName = file.name.replace(/\.\w+$/, '');
-    _promptProjectName(defaultName).then(function (projectName) {
-      if (projectName === null) return;
-      _doSWFFileImport(file, projectName);
+    _promptProjectName(defaultName).then(function (result) {
+      if (result === null) return;
+      _doSWFFileImport(file, result.name, result.saveDir, result.overwrite);
     });
   }
 
-  function _doSWFFileImport(file, projectName) {
+  function _doSWFFileImport(file, projectName, saveDir, overwrite) {
     if (window.N2FProfiler) {
       window.N2FProfiler.startSession('swf-import-client');
       window.N2FProfiler.size('swf_file', file.size);
@@ -632,6 +1005,8 @@
     var form = new FormData();
     form.append('file', file);
     form.append('projectName', projectName);
+    if (saveDir) form.append('saveDir', saveDir);
+    if (overwrite) form.append('overwrite', '1');
 
     fetch(API_BASE + '/api/swf-to-project', { method: 'POST', body: form })
       .then(function (r) {
@@ -680,6 +1055,12 @@
         updateProgress('Loading project into editor...', 88);
         if (window.N2FProfiler) window.N2FProfiler.startTimer('load_into_tool');
         _currentProjectName = projectName;
+        _setDocumentTitle(projectName, false);
+        _markClean();
+        _startAutosave();
+        _startDirtyPoll();
+        _addRecentImport(file.name || '', file.name || projectName);
+        _addRecentProject(result.projDir, projectName);
         _feedN2DToTool(result.blob, projectName);
 
         // End session after a delay to capture loading time
@@ -692,10 +1073,12 @@
 
         updateProgress('Finalizing...', 98);
         hideProgress();
+        _hideWelcomeWhenTabReady();
         toast('Project created: ' + projectName + ' (' + result.libs + ' libraries, ' + result.scripts + ' scripts)\nFolder: ' + _currentProjectDir);
       })
       .catch(function (err) {
         hideProgress();
+        _hideWelcomeScreen();
         if (window.N2FProfiler) window.N2FProfiler.endSession('swf-import-client');
         _log.error('SWF import failed:', err.message);
         toast('Import failed: ' + err.message, true);
@@ -774,15 +1157,22 @@
 
         updateProgress('Loading project into editor...', 90);
         _currentProjectName = result.name;
+        _setDocumentTitle(result.name, false);
+        _markClean();
+        _startAutosave();
+        _startDirtyPoll();
+        if (result.projDir) _addRecentProject(result.projDir, result.name);
         _feedN2DToTool(result.blob, result.name);
 
         updateProgress('Finalizing...', 98);
         hideProgress();
+        _hideWelcomeWhenTabReady();
         if (onSuccess) onSuccess(result);
         else toast('Opened: ' + result.name + ' (' + result.libs + ' libraries)');
       })
       .catch(function (err) {
         hideProgress();
+        _hideWelcomeScreen();
         _log.error('Open N2D failed:', err.message);
         toast('Open failed: ' + err.message, true);
       });
@@ -929,9 +1319,53 @@
   /* ================================================================== */
   /*  Save Project                                                      */
   /* ================================================================== */
+
+  /** Save a scratch (no project folder) project by prompting for name/location. */
+  function _saveAsNewProject(projectName, saveDir) {
+    _log.info('Save As new project:', projectName, saveDir || '(default location)');
+    showProgress('Capturing editor state...', 10);
+    saveProjectAsN2D()
+      .then(function (n2dBlob) {
+        updateProgress('Saving project to server (' + formatBytes(n2dBlob.size) + ')...', 50);
+        var form = new FormData();
+        form.append('n2d', n2dBlob, 'project.n2d');
+        form.append('name', projectName);
+        if (saveDir) form.append('saveDir', saveDir);
+        return fetch(API_BASE + '/api/save-as-project', { method: 'POST', body: form });
+      })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Save failed'); });
+        return r.json();
+      })
+      .then(function (result) {
+        hideProgress();
+        _currentProjectDir = result.projDir;
+        _currentProjectName = projectName;
+        _setDocumentTitle(projectName, false);
+        _markClean();
+        _startAutosave();
+        _startDirtyPoll();
+        _addRecentProject(result.projDir, projectName);
+        var refreshBtn = document.getElementById('n2f-refresh-assets');
+        if (refreshBtn) refreshBtn.removeAttribute('disabled');
+        _log.info('Project saved as new folder:', _currentProjectDir);
+        toast('Project saved: ' + result.projDir);
+      })
+      .catch(function (err) {
+        hideProgress();
+        _log.error('Save As new project failed:', err.message);
+        toast('Save failed: ' + err.message, true);
+      });
+  }
+
   function onSaveProject() {
     if (!_currentProjectDir) {
-      toast('No project folder active — import an SWF or open a project first.', true);
+      // No project folder yet — prompt for name/location and create one
+      var defaultName = getProjectName() || 'untitled';
+      _promptProjectName(defaultName).then(function (result) {
+        if (!result) return;
+        _saveAsNewProject(result.name, result.saveDir);
+      });
       return;
     }
     _log.info('Save Project requested');
@@ -952,6 +1386,8 @@
       .then(function (result) {
         updateProgress('Save complete.', 100);
         hideProgress();
+        _markClean();
+        _addRecentProject(_currentProjectDir, _currentProjectName);
         _log.info('Project saved to:', result.folder);
         toast('Project saved to: ' + result.folder);
       })
@@ -1092,7 +1528,7 @@
           }
 
           updateProgress('Serializing editor state...', 15);
-          _captureToolBlob()
+          return _captureToolBlob()
             .then(function (rawBlob) {
               updateProgress('Uploading editor data to server...', 30);
               var form = new FormData();
@@ -1122,8 +1558,9 @@
             });
         }).catch(function (err) {
           hideProgress();
+          if (window.N2FProfiler) window.N2FProfiler.endSession('swf-import-client');
           _log.error('SWF export failed:', err.message);
-          toast('Export failed: ' + err.message, true);
+          _showExportError(err.message);
         });
         return;
       }
@@ -1195,59 +1632,47 @@
           hideProgress();
           if (window.N2FProfiler) window.N2FProfiler.endSession('swf-export-client');
           _log.error('SWF export failed:', err.message);
-          toast('Export failed: ' + err.message, true);
+          _showExportError(err.message);
         });
       return;
     }
 
-    // No project folder — use the legacy browser-blob export pipeline
-    updateProgress('Serializing editor state...', 10);
-    saveProjectAsN2D()
-      .then(function (n2dBlob) {
-        updateProgress('Uploading N2D to server (' + formatBytes(n2dBlob.size) + ')...', 30);
-
-        var form = new FormData();
-        form.append('file', n2dBlob, name + '.n2d');
-
-        updateProgress('Server compiling N2D to SWF...', 50);
-        return fetch(API_BASE + '/api/n2d-to-swf', { method: 'POST', body: form })
-          .then(function (r) {
-            updateProgress('Receiving compiled SWF...', 70);
-            if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Compilation failed'); });
-            return r.blob().then(function (blob) {
-              updateProgress('Preparing download (' + formatBytes(blob.size) + ')...', 85);
-              return { blob: blob, name: name };
-            });
-          });
-      })
-      .then(function (result) {
-        updateProgress('Download ready.', 95);
-
-        // Download the SWF
-        var url = URL.createObjectURL(result.blob);
-        var a = document.createElement('a');
-        a.href = url;
-        a.download = result.name + '.swf';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
-
-        if (window.N2FProfiler) {
-          window.N2FProfiler.stopTimer();
-          window.N2FProfiler.size('output_swf', result.blob.size);
-          window.N2FProfiler.endSession('swf-export-client');
-        }
-        _log.info('SWF export succeeded:', result.name + '.swf', formatBytes(result.blob.size));
-        hideProgress();
-        toast('Exported: ' + result.name + '.swf (' + formatBytes(result.blob.size) + ')');
-      })
-      .catch(function (err) {
-        hideProgress();
-        if (window.N2FProfiler) window.N2FProfiler.endSession('swf-export-client');
-        _log.error('SWF export failed:', err.message);
-        toast('Export failed: ' + err.message, true);
-      });
+    // No project folder — require saving first so export can use the fast path.
+    hideProgress();
+    var defaultName = getProjectName() || 'untitled';
+    _log.info('Export SWF: no project folder, prompting user to save first');
+    _promptProjectName(defaultName).then(function (result) {
+      if (!result) return; // user cancelled
+      showProgress('Saving project...', 10);
+      saveProjectAsN2D()
+        .then(function (n2dBlob) {
+          updateProgress('Creating project folder...', 35);
+          var form = new FormData();
+          form.append('n2d', n2dBlob, 'project.n2d');
+          form.append('name', result.name);
+          if (result.saveDir) form.append('saveDir', result.saveDir);
+          return fetch(API_BASE + '/api/save-as-project', { method: 'POST', body: form });
+        })
+        .then(function (r) {
+          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Save failed'); });
+          return r.json();
+        })
+        .then(function (saved) {
+          _currentProjectDir = saved.projDir;
+          _currentProjectName = result.name;
+          var refreshBtn = document.getElementById('n2f-refresh-assets');
+          if (refreshBtn) refreshBtn.removeAttribute('disabled');
+          _log.info('Project saved, now exporting SWF from:', _currentProjectDir);
+          hideProgress();
+          // Re-invoke export — _currentProjectDir is now set, will use fast path
+          onExportSWF();
+        })
+        .catch(function (err) {
+          hideProgress();
+          _log.error('Save before export failed:', err.message);
+          _showExportError(err.message);
+        });
+    });
   }
 
   /**
@@ -1385,7 +1810,7 @@
             // Fallback: if critical fields still missing, re-parse stored N2D blob
             var blobSource = _importedN2DBlob
               ? Promise.resolve(_importedN2DBlob)
-              : _loadImportedBlobFromIDB();
+              : Promise.resolve(null); // IDB blob may be stale from a prior session; only use in-memory blob
             var _t4 = performance.now();
             var needsFallback = !json.rootTimelineDefIds
               || !json.scripts || json.scripts.length === 0
@@ -1692,13 +2117,75 @@
     document.getElementById('n2f-progress').style.display = 'none';
   }
 
+  /* ================================================================== */
+  /*  Export error dialog                                                */
+  /* ================================================================== */
+  function _showExportError(message) {
+    hideProgress();
+
+    // Lazily create the overlay and dialog elements
+    if (!document.getElementById('n2f-export-error')) {
+      var ov = document.createElement('div');
+      ov.id = 'n2f-export-error-overlay';
+      document.body.appendChild(ov);
+
+      var dlg = document.createElement('div');
+      dlg.id = 'n2f-export-error';
+      dlg.innerHTML =
+        '<h3>\u274c Export Failed</h3>' +
+        '<div class="n2f-err-msg" id="n2f-export-error-msg"></div>' +
+        '<div class="n2f-err-hint" id="n2f-export-error-hint"></div>' +
+        '<div class="n2f-err-buttons">' +
+          '<button class="n2f-btn primary" id="n2f-export-error-dismiss">Dismiss</button>' +
+          '<button class="n2f-btn" id="n2f-export-error-log">Open Server Log</button>' +
+        '</div>';
+      document.body.appendChild(dlg);
+
+      document.getElementById('n2f-export-error-dismiss').addEventListener('click', _hideExportError);
+      document.getElementById('n2f-export-error-overlay').addEventListener('click', _hideExportError);
+      document.getElementById('n2f-export-error-log').addEventListener('click', function () {
+        if (window.n2fElectron && window.n2fElectron.showServerConsole) {
+          window.n2fElectron.showServerConsole();
+        }
+        _hideExportError();
+      });
+    }
+
+    // Populate the message
+    document.getElementById('n2f-export-error-msg').textContent = message;
+
+    // Add a friendly hint for known errors
+    var hint = '';
+    if (message.indexOf('ObjectList') !== -1 || message.indexOf('mxmlc') !== -1) {
+      hint = 'The AS3 compiler (mxmlc) encountered an error. This can happen when a project ' +
+        'has many scripts and the compiler runs low on memory, or when a script contains ' +
+        'syntax the compiler cannot parse. Check the Server Log for the full mxmlc output.';
+    } else if (message.indexOf('Flex SDK not found') !== -1) {
+      hint = 'The Flex SDK is required to compile AS3 scripts. Make sure flex_sdk/ is present ' +
+        'in the app/ folder next to server.py.';
+    }
+    var hintEl = document.getElementById('n2f-export-error-hint');
+    hintEl.textContent = hint;
+    hintEl.style.display = hint ? '' : 'none';
+
+    document.getElementById('n2f-export-error-overlay').style.display = 'block';
+    document.getElementById('n2f-export-error').style.display = 'flex';
+  }
+
+  function _hideExportError() {
+    var ov = document.getElementById('n2f-export-error-overlay');
+    var dlg = document.getElementById('n2f-export-error');
+    if (ov) ov.style.display = 'none';
+    if (dlg) dlg.style.display = 'none';
+  }
+
   function toast(msg, isErr) {
     var old = document.getElementById('n2f-toast');
     if (old) old.remove();
     var el = document.createElement('div');
     el.id = 'n2f-toast';
     el.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);' +
-      'z-index:200001;max-width:500px;padding:12px 24px;border-radius:6px;' +
+      'z-index:330001;max-width:500px;padding:12px 24px;border-radius:6px;' +
       'font:13px/1.5 Arial,sans-serif;color:#fff;' +
       'box-shadow:0 4px 16px rgba(0,0,0,.4);transition:opacity .3s;' +
       'background:' + (isErr ? '#e74c3c' : '#2ecc71');
@@ -1730,6 +2217,393 @@
         body: JSON.stringify({ level: level, message: message })
       }).catch(function () { /* ignore */ });
     } catch (e) { /* ignore */ }
+  }
+
+  /* ================================================================== */
+  /*  Autosave                                                           */
+  /* ================================================================== */
+  function _startAutosave() {
+    if (_autosaveTimer) return;
+    _autosaveTimer = setInterval(_doAutosave, 60000);
+    _log.info('Autosave started (every 60 s)');
+  }
+
+  function _stopAutosave() {
+    if (_autosaveTimer) { clearInterval(_autosaveTimer); _autosaveTimer = null; }
+  }
+
+  function _doAutosave() {
+    if (!_currentProjectDir || !_isDirty) return;
+    var prog = document.getElementById('n2f-progress');
+    if (prog && prog.style.display !== 'none') return; // busy
+
+    // Build the project object on the main thread (plain JS objects — no stringify yet)
+    var Util = window.Util;
+    var ws = Util && Util.$currentWorkSpace && Util.$currentWorkSpace();
+    if (!ws || !ws._$project) {
+      _log.warn('Autosave: no active workspace, skipping');
+      return;
+    }
+
+    var projectObj;
+    try {
+      var projectData = ws._$project.toObject(false);
+      var uiData = ws._$uiState ? ws._$uiState.toObject() : {};
+      projectObj = Object.assign({}, projectData, { setting: uiData });
+    } catch (e) {
+      _log.warn('Autosave: failed to build project object:', e.message);
+      return;
+    }
+
+    // Inject roundtrip fields (scripts, rawGlobalTags, SWF metadata) on main thread
+    // so live editor state is captured before passing to the worker
+    var panel = window.__n2d_as_panel;
+    if (panel && typeof panel.injectRoundtripFields === 'function') {
+      try { panel.injectRoundtripFields(projectObj); } catch (e) { /* non-fatal */ }
+    }
+
+    _log.info('Autosave: serializing project in worker...');
+
+    // Lazily create a persistent worker for serialize + compress
+    if (!_autosaveWorker) {
+      _autosaveWorker = new Worker('./assets/js/workers/autosave-worker.js');
+      _autosaveWorker.onerror = function (e) {
+        _log.warn('Autosave worker error:', e.message);
+      };
+    }
+
+    _autosaveWorker.onmessage = function (e) {
+      var msg = e.data;
+      if (msg.type === 'error') {
+        _log.warn('Autosave worker serialization error:', msg.message);
+        return;
+      }
+      var blob = new Blob([msg.buffer], { type: 'application/octet-stream' });
+      var form = new FormData();
+      form.append('n2d', blob, 'project.n2d');
+      fetch(API_BASE + '/api/save-project', { method: 'POST', body: form })
+        .then(function (r) {
+          if (!r.ok) throw new Error('Server rejected autosave');
+          return r.json();
+        })
+        .then(function () {
+          _markClean();
+          _addRecentProject(_currentProjectDir, _currentProjectName);
+          toast('Autosaved \u2713');
+          _log.info('Autosave: done');
+        })
+        .catch(function (e) { _log.warn('Autosave failed:', e.message); });
+    };
+
+    // Transfer the plain object to the worker — JSON.stringify + deflate runs off-thread
+    _autosaveWorker.postMessage({ type: 'serialize', obj: projectObj });
+  }
+
+  /* ================================================================== */
+  /*  Welcome screen                                                     */
+  /* ================================================================== */
+  function _showWelcomeScreen() {
+    var el = document.getElementById('n2f-welcome');
+    if (!el) return;
+    el.style.display = 'flex';
+    // Hide the close button when there is no open project to return to.
+    var closeBtn = document.getElementById('n2f-welcome-close');
+    if (closeBtn) {
+      closeBtn.style.display = (window.Util && window.Util.$workSpaces && window.Util.$workSpaces.length > 0) ? '' : 'none';
+    }
+    _loadRecents().then(function () { _renderRecentLists(); });
+  }
+
+  function _hideWelcomeScreen() {
+    var el = document.getElementById('n2f-welcome');
+    if (el) el.style.display = 'none';
+  }
+
+  /**
+   * Delay hiding the welcome screen until a new tab appears in the editor,
+   * so the user doesn't briefly see the old (tab-less) workspace.
+   * Falls back to hiding after ~5 s if no tab appears.
+   */
+  function _hideWelcomeWhenTabReady() {
+    var el = document.getElementById('n2f-welcome');
+    if (!el || el.style.display === 'none') return; // already hidden
+    var activeEl = document.querySelector('#view-tab-area .active[data-tab-id]');
+    var oldTabId = activeEl ? activeEl.dataset.tabId : null;
+    var attempts = 0;
+    function poll() {
+      var cur = document.querySelector('#view-tab-area .active[data-tab-id]');
+      var curId = cur ? cur.dataset.tabId : null;
+      if (curId !== null && curId !== oldTabId) {
+        _hideWelcomeScreen();
+      } else if (++attempts < 50) {
+        setTimeout(poll, 100);
+      } else {
+        _hideWelcomeScreen(); // fallback after ~5 s
+      }
+    }
+    setTimeout(poll, 50);
+  }
+
+  /* ================================================================== */
+  /*  Recents                                                            */
+  /* ================================================================== */
+  function _loadRecents() {
+    return fetch(API_BASE + '/api/recents')
+      .then(function (r) { return r.ok ? r.json() : { projects: [], imports: [] }; })
+      .then(function (data) {
+        _recentProjects = data.projects || [];
+        _recentImports = data.imports || [];
+      })
+      .catch(function () { _recentProjects = []; _recentImports = []; });
+  }
+
+  function _addRecentProject(projDir, name) {
+    if (!projDir) return;
+    fetch(API_BASE + '/api/add-recent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category: 'project', path: projDir, name: name || projDir.split(/[\\/]/).pop() })
+    }).then(function () {
+      return _loadRecents().then(_renderRecentLists);
+    }).catch(function () {});
+  }
+
+  function _addRecentImport(filePath, name) {
+    if (!filePath) return;
+    fetch(API_BASE + '/api/add-recent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category: 'import', path: filePath, name: name || filePath.split(/[\\/]/).pop() })
+    }).then(function () {
+      return _loadRecents().then(_renderRecentLists);
+    }).catch(function () {});
+  }
+
+  function _renderRecentLists() {
+    _renderRecentList('n2f-recent-projects', _recentProjects, function (item) {
+      _openRecentProject(item.path, item.name);
+    });
+    _renderRecentList('n2f-recent-imports', _recentImports, function (item) {
+      _importRecentSWF(item.path, item.name);
+    });
+  }
+
+  function _renderRecentList(containerId, items, onClick) {
+    var container = document.getElementById(containerId);
+    if (!container) return;
+    container.innerHTML = '';
+    if (!items || !items.length) {
+      container.innerHTML = '<div class="n2f-recent-empty">No recent files</div>';
+      return;
+    }
+    items.forEach(function (item) {
+      var div = document.createElement('div');
+      div.className = 'n2f-recent-item';
+      div.title = item.path;
+      var nameText = _escapeHtml(item.name || item.path.split(/[\\/]/).pop());
+      var pathText = _escapeHtml(item.path);
+
+      var info = document.createElement('div');
+      info.className = 'n2f-ri-info';
+      info.innerHTML =
+        '<div class="n2f-ri-name">' + nameText + '</div>' +
+        '<div class="n2f-ri-path">' + pathText + '</div>';
+      info.addEventListener('click', function () { onClick(item); });
+
+      var actions = document.createElement('div');
+      actions.className = 'n2f-ri-actions';
+
+      var revealBtn = document.createElement('button');
+      revealBtn.className = 'n2f-ri-btn';
+      revealBtn.title = 'Reveal in Explorer';
+      revealBtn.textContent = '\ud83d\udcc2';
+      revealBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        _revealPath(item.path);
+      });
+
+      var removeBtn = document.createElement('button');
+      removeBtn.className = 'n2f-ri-btn';
+      removeBtn.title = 'Remove from list';
+      removeBtn.textContent = '\u2715';
+      removeBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        _removeRecentItem(containerId, item.path);
+      });
+
+      actions.appendChild(revealBtn);
+      actions.appendChild(removeBtn);
+      div.appendChild(info);
+      div.appendChild(actions);
+      container.appendChild(div);
+    });
+  }
+
+  function _revealPath(path) {
+    if (window.n2fElectron && window.n2fElectron.showItemInFolder) {
+      window.n2fElectron.showItemInFolder(path);
+    } else {
+      fetch(API_BASE + '/api/reveal-path', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: path })
+      }).catch(function () {});
+    }
+  }
+
+  function _removeRecentItem(containerId, path) {
+    var category = containerId === 'n2f-recent-projects' ? 'project' : 'import';
+    fetch(API_BASE + '/api/remove-recent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category: category, path: path })
+    })
+      .then(function () { return _loadRecents(); })
+      .then(function () { _renderRecentLists(); })
+      .catch(function () {});
+  }
+
+  function _escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function _openRecentProject(projDir, name) {
+    showProgress('Opening: ' + name + '...', 10);
+    fetch(API_BASE + '/api/open-project-path', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projDir: projDir, lazy: true })
+    })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Open failed'); });
+        var rname = r.headers.get('X-N2D-Name') || name;
+        var libs = r.headers.get('X-N2D-Libraries') || '?';
+        var projDirHdr = r.headers.get('X-Project-Dir') || projDir;
+        var fontsHeader = r.headers.get('X-N2D-Fonts') || '';
+        var fonts = null;
+        if (fontsHeader) { try { fonts = JSON.parse(fontsHeader); } catch(e) {} }
+        updateProgress('Downloading project (' + libs + ' libraries)...', 50);
+        return r.blob().then(function (b) { return { blob: b, name: rname, libs: libs, projDir: projDirHdr, fonts: fonts }; });
+      })
+      .then(function (result) {
+        _currentProjectDir = result.projDir;
+        _currentProjectName = result.name;
+        _setDocumentTitle(result.name, false);
+        _markClean();
+        _startAutosave();
+        _startDirtyPoll();
+        _addRecentProject(result.projDir, result.name);
+        var refreshBtn = document.getElementById('n2f-refresh-assets');
+        if (refreshBtn) refreshBtn.disabled = false;
+        _registerEmbeddedFonts(result.fonts);
+        _importedN2DBlob = result.blob.slice(0);
+        _saveImportedBlobToIDB(_importedN2DBlob);
+        window.__n2f_loading_from_welcome = true;
+        _feedN2DToTool(result.blob, result.name);
+        hideProgress();
+        _hideWelcomeWhenTabReady();
+        toast('Opened: ' + result.name + ' (' + result.libs + ' libraries)');
+        // Start background hydration of lazy library stubs
+        _startBackgroundHydration(result.libs);
+      })
+      .catch(function (err) {
+        hideProgress();
+        _hideWelcomeScreen();
+        _log.error('Open recent project failed:', err.message);
+        toast('Open failed: ' + err.message, true);
+      });
+  }
+
+  function _importRecentSWF(swfPath, name) {
+    _log.info('Re-importing SWF:', name, swfPath);
+    _importSWFByPath(swfPath);
+  }
+
+  /* ================================================================== */
+  /*  New Project                                                        */
+  /* ================================================================== */
+  function _onNewProject() {
+    _promptProjectName('untitled').then(function (result) {
+      if (!result) return;
+      var projName = result.name;
+      showProgress('Creating project: ' + projName + '...', 20);
+      fetch(API_BASE + '/api/new-project', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: projName, saveFolder: true })
+      })
+        .then(function (r) {
+          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Create failed'); });
+          var rname = r.headers.get('X-N2D-Name') || projName;
+          var dir = r.headers.get('X-Project-Dir') || '';
+          updateProgress('Loading blank project...', 70);
+          return r.blob().then(function (b) { return { blob: b, name: rname, projDir: dir }; });
+        })
+        .then(function (res) {
+          _currentProjectDir = res.projDir;
+          _currentProjectName = res.name;
+          _setDocumentTitle(res.name, false);
+          _markClean();
+          _startAutosave();
+          _startDirtyPoll();
+          if (res.projDir) _addRecentProject(res.projDir, res.name);
+          var refreshBtn = document.getElementById('n2f-refresh-assets');
+          if (refreshBtn) refreshBtn.disabled = false;
+          window.__n2f_loading_from_welcome = true;
+          _feedN2DToTool(res.blob, res.name);
+          hideProgress();
+          _hideWelcomeWhenTabReady();
+          toast('New project created: ' + res.name);
+        })
+        .catch(function (err) {
+          hideProgress();
+          _hideWelcomeScreen();
+          _log.error('New project failed:', err.message);
+          toast('New project failed: ' + err.message, true);
+        });
+    });
+  }
+
+  /* ================================================================== */
+  /*  Import Asset (image/audio into project folder)                    */
+  /* ================================================================== */
+  function onImportAsset() {
+    if (!_currentProjectDir) {
+      toast('Save or open a project first, then import assets.', true);
+      return;
+    }
+    document.getElementById('n2f-asset-input').click();
+  }
+
+  function onAssetFileSelected(e) {
+    var files = Array.prototype.slice.call(e.target.files);
+    if (!files.length) return;
+    e.target.value = '';
+    _importAssetFiles(files);
+  }
+
+  function _importAssetFiles(files) {
+    if (!_currentProjectDir) { toast('No active project folder.', true); return; }
+    showProgress('Importing ' + files.length + ' asset(s)...', 10);
+    var form = new FormData();
+    files.forEach(function (f) { form.append('files', f, f.name); });
+    fetch(API_BASE + '/api/import-asset', { method: 'POST', body: form })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Import failed'); });
+        return r.json();
+      })
+      .then(function (result) {
+        hideProgress();
+        toast('Imported ' + result.count + ' asset(s) \u2192 ' + result.folder);
+        _log.info('Assets imported:', result.files);
+      })
+      .catch(function (err) {
+        hideProgress();
+        _log.error('Asset import failed:', err.message);
+        toast('Asset import failed: ' + err.message, true);
+      });
   }
 
   /* ================================================================== */

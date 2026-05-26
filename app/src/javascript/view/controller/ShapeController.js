@@ -334,8 +334,6 @@ class ShapeController extends BaseController
         // value rather than the stale one from the previous frame.
         document.getElementById("fill-alpha-value").value = value;
 
-        console.warn(`[N2F-DBG] changeFillAlphaValue value=${value} hitColor=${!!Util.$hitColor} type=${Util.$hitColor ? Util.$hitColor.type : 'none'}`);
-
         if (Util.$hitColor) {
 
             switch (Util.$hitColor.type) {

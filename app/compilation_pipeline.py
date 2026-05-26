@@ -53,7 +53,7 @@ class CompilationContext:
     """
     # ── Input parameters ──
     n2d_path: str
-    shared_dir: str
+    shared_dir: Optional[str]
     output_path: str
     sdk_path: Optional[str] = None
 

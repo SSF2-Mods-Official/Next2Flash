@@ -221,6 +221,7 @@ class Slovakia extends Language
             ["{{塗りのカラー}}", "Farba farby"],
             ["{{線のカラー}}", "Farba čiary"],
             ["{{線の太さ}}", "hrúbka čiary"],
+            ["{{新規プロジェクト}}", "Nový projekt"],
             ["{{プロジェクトデータの読込}}", "Čítanie údajov o projekte"],
             ["{{プロジェクトデータを保存}}", "Uloženie údajov o projekte."],
             ["{{書き出し}}", "úvodná veta alebo odsek"],

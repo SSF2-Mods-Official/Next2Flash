@@ -222,6 +222,7 @@ class French extends Language
             ["{{塗りのカラー}}", "Couleur de remplissage"],
             ["{{線のカラー}}", "Couleur du trait"],
             ["{{線の太さ}}", "Largeur de course"],
+            ["{{新規プロジェクト}}", "Nouveau projet"],
             ["{{プロジェクトデータの読込}}", "Chargement des données du projet"],
             ["{{プロジェクトデータを保存}}", "Sauvegarder les données du projet"],
             ["{{書き出し}}", "Exportation"],
