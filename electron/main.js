@@ -16,6 +16,7 @@ const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron')
 const path = require('path');
 const { spawn } = require('child_process');
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 
 // ── Paths ──────────────────────────────────────────────────────────────────
@@ -221,6 +222,149 @@ function stopPythonServer() {
     pythonProcess.kill();
     pythonProcess = null;
   }
+}
+
+// ── Update check (GitHub Releases) ─────────────────────────────────────────
+const GH_RELEASE_URL = 'https://api.github.com/repos/SSF2-Mods-Official/Next2Flash/releases/latest';
+const GH_RELEASE_PAGE = 'https://github.com/SSF2-Mods-Official/Next2Flash/releases/latest';
+
+function getUpdateSkipPath() {
+  return path.join(app.getPath('userData'), 'update-skip.json');
+}
+
+function getSkippedVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(getUpdateSkipPath(), 'utf8')).skippedVersion || null;
+  } catch (_) { return null; }
+}
+
+function setSkippedVersion(v) {
+  try {
+    fs.writeFileSync(getUpdateSkipPath(), JSON.stringify({ skippedVersion: v }), 'utf8');
+  } catch (_) { /* non-fatal */ }
+}
+
+// Compare two version strings like "0.1", "v0.1.0", "1.2.3". Returns >0 if a>b,
+// <0 if a<b, 0 if equal. Non-numeric segments compared lexicographically.
+function compareVersions(a, b) {
+  const norm = s => String(s).replace(/^v/i, '').split(/[.\-+]/);
+  const A = norm(a), B = norm(b);
+  const n = Math.max(A.length, B.length);
+  for (let i = 0; i < n; i++) {
+    const ai = A[i] ?? '0', bi = B[i] ?? '0';
+    const an = parseInt(ai, 10), bn = parseInt(bi, 10);
+    if (!isNaN(an) && !isNaN(bn)) {
+      if (an !== bn) return an - bn;
+    } else if (ai !== bi) {
+      return ai < bi ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+function fetchLatestRelease() {
+  return new Promise((resolve, reject) => {
+    const req = https.get(GH_RELEASE_URL, {
+      headers: {
+        'User-Agent': 'Next2Flash-Updater',
+        'Accept': 'application/vnd.github+json',
+      },
+      timeout: 5000,
+    }, res => {
+      // Follow one redirect if needed
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        https.get(res.headers.location, { headers: { 'User-Agent': 'Next2Flash-Updater' } }, r2 => collect(r2, resolve, reject)).on('error', reject);
+        return;
+      }
+      collect(res, resolve, reject);
+    });
+    req.on('timeout', () => { req.destroy(new Error('timeout')); });
+    req.on('error', reject);
+  });
+}
+
+function collect(res, resolve, reject) {
+  if (res.statusCode !== 200) {
+    reject(new Error(`HTTP ${res.statusCode}`));
+    return;
+  }
+  let body = '';
+  res.setEncoding('utf8');
+  res.on('data', c => body += c);
+  res.on('end', () => {
+    try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+  });
+  res.on('error', reject);
+}
+
+/**
+ * Check GitHub for a newer release.
+ *   silent=true  → only show a dialog if a newer version exists & isn't skipped.
+ *   silent=false → always show a dialog (used by Help → Check for Updates).
+ */
+async function checkForUpdates({ silent = true } = {}) {
+  const current = app.getVersion();
+  let release;
+  try {
+    release = await fetchLatestRelease();
+  } catch (err) {
+    if (!silent) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'Update check failed',
+        message: 'Could not contact GitHub.',
+        detail: String(err && err.message || err),
+      });
+    }
+    return;
+  }
+
+  const latestTag = String(release.tag_name || '').trim();
+  if (!latestTag) {
+    if (!silent) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'No releases yet',
+        message: 'No published releases were found on GitHub.',
+      });
+    }
+    return;
+  }
+
+  const latest = latestTag.replace(/^v/i, '');
+  const cmp = compareVersions(latest, current);
+
+  if (cmp <= 0) {
+    if (!silent) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: "You're up to date",
+        message: `Next2Flash ${current} is the latest version.`,
+      });
+    }
+    return;
+  }
+
+  if (silent && getSkippedVersion() === latest) return;
+
+  const notes = (release.body || '').toString().trim();
+  const detail = notes
+    ? (notes.length > 1200 ? notes.slice(0, 1200) + '\n…' : notes)
+    : 'A new version is available on GitHub.';
+
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: 'Update available',
+    message: `Next2Flash ${latest} is available (you have ${current}).`,
+    detail,
+    buttons: ['Download', 'Remind me later', 'Skip this version'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  });
+
+  if (response === 0) shell.openExternal(release.html_url || GH_RELEASE_PAGE);
+  else if (response === 2) setSkippedVersion(latest);
 }
 
 // ── Window management ──────────────────────────────────────────────────────
@@ -543,12 +687,21 @@ function buildMenu() {
       label: 'Help',
       submenu: [
         {
+          label: 'Check for Updates…',
+          click: () => { checkForUpdates({ silent: false }).catch(() => {}); },
+        },
+        {
+          label: 'Join Discord',
+          click: () => { shell.openExternal('https://discord.gg/MaJFnhHpYx'); },
+        },
+        { type: 'separator' },
+        {
           label: 'About Next2Flash',
           click: () => {
             dialog.showMessageBox(mainWindow, {
               type: 'info',
               title: 'About Next2Flash',
-              message: 'Next2Flash 1st Edition v0.1',
+              message: `Next2Flash ${app.getVersion()}`,
               detail: 'Desktop SWF authoring tool.\nPowered by Electron + Next2D + Python.\nMasterWex',
             });
           },
@@ -779,6 +932,10 @@ app.whenReady().then(async () => {
   buildMenu();
   createWindow();
   closeSplash();
+
+  // Check for a new GitHub release ~3s after the window opens.
+  // Silent: if up-to-date, offline, or user skipped this version, show nothing.
+  setTimeout(() => { checkForUpdates({ silent: true }).catch(() => {}); }, 3000);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
