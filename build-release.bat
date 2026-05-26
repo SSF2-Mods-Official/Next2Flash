@@ -183,7 +183,29 @@ echo.
 echo  [7/7] Packaging Electron app...
 echo.
 
-if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
+:: Kill any running Next2Flash / server.exe instances that would lock files
+:: under build\win-unpacked\ and cause electron-builder to fail with
+:: "Access is denied" / "process cannot access the file" errors.
+echo  Stopping any running Next2Flash / server.exe instances...
+taskkill /f /im Next2Flash.exe /t >nul 2>&1
+taskkill /f /im server.exe /t >nul 2>&1
+:: Brief pause so file handles fully release
+powershell -NoProfile -Command "Start-Sleep -Milliseconds 750" >nul 2>&1
+
+:: Robust cleanup: rmdir can silently fail on locked files. Retry with PowerShell
+:: Remove-Item which surfaces errors and handles long paths better.
+if exist "%BUILD_DIR%" (
+    rmdir /s /q "%BUILD_DIR%" >nul 2>&1
+)
+if exist "%BUILD_DIR%" (
+    powershell -NoProfile -Command "Remove-Item -LiteralPath '%BUILD_DIR%' -Recurse -Force -ErrorAction SilentlyContinue"
+)
+if exist "%BUILD_DIR%" (
+    echo  ERROR: Could not clean %BUILD_DIR% - a file is still locked.
+    echo  Close any open File Explorer windows on build\win-unpacked\
+    echo  and any running Next2Flash.exe, then re-run this script.
+    goto :fail
+)
 
 set CSC_IDENTITY_AUTO_DISCOVERY=false
 set WIN_CSC_LINK=
