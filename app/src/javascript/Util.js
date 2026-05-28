@@ -151,6 +151,41 @@ Util.$poolCanvas = (canvas) =>
     Util.$canvases.push(canvas);
 };
 
+/**
+ * @description Pool of recycled div elements for playback mode.
+ *              These divs never have editor event listeners attached.
+ * @type {Array<HTMLDivElement>}
+ */
+Util.$playbackDivs = [];
+
+/**
+ * @return {HTMLDivElement}
+ * @static
+ */
+Util.$getPlaybackDiv = () =>
+{
+    return Util.$playbackDivs.length
+        ? Util.$playbackDivs.pop()
+        : document.createElement("div");
+};
+
+/**
+ * @param {HTMLDivElement} div
+ * @static
+ */
+Util.$poolPlaybackDiv = (div) =>
+{
+    if (!(div instanceof HTMLDivElement)) {
+        return;
+    }
+    div.textContent = "";
+    div.removeAttribute("style");
+    div.removeAttribute("class");
+    div.removeAttribute("data-child");
+    div.removeAttribute("data-preview");
+    Util.$playbackDivs.push(div);
+};
+
 Util.$cloneMovieClip = (from_work_space_id, movie_clip) =>
 {
     const fromWorkSpace = Util.$workSpaces[from_work_space_id];

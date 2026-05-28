@@ -594,8 +594,6 @@ class Instance
      */
     calcFilter (width, height, place)
     {
-        const { Rectangle } = window.next2d.geom;
-
         let xScale = Math.sqrt(
             place.matrix[0] * place.matrix[0]
             + place.matrix[1] * place.matrix[1]
@@ -616,7 +614,7 @@ class Instance
 
         if (place.filter.length) {
 
-            let rect = new Rectangle(0, 0, width, height);
+            let rect = { xMin: 0, xMax: width, yMin: 0, yMax: height };
 
             for (let idx = 0; idx < place.filter.length; ++idx) {
 
@@ -633,11 +631,11 @@ class Instance
 
             }
 
-            object.width  = Math.ceil(rect.width);
-            object.height = Math.ceil(rect.height);
+            object.width  = Math.ceil(rect.xMax - rect.xMin);
+            object.height = Math.ceil(rect.yMax - rect.yMin);
 
-            object.offsetX = rect.x;
-            object.offsetY = rect.y;
+            object.offsetX = rect.xMin;
+            object.offsetY = rect.yMin;
         }
 
         return object;

@@ -381,6 +381,9 @@ class MovieClip extends Instance
         }
 
         const isPlayback = !Util.$timelinePlayer.stopFlag;
+        if (isPlayback) {
+            Util.$screen.beginPlaybackFrame();
+        }
 
         const layers = Array.from(this._$layers.values());
 
@@ -411,6 +414,54 @@ class MovieClip extends Instance
                 }
 
                 // ステージのelementを全て削除
+                if (isPlayback) {
+                    // Remove parent-scene preview divs — they are re-appended each frame
+                    const pch = element.children;
+                    for (let idx = pch.length - 1; idx >= 0; --idx) {
+                        if (pch[idx].dataset.preview) {
+                            pch[idx].remove();
+                        }
+                    }
+
+                    // Remove divs for characters no longer visible this frame
+                    for (const [charId, div] of Util.$screen._$playbackDivMap) {
+                        if (!Util.$screen._$playbackSeenIds.has(charId)) {
+                            div.remove();
+                            Util.$poolPlaybackDiv(div);
+                            Util.$screen._$playbackDivMap.delete(charId);
+                        }
+                    }
+
+                    // Append only new (non-reused) divs
+                    for (let idx = 0; values.length > idx; ++idx) {
+                        const value = values[idx];
+                        if (!value) {
+                            continue;
+                        }
+                        if (!Array.isArray(value)) {
+                            if (!value._n2fReused) {
+                                value.div.appendChild(value.canvas);
+                                element.appendChild(value.div);
+                            }
+                            continue;
+                        }
+                        for (let jdx = 0; value.length > jdx; ++jdx) {
+                            const object = value[jdx];
+                            if (!object || object._n2fReused) {
+                                continue;
+                            }
+                            object.div.appendChild(object.canvas);
+                            element.appendChild(object.div);
+                        }
+                    }
+
+                    // Pool unused canvases
+                    while (Util.$sleepCanvases.length) {
+                        Util.$poolCanvas(Util.$sleepCanvases.pop());
+                    }
+                    return;
+                }
+
                 Util.$screen.clearStageArea();
 
                 const pointers = [];
@@ -449,14 +500,6 @@ class MovieClip extends Instance
                         object.div.appendChild(object.canvas);
                         element.appendChild(object.div);
                     }
-                }
-
-                // During playback, skip editor UI updates (pointers, tween, transform)
-                if (isPlayback) {
-                    while (Util.$sleepCanvases.length) {
-                        Util.$poolCanvas(Util.$sleepCanvases.pop());
-                    }
-                    return;
                 }
 
                 // スクリーンエリアの変形Elementの配置を再計算

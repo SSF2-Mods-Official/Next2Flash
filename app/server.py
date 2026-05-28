@@ -18,9 +18,16 @@ import json
 import logging
 import msgpack
 import os
+import sys as _sys
+# Force UTF-8 on Windows stdout/stderr so non-ASCII progress messages
+# (e.g. the × in "width×height") don't crash on non-Latin codepages.
+if hasattr(_sys.stdout, 'reconfigure'):
+    _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(_sys.stderr, 'reconfigure'):
+    _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+sys = _sys  # keep the bare 'sys' name available for the rest of the module
 import shutil
 import struct
-import sys
 import tempfile
 import threading
 import time

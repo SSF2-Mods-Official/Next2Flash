@@ -57,15 +57,37 @@ class BaseTimeline extends InputEvent
      */
     reloadScreen ()
     {
-        const frame = Util.$timelineFrame.currentFrame;
+        // During playback the run() loop drives rendering — execute immediately,
+        // skipping sound-element setup (not needed while playing).
+        if (!Util.$timelinePlayer.stopFlag) {
+            return Util
+                .$currentWorkSpace()
+                .scene
+                .changeFrame(Util.$timelineFrame.currentFrame);
+        }
 
-        // サウンド設定
-        Util.$soundController.createSoundElements();
-
-        return Util
-            .$currentWorkSpace()
-            .scene
-            .changeFrame(frame);
+        // In edit mode, debounce rapid calls (e.g. timeline scrub) to one rAF tick.
+        if (this._$reloadPending) {
+            return this._$reloadPromise || Promise.resolve();
+        }
+        this._$reloadPending = true;
+        this._$reloadPromise = new Promise((resolve) =>
+        {
+            requestAnimationFrame(() =>
+            {
+                this._$reloadPending  = false;
+                this._$reloadPromise  = null;
+                const frame = Util.$timelineFrame.currentFrame;
+                Util.$soundController.createSoundElements();
+                resolve(
+                    Util
+                        .$currentWorkSpace()
+                        .scene
+                        .changeFrame(frame)
+                );
+            });
+        });
+        return this._$reloadPromise;
     }
 
     /**

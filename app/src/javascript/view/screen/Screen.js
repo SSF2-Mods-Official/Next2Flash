@@ -32,6 +32,22 @@ class Screen extends BaseScreen
          * @private
          */
         this._$drawFailCounts = new Map();
+
+        /**
+         * @description Map of characterId → div element currently in #stage-area
+         *              during playback. Enables div reuse across frames.
+         * @type {Map<number, HTMLDivElement>}
+         * @private
+         */
+        this._$playbackDivMap = new Map();
+
+        /**
+         * @description Character IDs rendered in the current playback frame.
+         *              Used to detect and remove stale divs.
+         * @type {Set<number>}
+         * @private
+         */
+        this._$playbackSeenIds = new Set();
     }
 
     /**
@@ -646,6 +662,7 @@ class Screen extends BaseScreen
             return Promise.resolve();
         }
         const scene     = parent_scene || workSpace.scene;
+        const isPlayback = !Util.$timelinePlayer.stopFlag;
 
         const layer = scene.getLayer(layer_id);
         if (!layer) {
@@ -823,7 +840,29 @@ class Screen extends BaseScreen
                     return null;
                 }
 
-                const div = document.createElement("div");
+                // During playback, reuse the existing div for this character when
+                // nothing changed — avoids createElement + DOM mutation every frame.
+                if (isPlayback && !parent_scene) {
+                    this._$playbackSeenIds.add(character.id);
+                    if (!doUpdate && this._$playbackDivMap.has(character.id)) {
+                        return {
+                            "div":        this._$playbackDivMap.get(character.id),
+                            "canvas":     canvas,
+                            "_n2fReused": true
+                        };
+                    }
+                    // doUpdate=true: remove and pool the stale div before creating new one
+                    if (this._$playbackDivMap.has(character.id)) {
+                        const stale = this._$playbackDivMap.get(character.id);
+                        stale.remove();
+                        Util.$poolPlaybackDiv(stale);
+                        this._$playbackDivMap.delete(character.id);
+                    }
+                }
+
+                const div = isPlayback && !parent_scene
+                    ? Util.$getPlaybackDiv()
+                    : document.createElement("div");
                 if (!parent_scene) {
                     div.setAttribute("class", "display-object");
                 }
@@ -1042,6 +1081,9 @@ class Screen extends BaseScreen
 
                 if (!promises.length) {
                     div.setAttribute("style", divStyle);
+                    if (isPlayback && !parent_scene) {
+                        this._$playbackDivMap.set(character.id, div);
+                    }
                     return Promise.resolve({
                         "div": div,
                         "canvas": canvas
@@ -1053,6 +1095,9 @@ class Screen extends BaseScreen
                     .then(() =>
                     {
                         div.setAttribute("style", divStyle);
+                        if (isPlayback && !parent_scene) {
+                            this._$playbackDivMap.set(character.id, div);
+                        }
                         return Promise.resolve({
                             "div": div,
                             "canvas": canvas
@@ -1247,6 +1292,18 @@ class Screen extends BaseScreen
      * @public
      */
     /**
+     * @description Reset the seen-IDs set at the start of each playback frame.
+     *
+     * @return {void}
+     * @method
+     * @public
+     */
+    beginPlaybackFrame ()
+    {
+        this._$playbackSeenIds.clear();
+    }
+
+    /**
      * @description Reset playback state
      * @return {void}
      * @method
@@ -1269,6 +1326,14 @@ class Screen extends BaseScreen
                 }
             }
         }
+
+        // Return all playback divs to the pool and remove them from the DOM
+        for (const div of this._$playbackDivMap.values()) {
+            div.remove();
+            Util.$poolPlaybackDiv(div);
+        }
+        this._$playbackDivMap.clear();
+        this._$playbackSeenIds.clear();
     }
 
     clearStageArea ()

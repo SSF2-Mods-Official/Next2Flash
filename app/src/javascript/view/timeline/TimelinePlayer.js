@@ -263,51 +263,20 @@ class TimelinePlayer extends BaseTimeline
                 const _rawFps = document.getElementById("stage-fps").value | 0;
                 this._$fps = 1000 / (_rawFps || 24);
 
-                // Extended pre-warm: render first N frames to populate
-                // shape buffers and container caches so the initial heavy
-                // frames don't freeze the screen during real playback.
-                this._$rendering = true;
-                var self = this;
-                var _warmStart = Util.$timelineFrame.currentFrame;
-                var _warmEnd = Math.min(self._$totalFrame, 120);
-                var _warmT0 = performance.now();
-                var _scene = Util.$currentWorkSpace().scene;
+                // Wipe edit-mode divs from the stage NOW (synchronously) so they
+                // don't linger during the first RAF tick before delta >= fps.
+                console.log('[PlayDbg] Clearing stage area before RAF start');
+                Util.$screen.clearStageArea();
 
-                function _prewarmNext(f) {
-                    if (f > _warmEnd || self._$stopFlag) {
-                        // Done — clear any sounds triggered during pre-warm,
-                        // reset to start frame, and do a final proper render.
-                        Util.$soundController.clear();
-                        Util.$timelineFrame.currentFrame = _warmStart;
-                        _scene.startSound(_warmStart);
-                        return Promise.resolve(self.reloadScreen());
-                    }
-                    Util.$timelineFrame.currentFrame = f;
-                    return Promise.resolve(_scene.changeFrame(f)).then(function() {
-                        return _prewarmNext(f + 1);
-                    });
-                }
+                // Start playback immediately — canvas caches are built lazily on first frames
+                this._$rendering = false;
+                this._$startTime = window.performance.now();
+                this._$timerId   = window.requestAnimationFrame(this._$run);
 
-                _prewarmNext(_warmStart).then(function () {
-                    self._$rendering = false;
-                    if (self._$stopFlag) return;
-                    self._$startTime = window.performance.now();
-                    self._$timerId   = window.requestAnimationFrame(self._$run);
-
-                    console.log('[PlayDbg] PLAY started (pre-warmed frames ' +
-                        _warmStart + '-' + _warmEnd + ' in ' +
-                        (performance.now() - _warmT0).toFixed(0) +
-                        'ms) — totalFrame:', self._$totalFrame,
-                        'fps interval:', self._$fps.toFixed(1) + 'ms',
-                        'startFrame:', Util.$timelineFrame.currentFrame,
-                        'timerId:', self._$timerId);
-                }, function (err) {
-                    console.error('[PlayDbg] Pre-warm failed:', err);
-                    self._$rendering = false;
-                    if (self._$stopFlag) return;
-                    self._$startTime = window.performance.now();
-                    self._$timerId   = window.requestAnimationFrame(self._$run);
-                });
+                console.log('[PlayDbg] PLAY started — totalFrame:', this._$totalFrame,
+                    'fps interval:', this._$fps.toFixed(1) + 'ms',
+                    'startFrame:', Util.$timelineFrame.currentFrame,
+                    'timerId:', this._$timerId);
 
             } else {
                 console.log('[PlayDbg] PLAY skipped — totalFrame <= 1:', this._$totalFrame);

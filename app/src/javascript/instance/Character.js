@@ -301,6 +301,7 @@ class Character
 
                 }
             });
+            this._$cachePlaces = places;
         }
 
         let prevFrame = 0;

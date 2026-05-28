@@ -109,7 +109,7 @@ class ConversionService:
             
             elapsed = time.time() - t0
             _progress(f"Parsed SWF in {elapsed:.2f}s: {len(tags)} tags, "
-                     f"{header['width']}×{header['height']} @ {header['fps']}fps")
+                     f"{header['width']}x{header['height']} @ {header['fps']}fps")
             
             # Build N2D project
             _progress("Building N2D project...")
