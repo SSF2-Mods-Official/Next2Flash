@@ -62,4 +62,16 @@ contextBridge.exposeInMainWorld('n2fElectron', {
   sendProfilerEvent: (event) => {
     ipcRenderer.send('profiler:send-event', event);
   },
+
+  // ── SSF2 roundtrip / ADL debug ───────────────────────────────────────────
+  onMenuSsf2RoundtripAdl: (callback) => {
+    ipcRenderer.on('menu:ssf2-roundtrip-adl', () => callback());
+  },
+  ssf2RunAdl: (opts) => ipcRenderer.invoke('ssf2:run-adl', opts || {}),
+  ssf2StopAdl: () => ipcRenderer.invoke('ssf2:stop-adl'),
+  ssf2ShowConsole: () => ipcRenderer.invoke('ssf2:show-console'),
+  ssf2RestoreBackups: (opts) => ipcRenderer.invoke('ssf2:restore-backups', opts || {}),
+  onSsf2AdlError: (callback) => {
+    ipcRenderer.on('ssf2:adl-error', (_event, payload) => callback(payload));
+  },
 });

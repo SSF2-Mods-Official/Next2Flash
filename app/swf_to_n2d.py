@@ -67,6 +67,7 @@ from swf_constants import (
     TAG_JPEG_TABLES, TAG_DEFINE_BUTTON_SOUND, TAG_DEFINE_BUTTON_CXFORM,
     TAG_DEFINE_FONT2, TAG_IMPORT_ASSETS, TAG_IMPORT_ASSETS2,
     TAG_DEFINE_BINARY_DATA,
+    TAG_DEFINE_VIDEO_STREAM, TAG_VIDEO_FRAME,
 )
 from cycle_detector import validate_swf_sprites
 
@@ -75,12 +76,16 @@ from cycle_detector import validate_swf_sprites
 #   1. Workspace root (parent of Next2Flash/) has as3_decompiler/
 #   2. Sibling repo: ../../AS3-Weaver-Github/as3_decompiler
 _this_dir = os.path.dirname(os.path.abspath(__file__))
+# Ensure the bundled as3_decompiler (app/) takes priority over any sibling repo.
+if _this_dir not in sys.path:
+    sys.path.insert(0, _this_dir)
 _workspace_root = os.path.normpath(os.path.join(_this_dir, '..'))
 if _workspace_root not in sys.path:
     sys.path.insert(0, _workspace_root)
+# AS3-Weaver-Github is a fallback only — append so the bundled copy wins.
 _as3_weaver_dir = os.path.normpath(os.path.join(_this_dir, '..', '..', 'AS3-Weaver-Github'))
 if os.path.isdir(_as3_weaver_dir) and _as3_weaver_dir not in sys.path:
-    sys.path.insert(0, _as3_weaver_dir)
+    sys.path.append(_as3_weaver_dir)
 
 try:
     from as3_decompiler import ABCFile, AS3Decompiler
@@ -2038,6 +2043,15 @@ def _extract_frame_methods_from_fla_class(source: str) -> Dict[int, str]:
     return frame_bodies, var_decls, helper_funcs, import_lines
 
 
+# Flex / playerglobal types — never keep as editable class-source (use SDK at compile).
+_SDK_CLASS_SOURCE_PREFIXES = ("fl/", "mx/", "com/adobe/utils/")
+
+
+def _is_sdk_class_source_path(path: str) -> bool:
+    p = (path or "").replace("\\", "/").lstrip("/")
+    return any(p.startswith(prefix) for prefix in _SDK_CLASS_SOURCE_PREFIXES)
+
+
 def normalize_imported_scripts(scripts: List[dict], libs: List[dict]) -> List[dict]:
     """Normalize decompiled AS3 scripts after import.
 
@@ -2275,6 +2289,8 @@ def normalize_imported_scripts(scripts: List[dict], libs: List[dict]) -> List[di
                 cls_idx = cls_info['index']
                 try:
                     source = decompiler.decompile_class(cls_idx)
+                    from as3_decompiler.postprocess import finalize_decompiled_source
+                    source = finalize_decompiled_source(source)
                 except Exception:
                     continue
 
@@ -2365,6 +2381,8 @@ def decompile_all_scripts(global_raw_tags: list) -> Tuple[List[Dict[str, str]], 
                 cls_idx = cls_info['index']
                 try:
                     source = decompiler.decompile_class(cls_idx)
+                    from as3_decompiler.postprocess import finalize_decompiled_source
+                    source = finalize_decompiled_source(source)
                 except Exception:
                     continue
 
@@ -2376,6 +2394,9 @@ def decompile_all_scripts(global_raw_tags: list) -> Tuple[List[Dict[str, str]], 
                 else:
                     path = class_name + '.as'
                     full_name = class_name
+
+                if _is_sdk_class_source_path(path):
+                    continue
 
                 scripts.append({
                     'name': class_name + '.as',
@@ -2717,6 +2738,8 @@ class N2DBuilder:
         self.symbol_names: Dict[int, str] = {}
         # Ordered list of class names from original SymbolClass (preserves entry order)
         self.symbol_class_order: List[str] = []
+        # SWF character ID → ABC class name (from SymbolClass tag)
+        self.symbol_class_by_char: Dict[int, str] = {}
         # Shape bounds from SWF
         self.shape_bounds: Dict[int, dict] = {}
         # DefineScalingGrid: swf_char_id → {x, y, w, h} in pixels
@@ -2759,6 +2782,19 @@ class N2DBuilder:
         self.button_aux_tags: Dict[int, List[Tuple[int, bytes]]] = {}
         # ImportAssets tags: [(tag_type, full_tag_data)] for passthrough
         self.import_asset_tags: List[Tuple[int, bytes]] = []
+        # ── Generic opaque-data passthrough ───────────────────────────────
+        # Tags whose body has no character-ID or string-table references and
+        # is therefore safe to memcpy through a roundtrip.  Per Ruffle's
+        # swf/src/read.rs (MIT licensed) the following are pure data tags:
+        #   8  JPEGTables       — raw JPEG header bytes
+        #   41 ProductInfo      — Adobe-private build metadata
+        #   63 DebugId          — 16-byte UUID
+        #   64 EnableDebugger2  — uint16 reserved + null-terminated password
+        #   65 ScriptLimits     — uint16 max recursion + uint16 timeout
+        # (Tag 77 Metadata is captured separately into parsed_metadata.)
+        # Stored as ordered list of (tag_type, body_bytes) so we can emit
+        # them back in source order during compile.
+        self.header_passthrough: List[Tuple[int, bytes]] = []
 
     def _alloc_id(self) -> int:
         """Allocate a new library ID."""
@@ -2769,6 +2805,17 @@ class N2DBuilder:
     def catalog_swf_tags(self, tags: List[SWFTag]):
         """First pass: catalog all definition tags (types, IDs, dimensions)."""
         log.info('catalog_swf_tags: processing %d tags', len(tags))
+        # Detect video-only SWFs (embedded Flash video: DEFINE_VIDEO_STREAM + VIDEO_FRAME)
+        # These cannot be imported — raise a clear error instead of silently producing an empty project.
+        video_frames = sum(1 for t in tags if t.tag_type == TAG_VIDEO_FRAME)
+        if video_frames > 0:
+            has_video_stream = any(t.tag_type == TAG_DEFINE_VIDEO_STREAM for t in tags)
+            if has_video_stream:
+                raise ValueError(
+                    f"This SWF contains an embedded Flash video "
+                    f"({video_frames} video frames). Video SWFs cannot be imported — "
+                    f"Next2Flash only supports SWFs with vector/bitmap/AS3 content."
+                )
         DEF_TYPES = {
             TAG_DEFINE_BITS_LOSSLESS, TAG_DEFINE_BITS_LOSSLESS2,
             TAG_DEFINE_BITS, TAG_DEFINE_BITS_JPEG2, TAG_DEFINE_BITS_JPEG3,
@@ -2909,6 +2956,7 @@ class N2DBuilder:
             elif tag.tag_type == TAG_SYMBOL_CLASS:
                 sc = parse_symbol_class(tag.data)
                 self.symbol_names.update(sc)
+                self.symbol_class_by_char = dict(sc)
                 # Preserve original entry order (list of class names)
                 self.symbol_class_order = list(sc.values())
                 past_symbol_class = True
@@ -2990,6 +3038,13 @@ class N2DBuilder:
                         aux['csmTextSettings'] = self._parse_csm_text_settings(body)
                     elif tag.tag_type == 88:
                         aux['fontNameRecord'] = self._parse_font_name(body)
+
+            # ── Generic header-passthrough tags (ruffle-confirmed pure data) ──
+            # See header_passthrough init comment for the list and Ruffle
+            # cross-reference.
+            elif tag.tag_type in (8, 41, 63, 64, 65):
+                self.header_passthrough.append(
+                    (tag.tag_type, bytes(tag.data)))
 
     # ── Structured tag parsing helpers ──────────────────────────────────
 
@@ -4786,6 +4841,15 @@ class N2DBuilder:
             result['soundStream'] = self.parsed_sound_stream
         if self.parsed_import_assets:
             result['importAssets'] = self.parsed_import_assets
+        # Header-passthrough tags (ruffle-validated pure-data tags that have
+        # no character-ID or string-table refs): encoded as base64 so they
+        # survive MessagePack/JSON without corruption.
+        if self.header_passthrough:
+            import base64 as _b64
+            result['headerPassthrough'] = [
+                {'type': t, 'data': _b64.b64encode(b).decode('ascii')}
+                for t, b in self.header_passthrough
+            ]
         # Include SWF version and compression format for matching
         result['swfVersion'] = self.header.get('version', 14)
         result['swfCompressed'] = self.header.get('compressed', True)
@@ -4799,6 +4863,18 @@ class N2DBuilder:
             result['rootTimelineDefIds'] = self.root_timeline_def_ids
         if self.symbol_class_order:
             result['symbolClassOrder'] = self.symbol_class_order
+        if self.symbol_class_by_char:
+            result['symbolClassByChar'] = {
+                str(cid): name for cid, name in self.symbol_class_by_char.items()
+            }
+            doc_name = self.symbol_class_by_char.get(0)
+            if not doc_name:
+                for _cid, name in self.symbol_class_by_char.items():
+                    if name.endswith('.Main') or name == 'Main':
+                        doc_name = name
+                        break
+            if doc_name:
+                result['documentClassName'] = doc_name
         # Include AS3 source scripts if any were loaded
         if self.scripts:
             result['scripts'] = self.scripts
@@ -5007,6 +5083,20 @@ def save_project_folder(data: dict, folder_path: str):
     for script in data.get('scripts', []):
         source = script.get('source', '')
         if not source:
+            # Source is empty (e.g. Main.as the decompiler couldn't recover).
+            # If disk already has a hand-edited / pre-existing .as for this
+            # script, link it via externalFile so the compiler picks it up
+            # instead of falling back to the default shared stub.
+            spath = script.get('path') or script.get('name') or ''
+            if spath:
+                rel = spath.replace('\\', '/').lstrip('/')
+                if rel.lower().startswith('scripts/'):
+                    rel = rel[8:]
+                if not rel.lower().endswith('.as'):
+                    rel += '.as'
+                full_path = os.path.join(scripts_dir, rel)
+                if os.path.isfile(full_path):
+                    script['externalFile'] = f'scripts/{rel}'
             continue
         spath = script.get('path', script.get('name', 'unknown.as'))
         # Create subdirectories matching package paths

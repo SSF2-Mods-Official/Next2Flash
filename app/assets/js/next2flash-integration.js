@@ -265,6 +265,8 @@
         '\u{1F4BE} Save Project</button>' +
       '<button class="n2f-btn primary" id="n2f-export-swf" title="Export current project as SWF">' +
         '\u{1F4E4} Export SWF</button>' +
+      '<button class="n2f-btn" id="n2f-ssf2-roundtrip" title="Import PSB SSF2.swf, compile roundtrip, deploy, launch ADL debugger">' +
+        '\u{1F3AE} SSF2 Roundtrip + ADL</button>' +
       '<input type="file" id="n2f-swf-input" accept=".swf,.ssf" style="display:none">' +
       '<input type="file" id="n2f-n2d-input" accept=".n2d" style="display:none">' +
       '<input type="file" id="n2f-asset-input" accept="image/*,audio/*" multiple style="display:none">';
@@ -348,6 +350,18 @@
     document.getElementById('n2f-import-asset').addEventListener('click', onImportAsset);
     document.getElementById('n2f-save-project').addEventListener('click', onSaveProject);
     document.getElementById('n2f-export-swf').addEventListener('click', onExportSWF);
+    var ssf2Btn = document.getElementById('n2f-ssf2-roundtrip');
+    if (ssf2Btn) {
+      ssf2Btn.style.display = window.n2fElectron ? '' : 'none';
+      ssf2Btn.addEventListener('click', onSsf2RoundtripAndAdl);
+    }
+    if (window.n2fElectron && window.n2fElectron.onSsf2AdlError) {
+      window.n2fElectron.onSsf2AdlError(function (payload) {
+        var msg = (payload && payload.message) || 'ADL error';
+        _log.error('SSF2 ADL:', msg);
+        _showExportError(msg);
+      });
+    }
     document.getElementById('n2f-swf-input').addEventListener('change', onSWFFileSelected);
     document.getElementById('n2f-n2d-input').addEventListener('change', onN2DFileSelected);
     document.getElementById('n2f-asset-input').addEventListener('change', onAssetFileSelected);
@@ -381,6 +395,9 @@
           var ws = Util.$currentWorkSpace();
           if (ws) ws.undo();
         });
+      }
+      if (window.n2fElectron.onMenuSsf2RoundtripAdl) {
+        window.n2fElectron.onMenuSsf2RoundtripAdl(onSsf2RoundtripAndAdl);
       }
       if (window.n2fElectron.onMenuRedo) {
         window.n2fElectron.onMenuRedo(function () {
@@ -1472,6 +1489,84 @@
       _log.warn('Failed to collect script patches: ' + ex.message);
       return null;
     }
+  }
+
+  /* ================================================================== */
+  /*  SSF2 roundtrip + ADL (Electron)                                    */
+  /* ================================================================== */
+  function onSsf2RoundtripAndAdl() {
+    if (!window.n2fElectron) {
+      toast('SSF2 ADL debug requires the Electron desktop app');
+      return;
+    }
+    _log.info('SSF2 roundtrip + ADL requested');
+    showProgress('Loading SSF2 debug settings...', 5);
+    window.n2fElectron.ssf2ShowConsole();
+
+    fetch(API_BASE + '/api/ssf2/config')
+      .then(function (r) { return r.json(); })
+      .then(function (cfgRes) {
+        var cfg = (cfgRes && cfgRes.config) || {};
+        updateProgress('Roundtrip: import + compile (may take several minutes)...', 15);
+        return fetch(API_BASE + '/api/ssf2/roundtrip', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sourceSwf: cfg.sourceSwf,
+            projectName: cfg.projectName || 'ssf2-roundtrip',
+            adlRoot: cfg.adlRoot,
+            gameRoot: cfg.gameRoot,
+            deployToAdlRoot: cfg.deployToAdlRoot !== false,
+            deployToGameRoot: cfg.deployToGameRoot !== false,
+            overwriteProject: true,
+          }),
+        });
+      })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || 'Roundtrip failed'); });
+        return r.json();
+      })
+      .then(function (result) {
+        if (result.projectDir) {
+          _currentProjectDir = result.projectDir;
+          var refreshBtn = document.getElementById('n2f-refresh-assets');
+          if (refreshBtn) refreshBtn.removeAttribute('disabled');
+        }
+        var warns = (result.preflight && result.preflight.compare && result.preflight.compare.warnings) || [];
+        if (warns.length) {
+          _log.warn('SSF2 preflight warnings:\n' + warns.join('\n'));
+        }
+        updateProgress('Launching ADL...', 92);
+        return fetch(API_BASE + '/api/ssf2/config')
+          .then(function (r) { return r.json(); })
+          .then(function (cfgRes) {
+            var cfg = (cfgRes && cfgRes.config) || {};
+            return window.n2fElectron.ssf2RunAdl({
+              adlRoot: cfg.adlRoot,
+              airSdk: cfg.airSdk,
+              adlExtDir: cfg.adlExtDir,
+              sourceSwf: cfg.sourceSwf,
+            });
+          })
+          .then(function (adlRes) {
+            hideProgress();
+            var msg = 'Roundtrip SWF: ' + formatBytes(result.compile && result.compile.size);
+            if (warns.length) {
+              msg += ' (' + warns.length + ' preflight warning(s) — see SSF2 console)';
+            }
+            if (adlRes && adlRes.ok) {
+              toast(msg + ' — ADL launched');
+            } else {
+              toast(msg + ' — ADL failed: ' + ((adlRes && adlRes.error) || 'unknown'));
+            }
+            _log.info('SSF2 roundtrip complete', result);
+          });
+      })
+      .catch(function (err) {
+        hideProgress();
+        _log.error('SSF2 roundtrip failed:', err.message);
+        _showExportError(err.message);
+      });
   }
 
   /* ================================================================== */

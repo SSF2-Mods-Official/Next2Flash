@@ -107,6 +107,50 @@ class _EvalContext:
     pass
 
 
+_RE_ACTIVATION_VAR = re.compile(
+    r'^\s*(?:var\s+)?(_local_\d+)\s*:[^=]*=\s*__activation__\s*;?\s*$'
+)
+
+
+def _strip_activation_artifacts(stmts: List[str]) -> List[str]:
+    """Remove OP_NEWACTIVATION scaffolding leaked into decompiled method bodies."""
+    dropped_regs: Set[str] = set()
+    out: List[str] = []
+    for s in stmts:
+        st = s.strip()
+        m = _RE_ACTIVATION_VAR.match(st)
+        if m:
+            dropped_regs.add(m.group(1))
+            continue
+        if dropped_regs and any(re.search(r'\b' + re.escape(r) + r'\b', s) for r in dropped_regs):
+            continue
+        if '__activation__' in s:
+            continue
+        out.append(s)
+    return out
+
+
+def _is_activation_obj(obj: str, ctx) -> bool:
+    """True when obj refers to the register holding an OP_NEWACTIVATION object."""
+    if obj == '__activation__':
+        return True
+    reg = getattr(ctx, 'activation_reg', -1)
+    return reg >= 0 and obj == f'_local_{reg}'
+
+
+def _activation_slot_var(ctx, idx: int, val: str = '') -> str:
+    """Resolve activation slot name; synthesize when ABC body traits omit names."""
+    vname = ctx.activation_slots.get(idx)
+    if vname:
+        return vname
+    vname = f'_actSlot{idx}'
+    ctx.activation_slots[idx] = vname
+    if idx not in ctx.activation_slot_types:
+        m = re.match(r'^new\s+([A-Za-z_][\w.]*)', val.strip())
+        ctx.activation_slot_types[idx] = m.group(1) if m else '*'
+    return vname
+
+
 class MethodDecompiler:
     """Decompile a single AVM2 method body into AS3 source."""
 
@@ -306,6 +350,7 @@ class MethodDecompiler:
             # These arise from try/catch mis-reconstruction where the try block
             # jump-over becomes 'break;' instead of being restructured.
             stmts = self._remove_stray_breaks(stmts)
+            stmts = _strip_activation_artifacts(stmts)
             
         except (IndexError, ValueError, KeyError, AttributeError) as exc:
             stmts = [f'// decompile error: {exc}']
@@ -492,7 +537,10 @@ class MethodDecompiler:
                 _ops = '++' if _inc else '--'
                 ctx.stack.append(f'{_ops}{_nm}' if _pre else f'{_nm}{_ops}')
             else:
-                ctx.stack.append(ctx.local_names.get(_reg, _default))
+                nm = ctx.local_names.get(_reg, _default)
+                if nm == '__activation__':
+                    nm = f'_local_{_reg}'
+                ctx.stack.append(nm)
         elif op == OP_GETLOCAL:
             idx, ctx.p = _ru30(ctx.code, ctx.p)
             _incdec = _match_local_incdec(ctx.code, ctx.p, idx)
@@ -502,7 +550,10 @@ class MethodDecompiler:
                 _ops = '++' if _inc else '--'
                 ctx.stack.append(f'{_ops}{_nm}' if _pre else f'{_nm}{_ops}')
             else:
-                ctx.stack.append(ctx.local_names.get(idx, f'_local_{idx}'))
+                nm = ctx.local_names.get(idx, f'_local_{idx}')
+                if nm == '__activation__':
+                    nm = f'_local_{idx}'
+                ctx.stack.append(nm)
         elif op in (OP_SETLOCAL_0, OP_SETLOCAL_1, OP_SETLOCAL_2, OP_SETLOCAL_3):
             self._do_setlocal(op - OP_SETLOCAL_0, ctx)
         elif op == OP_SETLOCAL:
@@ -520,10 +571,11 @@ class MethodDecompiler:
     def _do_setlocal(self, reg, ctx):
         """Shared setlocal logic for both short (0-3) and long forms."""
         v = ctx.stack.pop() if ctx.stack else '?'
-        # Detect storing activation object — suppress the var declaration
-        if v == '__activation__' and ctx.activation_slots:
+        # NEWACTIVATION scaffolding — never emit as AS3 source.
+        if v == '__activation__':
             ctx.activation_reg = reg
-            ctx.local_names[reg] = '__activation__'
+            # Never expose the activation object register as a real AS3 identifier.
+            ctx.local_names[reg] = f'_local_{reg}'
             ctx.last_was_dup = False
             return
         # Detect storing catch scope — suppress and track register
@@ -725,8 +777,8 @@ class MethodDecompiler:
         elif op == OP_GETSLOT:
             idx, ctx.p = _ru30(ctx.code, ctx.p)
             obj = ctx.stack.pop() if ctx.stack else '?'
-            if obj == '__activation__' and idx in ctx.activation_slots:
-                ctx.stack.append(ctx.activation_slots[idx])
+            if _is_activation_obj(obj, ctx):
+                ctx.stack.append(_activation_slot_var(ctx, idx))
             elif obj in ctx.catch_scope_vars:
                 ctx.stack.append(ctx.catch_scope_vars[obj])
             else:
@@ -747,8 +799,8 @@ class MethodDecompiler:
             idx, ctx.p = _ru30(ctx.code, ctx.p)
             val = ctx.stack.pop() if ctx.stack else '?'
             obj = ctx.stack.pop() if ctx.stack else '?'
-            if obj == '__activation__' and idx in ctx.activation_slots:
-                vname = ctx.activation_slots[idx]
+            if _is_activation_obj(obj, ctx):
+                vname = _activation_slot_var(ctx, idx, val)
                 vtype = ctx.activation_slot_types.get(idx, '*')
                 if idx not in ctx.declared_activation_slots:
                     ctx.declared_activation_slots.add(idx)
@@ -926,7 +978,11 @@ class MethodDecompiler:
                 ctx.stack.append(f'new {obj}[{rt_name}]({", ".join(args)})')
             else:
                 name = abc.mn_name(mn)
-                if obj == 'this' or obj == name:
+                if not name:
+                    ctx.stack.append(f'new {obj}({", ".join(args)})')
+                elif not obj or obj in ('this', '?', ''):
+                    ctx.stack.append(f'new {name}({", ".join(args)})')
+                elif obj == name:
                     ctx.stack.append(f'new {name}({", ".join(args)})')
                 else:
                     ctx.stack.append(f'new {obj}.{name}({", ".join(args)})')
@@ -1964,11 +2020,28 @@ class MethodDecompiler:
         for ei_idx, ex in enumerate(body.exceptions):
             var_name = abc.mn_name(ex.var_name) if ex.var_name else 'e'
             exc_type = abc.type_name(ex.exc_type) if ex.exc_type else ''
-            # Find merge point: JUMP at to_pos goes to the merge point after catches
+            # Find merge point: JUMP at to_pos goes to the merge point after catches.
+            # The Flash compiler sometimes emits a debug instruction (OP_DEBUGLINE/
+            # OP_DEBUGFILE) immediately before the JUMP, so code[to_pos] may not be
+            # OP_JUMP.  Fall back to reading the goto from the statement list: the
+            # first bare "goto __label_X;" appearing right after the to_pos label.
             merge_offset = -1
             if ex.to_pos < len(code) and code[ex.to_pos] == OP_JUMP:
                 off, _ = _rs24(code, ex.to_pos + 1)
                 merge_offset = ex.to_pos + 4 + off
+            else:
+                to_si_local = label_pos.get(ex.to_pos, -1)
+                if to_si_local >= 0:
+                    for _k in range(to_si_local + 1, min(to_si_local + 4, len(stmts))):
+                        _gm = _RE_GOTO_LABEL_BARE.match(stmts[_k].strip())
+                        if _gm:
+                            _nm = re.search(r'__label_(\d+)', stmts[_k])
+                            if _nm:
+                                merge_offset = int(_nm.group(1))
+                            break
+                        # stop scanning if we hit something that isn't a label
+                        if not stmts[_k].strip().endswith(':'):
+                            break
             exc_info.append({
                 'idx': ei_idx, 'from': ex.from_pos, 'to': ex.to_pos,
                 'target': ex.target, 'merge': merge_offset,
@@ -4223,9 +4296,11 @@ class MethodDecompiler:
                 stack.append(f'new {obj}[{rt_name}]({", ".join(args)})')
             else:
                 name = abc.mn_name(mn)
-                # Suppress dot when obj matches the class name or is empty/this
-                # (prevents 'new .Array()' when findpropstrict pushes the name)
-                if not obj or obj == 'this' or obj == name:
+                if not name:
+                    stack.append(f'new {obj}({", ".join(args)})')
+                elif not obj or obj in ('this', '?', ''):
+                    stack.append(f'new {name}({", ".join(args)})')
+                elif obj == name:
                     stack.append(f'new {name}({", ".join(args)})')
                 else:
                     stack.append(f'new {obj}.{name}({", ".join(args)})')

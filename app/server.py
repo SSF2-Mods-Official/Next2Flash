@@ -455,11 +455,12 @@ def _parse_script_patches_payload(script_patches):
     for s in scripts:
         if not isinstance(s, dict):
             continue
-        source = s.get('source', '')
-        if not isinstance(source, str):
-            source = ''
         item = dict(s)
-        item['source'] = source
+        # Do not synthesize an empty source field when a patch omits source.
+        # Missing source means "metadata-only patch" and should not blank the
+        # existing script body during merge.
+        if 'source' in item and not isinstance(item.get('source'), str):
+            item.pop('source', None)
         clean.append(item)
 
     return clean, scripts_modified
@@ -515,8 +516,12 @@ def _apply_script_patches_inline(data: dict, script_patches) -> int:
             existing[idx] = target
 
         # Keep existing metadata (e.g. scriptOrigin/externalFile) unless patch
-        # explicitly overrides. Always update source text.
-        target['source'] = patch.get('source', target.get('source', ''))
+        # explicitly overrides.
+        # Only replace source when a non-empty source string is provided,
+        # otherwise preserve the existing body to avoid accidental blanking.
+        patch_source = patch.get('source') if 'source' in patch else None
+        if isinstance(patch_source, str) and patch_source != '':
+            target['source'] = patch_source
         for field in ('name', 'path', 'scriptOrigin', 'externalFile'):
             if field in patch and patch.get(field) not in (None, ''):
                 target[field] = patch.get(field)
@@ -832,6 +837,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self._handle_check_project_name()
         elif self.path == "/api/current-project-dir":
             self._json_response({'projDir': Next2FlashHandler._current_project_dir or ''})
+        elif self.path == "/api/ssf2/config":
+            self._handle_ssf2_config_get()
         else:
             super().do_GET()
 
@@ -886,6 +893,12 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             self._handle_import_asset()
         elif self.path == "/api/open-project-path":
             self._handle_open_project_path()
+        elif self.path == "/api/ssf2/config":
+            self._handle_ssf2_config_post()
+        elif self.path == "/api/ssf2/roundtrip":
+            self._handle_ssf2_roundtrip()
+        elif self.path == "/api/ssf2/preflight":
+            self._handle_ssf2_preflight()
         else:
             self.send_error(404, "Not found")
 
@@ -1636,6 +1649,8 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             shared_dir = os.path.join(SERVER_DIR, "..", "shared")
 
             import compilation_pipeline as _cp
+            mod_compile = _get_compile_n2d()
+            sdk = mod_compile.find_sdk()
             with tempfile.TemporaryDirectory() as tmpdir:
                 swf_path = os.path.join(tmpdir, f"{name}.swf")
                 if not os.path.isdir(shared_dir):
@@ -1647,6 +1662,7 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
                     output_path=swf_path,
                     data_override=n2d_json,
                     project_dir_override=project_dir,
+                    sdk_path=sdk,
                 )
                 pipeline = _cp.create_default_pipeline()
                 pipeline.execute(ctx)
@@ -1804,6 +1820,95 @@ class Next2FlashHandler(SimpleHTTPRequestHandler):
             log.error('_handle_compile_disk: %s', e)
             msg = str(e) if str(e) else repr(e)
             self._error_response(500, msg)
+
+    # ── SSF2 roundtrip / ADL debug ─────────────────────────────────────────
+
+    def _handle_ssf2_config_get(self):
+        """GET/POST /api/ssf2/config — Load SSF2 debug paths (ADL, game root, source SWF)."""
+        try:
+            import ssf2_runner as ssf2
+            cfg = ssf2.load_settings(SERVER_DIR)
+            cfg['adlLaunch'] = ssf2.resolve_adl_launch(
+                cfg.get('adlRoot', ''),
+                cfg.get('airSdk', ''),
+                cfg.get('adlExtDir'),
+            )
+            self._json_response({'ok': True, 'config': cfg})
+        except Exception as e:
+            traceback.print_exc()
+            self._error_response(500, str(e))
+
+    def _handle_ssf2_config_post(self):
+        """POST /api/ssf2/config — Save SSF2 debug settings."""
+        try:
+            import ssf2_runner as ssf2
+            body = self._read_body()
+            req = json.loads(body) if body else {}
+            cfg = ssf2.save_settings(SERVER_DIR, req.get('config') or req)
+            cfg['adlLaunch'] = ssf2.resolve_adl_launch(
+                cfg.get('adlRoot', ''),
+                cfg.get('airSdk', ''),
+                cfg.get('adlExtDir'),
+            )
+            self._json_response({'ok': True, 'config': cfg})
+        except Exception as e:
+            traceback.print_exc()
+            self._error_response(500, str(e))
+
+    def _handle_ssf2_preflight(self):
+        """POST /api/ssf2/preflight — Compare original vs roundtrip (or two paths)."""
+        try:
+            import ssf2_runner as ssf2
+            body = self._read_body()
+            req = json.loads(body) if body else {}
+            cfg = ssf2.load_settings(SERVER_DIR)
+            og_path = req.get('originalPath') or req.get('sourceSwf') or cfg.get('sourceSwf', '')
+            rt_path = req.get('roundtripPath') or ''
+            if not rt_path:
+                name = req.get('projectName') or cfg.get('projectName', 'ssf2-roundtrip')
+                rt_path = os.path.join(SERVER_DIR, 'converted', name, 'roundtrip.swf')
+            og_pf = ssf2.swf_preflight(og_path, 'original')
+            rt_pf = ssf2.swf_preflight(rt_path, 'roundtrip')
+            cmp_pf = ssf2.compare_preflight(og_pf, rt_pf)
+            self._json_response({
+                'ok': True,
+                'original': og_pf,
+                'roundtrip': rt_pf,
+                'compare': cmp_pf,
+            })
+        except Exception as e:
+            traceback.print_exc()
+            self._error_response(500, str(e))
+
+    def _handle_ssf2_roundtrip(self):
+        """POST /api/ssf2/roundtrip — Import SWF, compile, deploy, return preflight."""
+        try:
+            import ssf2_runner as ssf2
+            body = self._read_body()
+            req = json.loads(body) if body else {}
+            cfg = ssf2.load_settings(SERVER_DIR)
+            source = req.get('sourceSwf') or cfg.get('sourceSwf', '')
+            project_name = req.get('projectName') or cfg.get('projectName', 'ssf2-roundtrip')
+            result = ssf2.roundtrip_pipeline(
+                SERVER_DIR,
+                source,
+                project_name,
+                _conversion_service,
+                _get_swf_to_n2d,
+                _get_compile_n2d,
+                overwrite_project=bool(req.get('overwriteProject', True)),
+                deploy_adl=bool(req.get('deployToAdlRoot', cfg.get('deployToAdlRoot', True))),
+                deploy_game=bool(req.get('deployToGameRoot', cfg.get('deployToGameRoot', True))),
+                adl_root=req.get('adlRoot') or '',
+                game_root=req.get('gameRoot') or '',
+            )
+            with self._project_lock:
+                Next2FlashHandler._current_project_dir = result.get('projectDir', '')
+            self._json_response(result)
+        except Exception as e:
+            traceback.print_exc()
+            log.error('_handle_ssf2_roundtrip: %s', e)
+            self._error_response(500, str(e) if str(e) else repr(e))
 
     def _handle_import_swf_path(self):
         """POST /api/import-swf-path — Import SWF by filesystem path.

@@ -671,6 +671,11 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+Shift+L',
           click: () => createServerConsoleWindow(),
         },
+        {
+          label: 'SSF2 Debug Console',
+          accelerator: 'CmdOrCtrl+Shift+D',
+          click: () => createSsf2ConsoleWindow(),
+        },
         { type: 'separator' },
         { role: 'reload' },
         { role: 'forceReload' },
@@ -681,6 +686,32 @@ function buildMenu() {
         { role: 'resetZoom' },
         { type: 'separator' },
         { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Debug',
+      submenu: [
+        {
+          label: 'SSF2 Roundtrip and Run ADL',
+          accelerator: 'CmdOrCtrl+Shift+T',
+          click: () => mainWindow?.webContents.send('menu:ssf2-roundtrip-adl'),
+        },
+        {
+          label: 'Run SSF2 (ADL only)',
+          click: () => {
+            createSsf2ConsoleWindow();
+            launchSsf2Adl({}).catch((e) => console.error('[N2F] ADL:', e));
+          },
+        },
+        {
+          label: 'SSF2 Debug Console',
+          click: () => createSsf2ConsoleWindow(),
+        },
+        { type: 'separator' },
+        {
+          label: 'Stop ADL',
+          click: () => { stopSsf2Adl(); stopSsf2LogWatch(); },
+        },
       ],
     },
     {
@@ -844,6 +875,388 @@ ipcMain.handle('fs:exists', async (_event, filePath) => {
 
 ipcMain.handle('shell:show-item-in-folder', (_event, filePath) => {
   shell.showItemInFolder(filePath);
+});
+
+// ── SSF2 roundtrip / ADL debug ─────────────────────────────────────────────
+
+const SSF2_DEFAULT_SOURCE = String.raw`C:\Users\glwex\Documents\GitHub\ssf2-idk-140x-original\build\PSB 1.4 v2\SSF2.swf`;
+const SSF2_DEFAULT_ADL_ROOT = String.raw`C:\Users\glwex\Documents\GitHub\ssf2-idk-140x-original\src\Super Smash Flash 2 Beta v1.4.0.1`;
+const SSF2_DEFAULT_GAME_ROOT = String.raw`C:\Users\glwex\Documents\GitHub\ssf2-idk-140x-original\build\PSB 1.4 v2`;
+/** Matches IDK VS Code launch.json extdir (ADL 32 allows only one -extdir). */
+const SSF2_DEFAULT_ADL_EXTDIR = '.as3mxml-unpackaged-anes';
+
+function resolveSsf2AdlExtDir(adlRoot, extRel) {
+  const rel = extRel || SSF2_DEFAULT_ADL_EXTDIR;
+  const abs = path.join(adlRoot, rel);
+  if (fs.existsSync(abs)) {
+    const anes = fs.readdirSync(abs).filter((f) => f.toLowerCase().endsWith('.ane'));
+    return { rel, abs, anes };
+  }
+  const rootAnes = fs.existsSync(adlRoot)
+    ? fs.readdirSync(adlRoot).filter((f) => f.toLowerCase().endsWith('.ane'))
+    : [];
+  if (rootAnes.length) {
+    return { rel: '.', abs: adlRoot, anes: rootAnes };
+  }
+  return { rel, abs, anes: [] };
+}
+
+let ssf2ConsoleWindow = null;
+let ssf2AdlProcess = null;
+let ssf2AdlPid = null;
+let ssf2AdlStatusTimer = null;
+let ssf2LogWatcher = null;
+let ssf2LogOffset = 0;
+const ssf2ConsoleBuffer = [];
+
+function isSsf2AdlAlive() {
+  if (ssf2AdlProcess) {
+    return ssf2AdlProcess.exitCode === null && !ssf2AdlProcess.killed;
+  }
+  if (!ssf2AdlPid) return false;
+  try {
+    process.kill(ssf2AdlPid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function startSsf2AdlStatusPoll() {
+  stopSsf2AdlStatusPoll();
+  ssf2AdlStatusTimer = setInterval(() => {
+    if (isSsf2AdlAlive()) {
+      sendSsf2AdlStatus('running', 'ADL running');
+      return;
+    }
+    if (ssf2AdlPid || ssf2AdlProcess) {
+      sendSsf2Log('[ssf2] ADL process ended (game closed or crashed)', 'log-system');
+      sendSsf2AdlStatus('idle', 'ADL not running');
+      ssf2AdlPid = null;
+      ssf2AdlProcess = null;
+    }
+  }, 2000);
+}
+
+function stopSsf2AdlStatusPoll() {
+  if (ssf2AdlStatusTimer) {
+    clearInterval(ssf2AdlStatusTimer);
+    ssf2AdlStatusTimer = null;
+  }
+}
+
+function sendSsf2Log(text, stream = 'log-game') {
+  const entry = { text, stream };
+  ssf2ConsoleBuffer.push(entry);
+  if (ssf2ConsoleWindow && !ssf2ConsoleWindow.isDestroyed()) {
+    ssf2ConsoleWindow.webContents.send('ssf2:log', entry);
+  }
+}
+
+function sendSsf2AdlStatus(state, text) {
+  if (ssf2ConsoleWindow && !ssf2ConsoleWindow.isDestroyed()) {
+    ssf2ConsoleWindow.webContents.send('ssf2:adl-status', { state, text });
+  }
+}
+
+function createSsf2ConsoleWindow() {
+  if (ssf2ConsoleWindow) {
+    ssf2ConsoleWindow.focus();
+    return;
+  }
+  ssf2ConsoleWindow = new BrowserWindow({
+    width: 800,
+    height: 520,
+    minWidth: 480,
+    minHeight: 280,
+    title: 'SSF2 Debug Console',
+    webPreferences: {
+      preload: path.join(__dirname, 'ssf2-console-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  ssf2ConsoleWindow.loadFile(path.join(__dirname, 'ssf2-console.html'));
+  ssf2ConsoleWindow.webContents.once('did-finish-load', () => {
+    ssf2ConsoleWindow.webContents.send('ssf2:bootstrap', {
+      lines: ssf2ConsoleBuffer.slice(-500),
+      adl: {
+        state: isSsf2AdlAlive() ? 'running' : 'idle',
+        text: isSsf2AdlAlive() ? 'ADL running' : 'ADL not running',
+      },
+    });
+  });
+  ssf2ConsoleWindow.on('closed', () => {
+    ssf2ConsoleWindow = null;
+  });
+}
+
+function stopSsf2LogWatch() {
+  if (ssf2LogWatcher) {
+    fs.unwatchFile(ssf2LogWatcher);
+    ssf2LogWatcher = null;
+  }
+  ssf2LogOffset = 0;
+}
+
+function startSsf2LogWatch(logPath) {
+  stopSsf2LogWatch();
+  if (!logPath || !fs.existsSync(logPath)) {
+    sendSsf2Log(`[ssf2] Log file not found yet: ${logPath}`, 'log-system');
+    return;
+  }
+  try {
+    ssf2LogOffset = fs.statSync(logPath).size;
+  } catch {
+    ssf2LogOffset = 0;
+  }
+  sendSsf2Log(`[ssf2] Tailing ${logPath}`, 'log-system');
+  ssf2LogWatcher = logPath;
+  fs.watchFile(logPath, { interval: 200 }, () => {
+    try {
+      const st = fs.statSync(logPath);
+      if (st.size <= ssf2LogOffset) return;
+      const fd = fs.openSync(logPath, 'r');
+      const len = st.size - ssf2LogOffset;
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, ssf2LogOffset);
+      fs.closeSync(fd);
+      ssf2LogOffset = st.size;
+      const chunk = buf.toString('utf8');
+      if (chunk) sendSsf2Log(chunk.trimEnd(), 'log-game');
+    } catch (e) {
+      sendSsf2Log(`[ssf2] Log read error: ${e.message}`, 'log-stderr');
+    }
+  });
+}
+
+function stopSsf2Adl() {
+  stopSsf2AdlStatusPoll();
+  if (ssf2AdlProcess) {
+    try {
+      ssf2AdlProcess.kill();
+    } catch (e) {
+      console.warn('[N2F] stopSsf2Adl:', e.message);
+    }
+    ssf2AdlProcess = null;
+  }
+  if (ssf2AdlPid) {
+    try {
+      process.kill(ssf2AdlPid);
+    } catch (e) {
+      console.warn('[N2F] stopSsf2Adl pid:', e.message);
+    }
+    ssf2AdlPid = null;
+  }
+  sendSsf2AdlStatus('idle', 'ADL stopped');
+}
+
+const SSF2_ADL_FATAL_RE =
+  /Error #\d+|TypeError:|ReferenceError:|SecurityError:|cannot be loaded|could not be found|The -extdir argument/i;
+
+function reportSsf2AdlFailure(message, opts = {}) {
+  const text = String(message || 'ADL failed').trim();
+  const firstLine = text.split(/\r?\n/)[0] || text;
+  sendSsf2Log(`[ssf2] ${text}`, 'log-stderr');
+  sendSsf2AdlStatus('error', firstLine.slice(0, 120));
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ssf2:adl-error', { message: text });
+  }
+  if (!opts.silentDialog) {
+    dialog.showErrorBox('SSF2 ADL', text.slice(0, 4000));
+  }
+}
+
+function launchSsf2Adl(opts) {
+  const adlRoot = path.normalize(opts.adlRoot || SSF2_DEFAULT_ADL_ROOT);
+  const airSdk = path.normalize(opts.airSdk || process.env.N2F_AIR_SDK || 'C:\\aflex_sdk');
+  const adlExe = path.join(airSdk, 'bin', 'adl.exe');
+  const appXml = path.join(adlRoot, 'SSF2-app.xml');
+  const swfPath = path.join(adlRoot, 'SSF2.swf');
+  const logPath = path.join(adlRoot, 'ssf2_debug.log');
+
+  createSsf2ConsoleWindow();
+  sendSsf2Log(`[ssf2] adlRoot=${adlRoot}`, 'log-system');
+  sendSsf2Log(`[ssf2] airSdk=${airSdk}`, 'log-system');
+
+  if (!fs.existsSync(adlExe)) {
+    reportSsf2AdlFailure(`adl.exe not found:\n${adlExe}`);
+    return Promise.resolve({ ok: false, error: 'adl.exe not found' });
+  }
+  if (!fs.existsSync(appXml)) {
+    reportSsf2AdlFailure(`SSF2-app.xml missing in:\n${adlRoot}`);
+    return Promise.resolve({ ok: false, error: 'SSF2-app.xml missing' });
+  }
+  if (!fs.existsSync(swfPath)) {
+    reportSsf2AdlFailure('SSF2.swf missing in adlRoot — run roundtrip deploy first.');
+    return Promise.resolve({ ok: false, error: 'SSF2.swf missing' });
+  }
+
+  const ext = resolveSsf2AdlExtDir(adlRoot, opts.adlExtDir);
+  if (!ext.anes.length) {
+    reportSsf2AdlFailure(
+      `No .ane files in extdir (${ext.rel}).\n` +
+        'Run IDK asconfig with --unpackage-anes=true, or copy ANEs into .as3mxml-unpackaged-anes.',
+    );
+    return Promise.resolve({ ok: false, error: 'ANE extdir empty' });
+  }
+
+  const discordDll = path.join(path.dirname(adlExe), 'discord_game_sdk.dll');
+  if (!fs.existsSync(discordDll)) {
+    sendSsf2Log(
+      `[ssf2] Warning: 32-bit discord_game_sdk.dll not in AIR SDK bin — Discord ANE may fail at runtime. ` +
+        'Copy from IDK src folder per README.',
+      'log-stderr',
+    );
+  }
+
+  stopSsf2Adl();
+  startSsf2LogWatch(logPath);
+
+  sendSsf2Log(`[ssf2] Launching: ${adlExe} -extdir ${ext.rel} ${path.basename(appXml)}`, 'log-system');
+  sendSsf2Log(`[ssf2] ANEs: ${ext.anes.join(', ')}`, 'log-system');
+  sendSsf2AdlStatus('running', 'Starting ADL…');
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const stderrChunks = [];
+    const base = {
+      adlExe,
+      appXml,
+      adlRoot,
+      logPath,
+      adlExtDir: ext.rel,
+      adlExtDirAbs: ext.abs,
+      pid: null,
+    };
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    }
+
+    // Detached + visible window: piped stdio alone can prevent AIR GUI on Windows.
+    ssf2AdlProcess = spawn(adlExe, ['-extdir', ext.abs, path.basename(appXml)], {
+      cwd: adlRoot,
+      env: { ...process.env },
+      detached: true,
+      windowsHide: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    ssf2AdlPid = ssf2AdlProcess.pid;
+    base.pid = ssf2AdlPid;
+    startSsf2AdlStatusPoll();
+
+    let stderrStartup = true;
+    const stderrStartupTimer = setTimeout(() => {
+      stderrStartup = false;
+    }, 8000);
+
+    ssf2AdlProcess.stdout.on('data', (buf) => {
+      sendSsf2Log(buf.toString(), 'log-stdout');
+    });
+    ssf2AdlProcess.stderr.on('data', (buf) => {
+      const text = buf.toString();
+      if (stderrStartup) stderrChunks.push(text);
+      sendSsf2Log(text, 'log-stderr');
+      if (stderrStartup && SSF2_ADL_FATAL_RE.test(text)) {
+        clearTimeout(stderrStartupTimer);
+        stderrStartup = false;
+        reportSsf2AdlFailure(text);
+        stopSsf2Adl();
+        finish({ ok: false, error: text.trim(), ...base });
+      }
+    });
+    ssf2AdlProcess.on('error', (err) => {
+      clearTimeout(stderrStartupTimer);
+      reportSsf2AdlFailure(`ADL spawn error: ${err.message}`);
+      ssf2AdlProcess = null;
+      ssf2AdlPid = null;
+      finish({ ok: false, error: err.message, ...base });
+    });
+    ssf2AdlProcess.on('close', (code) => {
+      clearTimeout(stderrStartupTimer);
+      const errText = stderrChunks.join('').trim();
+      sendSsf2Log(`[ssf2] ADL exited with code ${code}`, 'log-system');
+      ssf2AdlProcess = null;
+      ssf2AdlPid = null;
+      if (code !== 0 && code !== null) {
+        const msg = errText || `ADL exited with code ${code}`;
+        if (!settled) {
+          reportSsf2AdlFailure(msg);
+          finish({ ok: false, error: msg, exitCode: code, ...base });
+        } else {
+          sendSsf2AdlStatus('error', `ADL exited (${code})`);
+        }
+      } else if (!settled) {
+        finish({ ok: true, exitCode: code, ...base });
+      } else {
+        sendSsf2AdlStatus('idle', 'ADL not running');
+      }
+    });
+
+    if (ssf2ConsoleWindow && !ssf2ConsoleWindow.isDestroyed()) {
+      ssf2ConsoleWindow.webContents.send('ssf2:bootstrap', {
+        adlRoot,
+        logPath,
+        sourceSwf: opts.sourceSwf || '',
+        adl: { state: 'running', text: 'ADL running' },
+      });
+    }
+
+    // ADL often exits quickly on startup failure; if still running, report success to caller.
+    setTimeout(() => {
+      if (!settled && ssf2AdlProcess) {
+        finish({ ok: true, running: true, ...base });
+      }
+    }, 2500);
+  });
+}
+
+ipcMain.handle('ssf2:run-adl', async (_event, opts = {}) => {
+  return launchSsf2Adl(opts);
+});
+
+ipcMain.handle('ssf2:adl-status', async () => {
+  const alive = isSsf2AdlAlive();
+  return { running: alive, pid: alive ? ssf2AdlPid : null };
+});
+
+ipcMain.handle('ssf2:stop-adl', async () => {
+  stopSsf2Adl();
+  stopSsf2LogWatch();
+  return { ok: true };
+});
+
+ipcMain.handle('ssf2:restore-backups', async (_event, opts = {}) => {
+  const roots = [opts.adlRoot || SSF2_DEFAULT_ADL_ROOT, opts.gameRoot || SSF2_DEFAULT_GAME_ROOT];
+  const restored = [];
+  for (const root of roots) {
+    const dest = path.join(root, 'SSF2.swf');
+    const bak = dest + '.n2f-backup';
+    if (fs.existsSync(bak)) {
+      fs.copyFileSync(bak, dest);
+      restored.push(dest);
+    }
+  }
+  return { ok: true, restored };
+});
+
+ipcMain.handle('ssf2:show-console', async () => {
+  createSsf2ConsoleWindow();
+  return { ok: true };
+});
+
+ipcMain.on('menu:ssf2-roundtrip-adl', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('menu:ssf2-roundtrip-adl');
+  }
+});
+
+ipcMain.on('menu:ssf2-run-adl', () => {
+  launchSsf2Adl({});
 });
 
 // ── Debug log file ─────────────────────────────────────────────────────────

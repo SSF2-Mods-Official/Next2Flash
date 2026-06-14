@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'">
+<title>SSF2 Debug Console</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Consolas', 'Monaco', monospace;
+  background: #1a1a2e;
+  color: #d4d4d4;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+header {
+  background: #16213e;
+  padding: 8px 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #0f3460;
+}
+header h1 { font-size: 13px; color: #e94560; margin-right: 8px; }
+button {
+  background: #0f3460;
+  color: #eee;
+  border: 1px solid #533483;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 11px;
+  border-radius: 3px;
+}
+button:hover { background: #533483; }
+button.danger { border-color: #e94560; color: #ffb4b4; }
+#adl-status { margin-left: auto; font-size: 11px; color: #888; }
+#adl-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #666;
+  margin-right: 6px;
+}
+#adl-dot.running { background: #4caf50; }
+#adl-dot.error { background: #e94560; }
+#meta {
+  width: 100%;
+  font-size: 10px;
+  color: #777;
+  padding-top: 4px;
+  word-break: break-all;
+}
+#log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-system { color: #4fc3f7; }
+.log-stdout { color: #d4d4d4; }
+.log-stderr { color: #f48771; }
+.log-game { color: #a5d6a7; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SSF2 Debug</h1>
+  <button id="btn-run">Run ADL</button>
+  <button id="btn-clear">Clear</button>
+  <button id="btn-copy">Copy</button>
+  <button id="btn-stop" class="danger">Stop ADL</button>
+  <button id="btn-restore">Restore SWF backups</button>
+  <div id="adl-status"><span id="adl-dot"></span><span id="adl-text">Idle</span></div>
+  <div id="meta"></div>
+</header>
+<div id="log"></div>
+<script>
+const logEl = document.getElementById('log');
+const metaEl = document.getElementById('meta');
+const adlDot = document.getElementById('adl-dot');
+const adlText = document.getElementById('adl-text');
+
+function append(text, cls) {
+  const span = document.createElement('div');
+  span.className = cls || 'log-system';
+  span.textContent = text;
+  logEl.appendChild(span);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setAdlStatus(state, text) {
+  adlDot.className = state === 'running' ? 'running' : (state === 'error' ? 'error' : '');
+  adlText.textContent = text;
+}
+
+document.getElementById('btn-run').onclick = () => {
+  append('[ssf2] Starting ADL…', 'log-system');
+  window.n2fSsf2Console.runAdl({}).then((r) => {
+    if (r && r.ok) {
+      setAdlStatus('running', r.running ? 'ADL running' : 'ADL started');
+      append('[ssf2] ADL launch ok (pid ' + (r.pid || '?') + ')', 'log-system');
+    } else {
+      setAdlStatus('error', (r && r.error) || 'launch failed');
+      append('[ssf2] ADL failed: ' + ((r && r.error) || 'unknown'), 'log-stderr');
+    }
+  });
+};
+document.getElementById('btn-clear').onclick = () => { logEl.innerHTML = ''; };
+document.getElementById('btn-copy').onclick = () => {
+  const lines = [];
+  logEl.querySelectorAll('div').forEach((d) => lines.push(d.textContent));
+  window.n2fSsf2Console.copyText(lines.join('\n'));
+};
+document.getElementById('btn-stop').onclick = () => window.n2fSsf2Console.stopAdl();
+document.getElementById('btn-restore').onclick = () => {
+  window.n2fSsf2Console.restoreBackups().then((r) => {
+    append('[restore] ' + JSON.stringify(r), 'log-system');
+  });
+};
+
+window.n2fSsf2Console.onLog((data) => {
+  append(data.text, data.stream || 'log-game');
+});
+
+window.n2fSsf2Console.onAdlStatus((p) => {
+  setAdlStatus(p.state, p.text || p.state);
+});
+
+window.n2fSsf2Console.onBootstrap((p) => {
+  metaEl.textContent = [
+    p.adlRoot ? 'ADL: ' + p.adlRoot : '',
+    p.logPath ? ' | Log: ' + p.logPath : '',
+    p.sourceSwf ? ' | Source: ' + p.sourceSwf : '',
+  ].join('');
+  if (p.lines) p.lines.forEach((ln) => append(ln.text, ln.stream));
+  if (p.adl) setAdlStatus(p.adl.state, p.adl.text);
+});
+</script>
+</body>
+</html>

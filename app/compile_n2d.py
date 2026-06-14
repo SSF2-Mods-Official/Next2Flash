@@ -777,19 +777,36 @@ def find_sdk() -> Optional[str]:
         os.environ.get("N2F_WEB_ROOT", ""),             # packaged mode: resources/app/
         os.getcwd(),                                    # last resort: cwd
     ]
+    bundled: Optional[str] = None
     for _base in _candidate_bases:
         if not _base:
             continue
-        bundled = os.path.join(_base, "flex_sdk")
-        if os.path.isfile(os.path.join(bundled, "bin", "mxmlc.bat")) or \
-           os.path.isfile(os.path.join(bundled, "bin", "mxmlc")):
-            return bundled
+        candidate = os.path.join(_base, "flex_sdk")
+        if os.path.isfile(os.path.join(candidate, "bin", "mxmlc.bat")) or \
+           os.path.isfile(os.path.join(candidate, "bin", "mxmlc")):
+            bundled = candidate
+            break
 
-    # 3. System-wide installations as last resort
+    # Prefer an AIR-capable SDK (airglobal.swc) for SSF2 / NativeProcess types.
+    if bundled and _is_air_sdk(bundled):
+        return bundled
+    for p in SDK_FALLBACK_PATHS:
+        if os.path.isdir(p) and _is_air_sdk(p):
+            return p
+    if bundled:
+        return bundled
+
+    # 3. System-wide installations as last resort (non-AIR)
     for p in SDK_FALLBACK_PATHS:
         if os.path.isdir(p):
             return p
     return None
+
+
+def _is_air_sdk(sdk_path: str) -> bool:
+    """True when *sdk_path* is an AIR SDK (ships airglobal.swc)."""
+    air_global = os.path.join(sdk_path, "frameworks", "libs", "air", "airglobal.swc")
+    return os.path.isfile(air_global)
 
 
 # ── n2D file loading ─────────────────────────────────────────────────────
@@ -807,15 +824,28 @@ def _overlay_external_scripts(data: dict, project_dir: str) -> None:
     if not scripts:
         return
     modified = False
+    scripts_dir = os.path.join(project_dir, 'scripts')
     for script in scripts:
         # POLICY: never read source for linkage-generated scripts.
         # These are always regenerated from library metadata at compile time.
         if script.get('scriptOrigin') == 'linkage-generated':
             continue
         ext = script.get('externalFile', '')
-        if not ext:
-            continue
-        ext_path = os.path.join(project_dir, ext)
+        if ext:
+            ext_path = os.path.join(project_dir, ext)
+        else:
+            # Fall back: derive disk path from script.path / script.name so
+            # scripts saved without an externalFile linkage (e.g. Main.as when
+            # original N2D had empty source) still get rescued from disk.
+            rel = script.get('path') or script.get('name') or ''
+            if not rel:
+                continue
+            rel = rel.replace('\\', '/').lstrip('/')
+            if rel.lower().startswith('scripts/'):
+                rel = rel[8:]
+            if not rel.lower().endswith('.as'):
+                rel += '.as'
+            ext_path = os.path.join(scripts_dir, rel)
         if not os.path.isfile(ext_path):
             continue
         with open(ext_path, 'r', encoding='utf-8') as f:
@@ -831,10 +861,153 @@ def _overlay_external_scripts(data: dict, project_dir: str) -> None:
         if new_source != old_source:
             script['source'] = new_source
             modified = True
-            log.info('_overlay_external_scripts: updated %s', ext)
+            log.info('_overlay_external_scripts: updated %s', ext or ext_path)
     if modified:
         data['scriptsModified'] = True
         log.info('_overlay_external_scripts: marked scriptsModified=True')
+
+
+def _flex_supplemental_library_paths(sdk_path: str) -> List[str]:
+    """Flex SWCs required when embedded mx/fl duplicates are stripped."""
+    swcs: List[str] = []
+    seen: Set[str] = set()
+    for root in [sdk_path, *SDK_FALLBACK_PATHS]:
+        if not root or not os.path.isdir(root):
+            continue
+        libs = os.path.join(root, "frameworks", "libs")
+        for rel in ("framework.swc", os.path.join("mx", "mx.swc")):
+            path = os.path.join(libs, rel)
+            if os.path.isfile(path) and path not in seen:
+                swcs.append(path)
+                seen.add(path)
+    return swcs
+
+
+def _find_ssf2_reference_root() -> Optional[str]:
+    env = os.environ.get("N2F_DECOMPILER_REFERENCE_ROOTS", "")
+    if env:
+        first = env.split(os.pathsep)[0].strip()
+        if first and os.path.isdir(first):
+            return first
+    default = (
+        r"C:\Users\glwex\Documents\GitHub\ssf2-idk-140x-original\src\Super Smash Flash 2 Beta v1.4.0.1"
+    )
+    return default if os.path.isdir(default) else None
+
+
+def _find_ssf2_swc() -> Optional[str]:
+    env = os.environ.get("N2F_SSF2_SWC", "").strip()
+    if env and os.path.isfile(env):
+        return env
+    root = _find_ssf2_reference_root()
+    if root:
+        swc = os.path.join(root, "lib", "SSF2.swc")
+        if os.path.isfile(swc):
+            return swc
+    return None
+
+
+def _copy_ssf2_embed_assets(reference_root: str, compile_root: str) -> None:
+    """Copy [Embed] JSON/assets next to mxmlc compile root for SSF2."""
+    if not reference_root or not os.path.isdir(reference_root):
+        return
+    copied = 0
+    for name in (
+        "ProfanityFilter_wordfilter.json",
+        "ResourceManager_manifestJSON.json",
+        "CountryRegionData_countryRegionDataJSON.json",
+    ):
+        src = os.path.join(reference_root, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(compile_root, name))
+            copied += 1
+    balatro_src = os.path.join(reference_root, "com", "mcleodgaming", "ssf2", "menus", "balatro", "assets")
+    balatro_dst = os.path.join(
+        compile_root,
+        "com",
+        "mcleodgaming",
+        "ssf2",
+        "menus",
+        "balatro",
+        "assets",
+    )
+    if os.path.isdir(balatro_src):
+        shutil.copytree(balatro_src, balatro_dst, dirs_exist_ok=True)
+        copied += len(os.listdir(balatro_src))
+    if copied:
+        log.info("_copy_ssf2_embed_assets: copied %d asset(s) from %s", copied, reference_root)
+
+
+# Top-level IDK helpers not present in shipped PSB ABC but required by shell-recovered sources.
+_SSF2_REFERENCE_COMPANIONS = ("Logger.as",)
+# Package-level functions (not classes) that mxmlc must force-link into the SWF.
+_SSF2_COMPANION_FUNCTIONS = ("Logger",)
+_SSF2_UNQUALIFIED_CALL_RE = re.compile(r"(?<![.\w])([A-Z][A-Za-z0-9_]*)\s*\(")
+
+
+def _ssf2_unqualified_calls(source: str) -> List[str]:
+    if not source:
+        return []
+    imported: set = set()
+    for m in re.finditer(r"^\s*import\s+([\w.]+)(?:\.\*)?\s*;", source, re.MULTILINE):
+        imp = m.group(1)
+        imported.add(imp.rsplit(".", 1)[-1])
+    skip = {
+        "String", "Number", "Boolean", "int", "uint", "Array", "Object", "Date", "Math",
+        "Error", "JSON", "Function", "Vector", "RegExp", "XML",
+    }
+    hits: List[str] = []
+    for m in _SSF2_UNQUALIFIED_CALL_RE.finditer(source):
+        name = m.group(1)
+        if name in skip or name in imported or name in hits:
+            continue
+        hits.append(name)
+    return hits
+
+
+def _inject_ssf2_reference_companions(reference_root: str, embedded_dir: str) -> List[str]:
+    """Copy IDK-only companion scripts required by embedded/recovered sources."""
+    added: List[str] = []
+    if not reference_root or not os.path.isdir(reference_root):
+        return added
+
+    needed: set = set()
+    if os.path.isdir(embedded_dir):
+        for dirpath, _dn, filenames in os.walk(embedded_dir):
+            for fn in filenames:
+                if not fn.endswith(".as"):
+                    continue
+                fpath = os.path.join(dirpath, fn)
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="ignore") as sf:
+                        src = sf.read()
+                except OSError:
+                    continue
+                needed.update(_ssf2_unqualified_calls(src))
+
+    # Always ship Logger — Utils/Main call it from many methods.
+    needed.add("Logger")
+
+    for sym in sorted(needed):
+        rel = f"{sym}.as"
+        src = os.path.join(reference_root, rel)
+        if not os.path.isfile(src):
+            continue
+        dst = os.path.join(embedded_dir, rel)
+        if os.path.isfile(dst):
+            continue
+        try:
+            with open(src, "r", encoding="utf-8") as rf:
+                body = rf.read()
+            if not body.lstrip().startswith("// @n2f-reference-companion"):
+                body = "// @n2f-reference-companion\n" + body
+            with open(dst, "w", encoding="utf-8") as wf:
+                wf.write(body)
+            added.append(sym)
+            log.info("_inject_ssf2_reference_companions: added %s", rel)
+        except OSError as e:
+            log.warning("_inject_ssf2_reference_companions: failed %s: %s", rel, e)
+    return added
 
 
 def _strip_non_primary_classes(source: str, primary_class: str) -> str:
@@ -847,8 +1020,16 @@ def _strip_non_primary_classes(source: str, primary_class: str) -> str:
     """
     if not source or not primary_class:
         return source
+    if source.lstrip().startswith("// @n2f-shell-recovered"):
+        return source
 
-    class_pat = re.compile(r'\bclass\s+(\w+)\b[^\{]*\{')
+    # Only match real top-level class declarations (not "class" inside strings).
+    class_pat = re.compile(
+        r'^\s*(?:'
+        r'(?:public|internal|private|protected|dynamic|final|static)\s+'
+        r')*class\s+(\w+)\b',
+        re.MULTILINE,
+    )
     matches = list(class_pat.finditer(source))
     if len(matches) <= 1:
         return source
@@ -869,6 +1050,11 @@ def _strip_non_primary_classes(source: str, primary_class: str) -> str:
             continue
         start = m.start()
         pos = m.end()
+        while pos < len(source) and source[pos] != '{':
+            pos += 1
+        if pos >= len(source):
+            continue
+        pos += 1  # past opening brace
         depth = 1
         while pos < len(source) and depth > 0:
             ch = source[pos]
@@ -1979,6 +2165,12 @@ def _extract_imports(lines: List[str]) -> Tuple[List[str], Set[str]]:
     return remaining, imports
 
 
+def _sanitize_embedded_script(source: str) -> str:
+    """Strip decompiler-only tokens that must not reach mxmlc / runtime."""
+    from as3_decompiler.postprocess import finalize_decompiled_source
+    return finalize_decompiled_source(source)
+
+
 def _sanitize_frame_body(body: str) -> str:
     """Remove known unsafe decompiler artifacts from frame action bodies.
 
@@ -2469,6 +2661,126 @@ def generate_symbol_stubs(
     return sym_to_class, fla_classes
 
 
+# Embedded decompiles of Flex / Flash Component classes shadow the SDK SWCs
+# and cause multiname ambiguity (e.g. flash.ui.Keyboard vs game Keyboard).
+_EMBEDDED_SDK_REL_PREFIXES = (
+    "fl" + os.sep,
+    "mx" + os.sep,
+    os.path.join("com", "adobe", "utils") + os.sep,
+)
+
+
+_SSF2_ANE_REL_PREFIXES = (
+    os.path.join("com", "iam2bam") + os.sep,
+    os.path.join("com", "jotard") + os.sep,
+    os.path.join("com", "masterwex") + os.sep,
+)
+_SSF2_GAME_DICTIONARY = "com.mcleodgaming.ssf2.util.Dictionary"
+
+
+def _sync_ssf2_ane_sources_from_reference(embedded_dir: str, reference_root: str) -> List[str]:
+    """Replace decompiled ANE stubs with IDK reference sources (source of truth)."""
+    synced: List[str] = []
+    if not reference_root or not os.path.isdir(reference_root):
+        return synced
+    for prefix in _SSF2_ANE_REL_PREFIXES:
+        rel = prefix.replace(os.sep, "/").rstrip("/")
+        src = os.path.join(reference_root, rel)
+        dst = os.path.join(embedded_dir, rel)
+        if not os.path.isdir(src):
+            continue
+        if os.path.isdir(dst):
+            shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst)
+        synced.append(rel.replace("/", "."))
+    return synced
+
+
+def _fix_ssf2_dictionary_imports(embedded_dir: str) -> int:
+    """Prefer SSF2's Dictionary over flash.utils.Dictionary in game sources."""
+    dict_as = os.path.join(
+        embedded_dir, "com", "mcleodgaming", "ssf2", "util", "Dictionary.as"
+    )
+    if not os.path.isfile(dict_as):
+        return 0
+    fixed = 0
+    game_root = os.path.join(embedded_dir, "com", "mcleodgaming")
+    if not os.path.isdir(game_root):
+        return 0
+    imp_line = f"import {_SSF2_GAME_DICTIONARY};"
+    for dirpath, _dn, filenames in os.walk(game_root):
+        for fn in filenames:
+            if not fn.endswith(".as"):
+                continue
+            fpath = os.path.join(dirpath, fn)
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as sf:
+                    src = sf.read()
+            except OSError:
+                continue
+            if not re.search(r"\bDictionary\b", src):
+                continue
+            new_src = src
+            new_src = re.sub(
+                r"^\s*import\s+flash\.utils\.\*\s*;[\t ]*\r?\n?",
+                "",
+                new_src,
+                flags=re.MULTILINE,
+            )
+            new_src = re.sub(
+                r"^\s*import\s+flash\.utils\.Dictionary\s*;[\t ]*\r?\n?",
+                "",
+                new_src,
+                flags=re.MULTILINE,
+            )
+            if imp_line not in new_src:
+                pm = re.search(r"package(?:\s+[\w.]+)?\s*\{", new_src)
+                if pm:
+                    new_src = new_src[: pm.end()] + f"\n    {imp_line}" + new_src[pm.end() :]
+            if new_src != src:
+                with open(fpath, "w", encoding="utf-8") as wf:
+                    wf.write(new_src)
+                fixed += 1
+    return fixed
+
+
+def _prepare_ssf2_embedded_compile(embedded_dir: str, reference_root: str = "") -> List[str]:
+    """SSF2-specific embedded script normalization before mxmlc."""
+    notes: List[str] = []
+    ane = _sync_ssf2_ane_sources_from_reference(embedded_dir, reference_root)
+    if ane:
+        notes.append("synced ANE sources: " + ", ".join(ane))
+    n = _fix_ssf2_dictionary_imports(embedded_dir)
+    if n:
+        notes.append(f"fixed Dictionary imports in {n} file(s)")
+    return notes
+
+
+def _filter_embedded_sdk_duplicates(embedded_dir: str) -> List[str]:
+    """Remove embedded .as files that duplicate Flex SDK / playerglobal types."""
+    removed: List[str] = []
+    if not os.path.isdir(embedded_dir):
+        return removed
+    for dirpath, _dn, filenames in os.walk(embedded_dir):
+        rel = os.path.relpath(dirpath, embedded_dir)
+        if rel == ".":
+            continue
+        rel_norm = rel.replace("/", os.sep)
+        if not any(rel_norm == p.rstrip(os.sep) or rel_norm.startswith(p) for p in _EMBEDDED_SDK_REL_PREFIXES):
+            continue
+        for fn in list(filenames):
+            if not fn.endswith(".as"):
+                continue
+            fpath = os.path.join(dirpath, fn)
+            try:
+                os.remove(fpath)
+            except OSError:
+                continue
+            pkg = rel.replace(os.sep, ".")
+            removed.append(f"{pkg}.{fn[:-3]}" if pkg else fn[:-3])
+    return removed
+
+
 # ── Known AIR-only types not present in playerglobal.swc 25.0 ───────────────
 _KNOWN_AIR_TYPES: Dict[str, str] = {
     'ExtensionContext':              'flash.external.ExtensionContext',
@@ -2490,6 +2802,8 @@ _KNOWN_AIR_TYPES: Dict[str, str] = {
     'StorageVolumeChangeEvent':      'flash.events.StorageVolumeChangeEvent',
     'ServerSocket':                  'flash.net.ServerSocket',
     'DatagramSocket':                'flash.net.DatagramSocket',
+    'NativeProcess':                 'flash.desktop.NativeProcess',
+    'NativeProcessStartupInfo':      'flash.desktop.NativeProcessStartupInfo',
 }
 
 
@@ -2537,14 +2851,163 @@ def _generate_as3_stub(stub_dir: str, fqn: str) -> bool:
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     pkg_decl = f'package {package}' if package else 'package'
-    content = f'{pkg_decl} {{\n    public class {classname} {{\n    }}\n}}\n'
+    if classname.endswith('Event'):
+        extra_fields = ''
+        if classname == 'NativeWindowDisplayStateEvent':
+            extra_fields = (
+                '        public var beforeDisplayState:String;\n'
+                '        public var afterDisplayState:String;\n'
+            )
+        content = (
+            f'{pkg_decl} {{\n'
+            f'    import flash.events.Event;\n'
+            f'    public class {classname} extends Event {{\n'
+            f'{extra_fields}'
+            f'        public function {classname}(type:String, bubbles:Boolean=false, cancelable:Boolean=false) {{\n'
+            f'            super(type, bubbles, cancelable);\n'
+            f'        }}\n'
+            f'    }}\n'
+            f'}}\n'
+        )
+    else:
+        content = f'{pkg_decl} {{\n    public class {classname} {{\n    }}\n}}\n'
     with open(path, 'w', encoding='utf-8') as f:
         f.write(content)
     log.debug('_generate_as3_stub: %s -> %s', fqn, path)
     return True
 
 
-def _apply_mxmlc_error_fixes(error_output: str, stub_dir: str) -> bool:
+# Paths where decompiled bodies diverge heavily from IDK but ABC member names match.
+# Compile-time IDK overlay prevents runtime #1065/#1034 in menu/input/engine code.
+_SSF2_DEGRADED_IDK_OVERLAY = frozenset({
+    "com/mcleodgaming/ssf2/menus/Menu.as",
+    "com/mcleodgaming/ssf2/api/MenuAPIWrapper.as",
+    "com/mcleodgaming/ssf2/input/Gamepad.as",
+    "com/mcleodgaming/ssf2/menus/MultiManMenu.as",
+    "com/mcleodgaming/ssf2/engine/HitBoxProcessor.as",
+    "com/mcleodgaming/ssf2/menus/balatro/BalatroMusic.as",
+    "com/mcleodgaming/ssf2/menus/balatro/BalatroUI.as",
+    "com/mcleodgaming/ssf2/menus/balatro/BalatroGame.as",
+    "com/mcleodgaming/ssf2/menus/balatro/BalatroAnimator.as",
+    "com/mcleodgaming/ssf2/controllers/GameController.as",
+    "com/mcleodgaming/ssf2/controllers/MenuController.as",
+    "com/mcleodgaming/ssf2/util/StageTint.as",
+    "com/adobe/utils/StringUtil.as",
+})
+
+
+def _is_decompiler_stub_source(source: str, rel_path: str) -> bool:
+    lines = [
+        ln for ln in source.splitlines()
+        if ln.strip() and not ln.strip().startswith("//")
+    ]
+    if len(lines) <= 12:
+        return True
+    base = os.path.basename(rel_path)
+    class_name = base[:-3] if base.lower().endswith(".as") else base
+    if f"function {class_name}" in source:
+        return False
+    if source.count("function ") <= 1 and "class " in source:
+        return True
+    return False
+
+
+def _idk_path_for_embedded(reference_root: str, embedded_dir: str, as_path: str) -> Optional[str]:
+    """Map embedded_dir/.../*.as to IDK root com/.../*.as or top-level Logger.as."""
+    try:
+        rel = os.path.relpath(as_path, embedded_dir).replace("\\", "/")
+    except ValueError:
+        return None
+    idk = os.path.join(reference_root, rel.replace("/", os.sep))
+    return idk if os.path.isfile(idk) else None
+
+
+def _overlay_idk_source_file(
+    reference_root: str,
+    dst_path: str,
+    *,
+    embedded_dir: Optional[str] = None,
+    marker: str = "@n2f-compile-idk-overlay",
+) -> bool:
+    """Replace compile temp source with IDK reference when available."""
+    if not reference_root or not os.path.isfile(dst_path):
+        return False
+    if not embedded_dir:
+        norm = dst_path.replace("\\", "/")
+        if "/embedded/" in norm:
+            embedded_dir = norm.split("/embedded/")[0] + os.sep + "embedded"
+        else:
+            embedded_dir = os.path.dirname(dst_path)
+    idk_src = _idk_path_for_embedded(reference_root, embedded_dir, dst_path)
+    if not idk_src:
+        return False
+    try:
+        body = open(idk_src, "r", encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return False
+    if len(body.strip()) < 80:
+        return False
+    if not body.lstrip().startswith(f"// {marker}"):
+        body = f"// {marker}\n" + body
+    try:
+        with open(dst_path, "w", encoding="utf-8") as wf:
+            wf.write(body)
+        log.info("_overlay_idk_source_file: %s <- %s", dst_path, idk_src)
+        return True
+    except OSError:
+        return False
+
+
+def _idk_source_has_embed(reference_root: str, rel_path: str) -> bool:
+    """True when IDK reference uses [Embed] (needs SSF2.swc assets, not plain overlay)."""
+    idk = os.path.join(reference_root, rel_path.replace("/", os.sep))
+    if not os.path.isfile(idk):
+        return False
+    try:
+        with open(idk, "r", encoding="utf-8", errors="ignore") as f:
+            chunk = f.read(32000)
+    except OSError:
+        return False
+    return "[Embed" in chunk
+
+
+def _apply_ssf2_compile_idk_overlay(embedded_dir: str, reference_root: str) -> List[str]:
+    """Overlay IDK sources onto decompiler stubs and known-degraded classes before mxmlc."""
+    overlaid: List[str] = []
+    if not reference_root or not os.path.isdir(embedded_dir):
+        return overlaid
+    overlay_all_mcleod = os.environ.get("N2F_COMPILE_OVERLAY_MCLEODGAMING", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    for dirpath, _dn, filenames in os.walk(embedded_dir):
+        for fn in filenames:
+            if not fn.endswith(".as"):
+                continue
+            dst = os.path.join(dirpath, fn)
+            rel = os.path.relpath(dst, embedded_dir).replace("\\", "/")
+            try:
+                with open(dst, "r", encoding="utf-8", errors="ignore") as sf:
+                    rt_src = sf.read()
+            except OSError:
+                continue
+            if "@n2f-compile-idk-overlay" in rt_src[:400]:
+                continue
+            should_overlay = rel in _SSF2_DEGRADED_IDK_OVERLAY or _is_decompiler_stub_source(
+                rt_src, rel
+            )
+            if not should_overlay and overlay_all_mcleod and rel.startswith("com/mcleodgaming/"):
+                if not _idk_source_has_embed(reference_root, rel):
+                    should_overlay = True
+            if not should_overlay:
+                continue
+            if _overlay_idk_source_file(reference_root, dst, embedded_dir=embedded_dir):
+                overlaid.append(rel)
+    return overlaid
+
+
+def _apply_mxmlc_error_fixes(
+    error_output: str, stub_dir: str, ref_root: Optional[str] = None,
+) -> bool:
     """
     Parse mxmlc error output and apply in-place fixes so a retry can succeed.
 
@@ -2570,7 +3033,22 @@ def _apply_mxmlc_error_fixes(error_output: str, stub_dir: str) -> bool:
         if not os.path.isfile(src_file):
             continue
         fqn = _find_fqn_for_type(src_file, type_name)
-        if fqn and _generate_as3_stub(stub_dir, fqn):
+        if not fqn:
+            continue
+        # If the source already imports a non-AIR type, do not add a conflicting stub.
+        if type_name not in _KNOWN_AIR_TYPES:
+            try:
+                with open(src_file, 'r', encoding='utf-8', errors='ignore') as _sf:
+                    _src = _sf.read()
+                if re.search(
+                    r'^\s*import\s+' + re.escape(fqn) + r'\s*;',
+                    _src,
+                    re.MULTILINE,
+                ):
+                    continue
+            except OSError:
+                pass
+        if _generate_as3_stub(stub_dir, fqn):
             print(f"  Auto-stub: {fqn}")
             fixed = True
 
@@ -2591,44 +3069,92 @@ def _apply_mxmlc_error_fixes(error_output: str, stub_dir: str) -> bool:
         pkg2, type2 = m.group(4), m.group(5)
         if not os.path.isfile(src_file):
             continue
-        # Determine which of the two is a flash.* type
         flash_pkg = pkg1 if pkg1.startswith('flash.') else (pkg2 if pkg2.startswith('flash.') else None)
-        if flash_pkg is None:
-            continue
-        flash_type = type1 if pkg1 == flash_pkg else type2
-        flash_fqn = f"{flash_pkg}.{flash_type}"
-        # Remove the conflicting flash import so the project's own class wins.
-        # Try both explicit import and wildcard import.
-        flash_parent_pkg = flash_pkg  # e.g. "flash.ui"
         try:
             src = open(src_file, 'r', encoding='utf-8', errors='ignore').read()
             new_src = src
-            # 1. Remove exact import: import flash.ui.Keyboard;
-            new_src = re.sub(
-                r'\bimport\s+' + re.escape(flash_fqn) + r'\s*;[\t ]*\r?\n?',
-                '', new_src
+            src_norm = src_file.replace('/', os.sep)
+            is_sdk_source = (
+                os.sep + 'fl' + os.sep in src_norm
+                or os.sep + 'mx' + os.sep in src_norm
             )
-            # 2. Remove wildcard import: import flash.ui.*;
-            wildcard = flash_parent_pkg + '.*'
-            new_src = re.sub(
-                r'\bimport\s+' + re.escape(wildcard).replace(r'\.\*', r'\.\*') + r'\s*;[\t ]*\r?\n?',
-                '', new_src
-            )
-            if new_src != src:
-                open(src_file, 'w', encoding='utf-8').write(new_src)
-                print(f"  Auto-fix multiname: removed flash import ({flash_fqn} / {wildcard}) from {os.path.basename(src_file)}")
-                fixed = True
-            else:
-                # Flash import not found literally — add explicit project import
+            if flash_pkg is not None:
+                flash_type = type1 if pkg1 == flash_pkg else type2
+                flash_fqn = f"{flash_pkg}.{flash_type}"
                 project_pkg = pkg2 if pkg1.startswith('flash.') else pkg1
                 project_type = type2 if pkg1.startswith('flash.') else type1
                 project_fqn = f"{project_pkg}.{project_type}"
-                pm = re.search(r'package(?:\s+[\w.]+)?\s*\{', src)
-                if pm:
-                    imp_line = f'\nimport {project_fqn};'
-                    new_src = src[:pm.end()] + imp_line + src[pm.end():]
+                if is_sdk_source:
+                    # Flash Components need the playerglobal type, not the game's homonym.
+                    if f'import {flash_fqn};' not in new_src:
+                        pm = re.search(r'package(?:\s+[\w.]+)?\s*\{', new_src)
+                        if pm:
+                            new_src = (
+                                new_src[:pm.end()]
+                                + f'\nimport {flash_fqn};'
+                                + new_src[pm.end():]
+                            )
+                else:
+                    flash_parent_pkg = flash_pkg
+                    new_src = re.sub(
+                        r'\bimport\s+' + re.escape(flash_fqn) + r'\s*;[\t ]*\r?\n?',
+                        '', new_src
+                    )
+                    wildcard = flash_parent_pkg + '.*'
+                    new_src = re.sub(
+                        r'\bimport\s+' + re.escape(wildcard) + r'\s*;[\t ]*\r?\n?',
+                        '', new_src
+                    )
+                    if f'import {project_fqn};' not in new_src:
+                        pm = re.search(r'package(?:\s+[\w.]+)?\s*\{', new_src)
+                        if pm:
+                            new_src = (
+                                new_src[:pm.end()]
+                                + f'\nimport {project_fqn};'
+                                + new_src[pm.end():]
+                            )
+                if new_src != src:
                     open(src_file, 'w', encoding='utf-8').write(new_src)
-                    print(f"  Auto-fix multiname: added import {project_fqn} in {os.path.basename(src_file)}")
+                    if is_sdk_source:
+                        print(
+                            f"  Auto-fix multiname: added flash import {flash_fqn} "
+                            f"in {os.path.basename(src_file)}"
+                        )
+                    else:
+                        print(
+                            f"  Auto-fix multiname: prefer {project_fqn} "
+                            f"in {os.path.basename(src_file)}"
+                        )
+                    fixed = True
+            else:
+                # Two non-flash packages (e.g. com.adobe.utils vs mx.utils).
+                prefer_pkg = None
+                for pkg in (pkg1, pkg2):
+                    if re.search(r'\bimport\s+' + re.escape(pkg) + r'\.\*', src):
+                        prefer_pkg = pkg
+                        break
+                drop_pkg = pkg2 if prefer_pkg == pkg1 else pkg1 if prefer_pkg == pkg2 else pkg2
+                keep_pkg = pkg1 if drop_pkg == pkg2 else pkg2
+                keep_fqn = f"{keep_pkg}.{type1 if keep_pkg == pkg1 else type2}"
+                drop_wild = drop_pkg + '.*'
+                new_src = re.sub(
+                    r'\bimport\s+' + re.escape(drop_wild) + r'\s*;[\t ]*\r?\n?',
+                    '', new_src
+                )
+                if f'import {keep_fqn};' not in new_src:
+                    pm = re.search(r'package(?:\s+[\w.]+)?\s*\{', new_src)
+                    if pm:
+                        new_src = (
+                            new_src[:pm.end()]
+                            + f'\nimport {keep_fqn};'
+                            + new_src[pm.end():]
+                        )
+                if new_src != src:
+                    open(src_file, 'w', encoding='utf-8').write(new_src)
+                    print(
+                        f"  Auto-fix multiname: resolved {type1} via {keep_fqn} "
+                        f"in {os.path.basename(src_file)}"
+                    )
                     fixed = True
         except Exception:
             pass
@@ -2637,39 +3163,58 @@ def _apply_mxmlc_error_fixes(error_output: str, stub_dir: str) -> bool:
     # "C:\...\Foo.as(524): col: 28 Error: Cannot assign to a non-reference value."
     # Caused by patterns like:  x || y || null.slot7 = null;
     _nonref_re = re.compile(
-        r'([^\n]+?\.as)(?:\(\d+\))?[^\n]*'
+        r'([^\r\n()]+?\.as)\((\d+)\)[^\r\n]*'
         r'Error: Cannot assign to a non-reference value'
     )
-    _nonref_files: Set[str] = set()
+    _nonref_hits: Dict[str, Set[int]] = {}
     for m in _nonref_re.finditer(error_output):
-        _nonref_files.add(m.group(1).strip())
+        src_file = m.group(1).strip()
+        try:
+            line_no = int(m.group(2))
+        except Exception:
+            continue
+        _nonref_hits.setdefault(src_file, set()).add(line_no)
 
-    for src_file in _nonref_files:
+    for src_file, line_nos in _nonref_hits.items():
         if not os.path.isfile(src_file):
             continue
         try:
-            src = open(src_file, 'r', encoding='utf-8', errors='ignore').read()
-            # Replace: anything || null.slotN = expr;
-            new_src = re.sub(
-                r'[^\n;]+\|\|\s*null\.\w+\s*=\s*[^;]+;',
-                ';  /* stubbed: non-ref assign artifact */',
-                src
-            )
-            # Replace bare: null.slotN = expr;
-            new_src = re.sub(
-                r'\bnull\.\w+\s*=\s*[^;]+;',
-                ';  /* stubbed: non-ref assign artifact */',
-                new_src
-            )
-            if new_src != src:
-                open(src_file, 'w', encoding='utf-8').write(new_src)
+            lines = open(src_file, 'r', encoding='utf-8', errors='ignore').read().splitlines(True)
+            changed = False
+            for line_no in sorted(line_nos):
+                idx = line_no - 1
+                if idx < 0 or idx >= len(lines):
+                    continue
+                original_line = lines[idx]
+                line = original_line
+                # Replace: anything || null.slotN = expr;
+                line = re.sub(
+                    r'([^\n;]+?)\|\|\s*null\.\w+\s*=\s*[^;]+;',
+                    r'\1;  /* trimmed non-ref assign artifact */',
+                    line
+                )
+                # Replace bare: null.slotN = expr;
+                line = re.sub(
+                    r'\bnull\.\w+\s*=\s*[^;]+;',
+                    ';  /* stubbed: non-ref assign artifact */',
+                    line
+                )
+                if line != original_line:
+                    lines[idx] = line
+                    changed = True
+            if changed:
+                open(src_file, 'w', encoding='utf-8').writelines(lines)
                 print(f"  Auto-fix non-ref assign: {os.path.basename(src_file)}")
                 fixed = True
         except Exception:
             pass
 
     # ── Pattern 3: bad override ──────────────────────────────────────────
-    # "C:\...\Foo.as(16): col: 34 Error: Method marked override must override..."
+    # Two distinct mxmlc error messages both mean "remove the override keyword":
+    #   1023: "C:\...\Foo.as(16): col: 34 Error: Method marked override must override..."
+    #   1024: "C:\...\Foo.as(77): col: 29 Error: Overriding a function that is not marked for override."
+    # For error 1023 we strip override file-wide (no line number in the message).
+    # For error 1024 we have a line number so we strip only that line.
     _override_re = re.compile(
         r'([^\r\n:]+\.as)(?:\(\d+\))?[^:]*:\s*(?:col:\s*\d+\s+)?'
         r'Error: Method marked override must override another method'
@@ -2690,6 +3235,38 @@ def _apply_mxmlc_error_fixes(error_output: str, stub_dir: str) -> bool:
             if new_src != src:
                 open(src_file, 'w', encoding='utf-8').write(new_src)
                 print(f"  Auto-fix override: {os.path.basename(src_file)}")
+                fixed = True
+        except Exception:
+            pass
+
+    # Error 1024: "Overriding a function that is not marked for override."
+    # Has a line number — strip override only from the flagged line.
+    _override1024_re = re.compile(
+        r'([^\r\n:]+\.as)\((\d+)\)[^\r\n]*Error: Overriding a function that is not marked for override'
+    )
+    _override1024_fixes: Dict[str, List[int]] = {}
+    for m in _override1024_re.finditer(error_output):
+        _override1024_fixes.setdefault(m.group(1).strip(), []).append(int(m.group(2)))
+
+    for src_file, linenos in _override1024_fixes.items():
+        if not os.path.isfile(src_file):
+            continue
+        try:
+            lines = open(src_file, 'r', encoding='utf-8', errors='ignore').read().split('\n')
+            changed = False
+            for lineno in linenos:
+                idx = lineno - 1
+                if 0 <= idx < len(lines):
+                    new_line = re.sub(
+                        r'\boverride\s+((?:public|protected|private|internal)\s+function\b)',
+                        r'\1', lines[idx], count=1
+                    )
+                    if new_line != lines[idx]:
+                        lines[idx] = new_line
+                        changed = True
+            if changed:
+                open(src_file, 'w', encoding='utf-8').write('\n'.join(lines))
+                print(f"  Auto-fix override(1024): {os.path.basename(src_file)}")
                 fixed = True
         except Exception:
             pass
@@ -2725,6 +3302,216 @@ def _apply_mxmlc_error_fixes(error_output: str, stub_dir: str) -> bool:
                 open(src_file, 'w', encoding='utf-8').write('\n'.join(lines))
                 print(f"  Auto-fix void-return: {os.path.basename(src_file)}")
                 fixed = True
+        except Exception:
+            pass
+
+    # ── Pattern 5: syntax errors on decompiler-artifact lines ───────────
+    # "C:\...\Foo.as(2110): col: 26 Error: Syntax error: expecting ..."
+    # Fix only the reported line when it contains known decompiler artifacts.
+    _syntax_re = re.compile(
+        r'([^\r\n()]+?\.as)\((\d+)\):[^\r\n]*Error:\s*Syntax error:\s*([^\r\n]+)'
+    )
+    _syntax_hits: Dict[str, Set[int]] = {}
+    for m in _syntax_re.finditer(error_output):
+        src_file = m.group(1).strip()
+        try:
+            line_no = int(m.group(2))
+        except Exception:
+            continue
+        _syntax_hits.setdefault(src_file, set()).add(line_no)
+
+    _artifact_private_ctor_re = re.compile(
+        r'new\s+\._[A-Za-z][A-Za-z0-9_]*\s*\([^\n;]*\)'
+    )
+    _artifact_numeric_obj_re = re.compile(
+        r'\b\d{4,}\.[A-Za-z_][A-Za-z0-9_]*(?:\s*\([^\n;]*\))?'
+    )
+    _artifact_any_re = re.compile(
+        r'new\s+\._[A-Za-z]|\b\d{4,}\.[A-Za-z_]'
+    )
+    _pkg_re = re.compile(r'package\s+([\w.]+)\s*\{')
+    _cls_re = re.compile(r'public\s+(?:class|interface)\s+(\w+)')
+    _anon_fn_re = re.compile(r'^(\s*)function\s*\(')
+
+    # Decompiler emits illegal anonymous nested functions: function (_arg_1:Type):void
+    for src_file, line_nos in list(_syntax_hits.items()):
+        if not os.path.isfile(src_file):
+            continue
+        try:
+            lines = open(src_file, 'r', encoding='utf-8', errors='ignore').read().splitlines(True)
+            hit_anon = any(
+                0 <= (ln - 1) < len(lines) and _anon_fn_re.match(lines[ln - 1])
+                for ln in line_nos
+            )
+            if not hit_anon:
+                continue
+            counter = 0
+            changed = False
+            for idx, line in enumerate(lines):
+                m = _anon_fn_re.match(line)
+                if not m:
+                    continue
+                counter += 1
+                lines[idx] = f'{m.group(1)}function __nestedFn{counter}(' + line[m.end():]
+                changed = True
+            if changed:
+                open(src_file, 'w', encoding='utf-8').writelines(lines)
+                print(f"  Auto-fix anonymous nested functions: {os.path.basename(src_file)} ({counter})")
+                fixed = True
+        except Exception:
+            pass
+
+    for src_file, line_nos in _syntax_hits.items():
+        if not os.path.isfile(src_file):
+            continue
+        try:
+            lines = open(src_file, 'r', encoding='utf-8', errors='ignore').read().splitlines(True)
+            changed = False
+            for line_no in sorted(line_nos):
+                idx = line_no - 1
+                if idx < 0 or idx >= len(lines):
+                    continue
+                original_line = lines[idx]
+                line = _artifact_private_ctor_re.sub(
+                    'null /* artifact: private ctor */', original_line
+                )
+                line = _artifact_numeric_obj_re.sub(
+                    '0 /* artifact: numeric object */', line
+                )
+                if line != original_line:
+                    lines[idx] = line
+                    changed = True
+            if changed:
+                open(src_file, 'w', encoding='utf-8').writelines(lines)
+                print(f"  Auto-fix syntax artifact: {os.path.basename(src_file)}")
+                fixed = True
+        except Exception:
+            pass
+
+    # ── Pattern 6: duplicate local variable declaration ──────────────────
+    # "C:\...\Foo.as(466): col: 17 Error: A conflict exists with definition
+    #  _local_4 in namespace internal."
+    # The decompiler maps two bytecode registers to the same name, producing
+    # a second `var NAME:TYPE = ...` inside the same function.
+    # Fix: strip the `var TYPE:` from the second (flagged) declaration so it
+    # becomes a plain assignment, reusing the first declaration's type.
+    _conflict_re = re.compile(
+        r'([^\r\n()]+?\.as)\((\d+)\)[^\r\n]*Error: A conflict exists with definition \w+ in namespace internal'
+    )
+    _conflict_fixes: Dict[str, List[int]] = {}
+    for m in _conflict_re.finditer(error_output):
+        _conflict_fixes.setdefault(m.group(1).strip(), []).append(int(m.group(2)))
+
+    for src_file, linenos in _conflict_fixes.items():
+        if not os.path.isfile(src_file):
+            continue
+        try:
+            lines = open(src_file, 'r', encoding='utf-8', errors='ignore').read().split('\n')
+            changed = False
+            for lineno in linenos:
+                idx = lineno - 1
+                if 0 <= idx < len(lines):
+                    line = lines[idx]
+                    # `var NAME:TYPE = expr;` → `NAME = expr;`  (complex types like Vector.<T> too)
+                    new_line = re.sub(r'\bvar\s+(\w+)\s*:[^=\n]+(?=\s*=)', r'\1', line, count=1)
+                    if new_line == line:
+                        # No assignment — just a `var NAME:TYPE;` declaration, remove the line
+                        new_line = re.sub(r'^\s*var\s+\w+\s*:[^;\n]+;\s*$', '', line)
+                    if new_line != line:
+                        lines[idx] = new_line
+                        changed = True
+            if changed:
+                open(src_file, 'w', encoding='utf-8').write('\n'.join(lines))
+                print(f"  Auto-fix conflict-decl: {os.path.basename(src_file)}")
+                fixed = True
+        except Exception:
+            pass
+
+    # ── Pattern 7: increment operand is invalid ──────────────────────────
+    # "C:\...\Foo.as(134): col: 75 Error: Increment operand is invalid."
+    # Decompiler emits `for (VAR = 0; ...; VAR++)` where VAR was not declared
+    # as a local — mxmlc cannot generate typed increment code.
+    # Fix: add `var VAR:int` to the for-loop initializer.
+    _incr_re = re.compile(
+        r'([^\r\n()]+?\.as)\((\d+)\)[^\r\n]*Error: Increment operand is invalid'
+    )
+    _incr_fixes: Dict[str, List[int]] = {}
+    for m in _incr_re.finditer(error_output):
+        _incr_fixes.setdefault(m.group(1).strip(), []).append(int(m.group(2)))
+
+    for src_file, linenos in _incr_fixes.items():
+        if not os.path.isfile(src_file):
+            continue
+        try:
+            lines = open(src_file, 'r', encoding='utf-8', errors='ignore').read().split('\n')
+            changed = False
+            for lineno in linenos:
+                idx = lineno - 1
+                if 0 <= idx < len(lines):
+                    line = lines[idx]
+                    # for (VAR = N; ...) → for (var VAR:int = N; ...)
+                    new_line = re.sub(
+                        r'\bfor\s*\(\s*(\w+)\s*=\s*(\d+)\s*;',
+                        r'for (var \1:int = \2;',
+                        line, count=1
+                    )
+                    if new_line == line:
+                        # Standalone VAR++ / ++VAR — insert var decl before the line
+                        m_incr = re.search(r'\b(\w+)\+\+', line) or re.search(r'\+\+(\w+)', line)
+                        if m_incr:
+                            var_name = m_incr.group(1)
+                            indent = len(line) - len(line.lstrip())
+                            lines.insert(idx, ' ' * indent + f'var {var_name}:int;')
+                            changed = True
+                            continue
+                    if new_line != line:
+                        lines[idx] = new_line
+                        changed = True
+            if changed:
+                open(src_file, 'w', encoding='utf-8').write('\n'.join(lines))
+                print(f"  Auto-fix incr-operand: {os.path.basename(src_file)}")
+                fixed = True
+        except Exception:
+            pass
+
+    # Last-resort fallback: if syntax errors remain in a file that still
+    # contains known decompiler artifact patterns, stub only that file.
+    for src_file, line_nos in _syntax_hits.items():
+        if not os.path.isfile(src_file):
+            continue
+        try:
+            src = open(src_file, 'r', encoding='utf-8', errors='ignore').read()
+            # Never stub shell-recovered reference sources (e.g. Utils).
+            if '@n2f-shell-recovered' in src[:400]:
+                continue
+            if '@n2f-compile-idk-overlay' in src[:400]:
+                continue
+            # Prefer IDK source over wiping a large class to an empty shell.
+            if ref_root and _overlay_idk_source_file(ref_root, src_file):
+                print(f"  Auto-fix IDK overlay: {os.path.basename(src_file)}")
+                fixed = True
+                continue
+            if len(src.splitlines()) > 400 and not _artifact_any_re.search(src):
+                continue
+            # Only escalate to whole-file fallback when corruption appears
+            # persistent (multiple syntax-hit lines) or artifact markers remain.
+            if len(line_nos) < 2 and not _artifact_any_re.search(src):
+                continue
+            pkg_m = _pkg_re.search(src)
+            cls_m = _cls_re.search(src)
+            if pkg_m and cls_m:
+                stub = (
+                    f'package {pkg_m.group(1)} {{\n'
+                    f'    public class {cls_m.group(1)} {{\n'
+                    f'    }}\n'
+                    f'}}\n'
+                )
+            else:
+                bare = os.path.splitext(os.path.basename(src_file))[0]
+                stub = f'package {{\n    public class {bare} {{\n    }}\n}}\n'
+            open(src_file, 'w', encoding='utf-8').write(stub)
+            print(f"  Auto-fix syntax fallback stub: {os.path.basename(src_file)}")
+            fixed = True
         except Exception:
             pass
 
@@ -2802,6 +3589,7 @@ def compile_as3(
 
                 fpath = os.path.join(embedded_dir, spath)
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                source = _sanitize_embedded_script(source)
                 with open(fpath, 'w', encoding='utf-8') as sf:
                     sf.write(source)
             written = len(embedded_scripts) - skipped_linkage
@@ -2810,19 +3598,53 @@ def compile_as3(
                 msg += f" (skipped {skipped_linkage} linkage-generated)"
             print(msg)
 
-        # Sanitize decompiler artifacts in embedded scripts that would cause
-        # mxmlc syntax errors (e.g. "new ._PrivateClass()", numeric-literal
-        # used as an object "12345.method()", dangling anonymous functions).
-        # Replace any such file with a minimal empty class stub so compilation
-        # can proceed.  The class body will be empty but the type will exist.
+        removed_sdk = _filter_embedded_sdk_duplicates(embedded_dir)
+        if removed_sdk:
+            print(
+                f"  Filtered {len(removed_sdk)} embedded SDK duplicate classes "
+                f"(using Flex/playerglobal instead)"
+            )
+
+        # Needed early for SSF2-specific embedded normalization (ANE sync,
+        # Dictionary import fixes). The compiler later also uses the same
+        # ref_root for asset/companion injection.
+        ref_root = _find_ssf2_reference_root()
+        ssf2_prep = _prepare_ssf2_embedded_compile(embedded_dir, ref_root or "")
+        if ssf2_prep:
+            print("  SSF2 embedded prep: " + "; ".join(ssf2_prep))
+
+        activation_scrubbed = 0
+        if os.path.isdir(embedded_dir):
+            for _root, _dirs, _files in os.walk(embedded_dir):
+                for _fn in _files:
+                    if not _fn.endswith('.as'):
+                        continue
+                    _fpath = os.path.join(_root, _fn)
+                    try:
+                        with open(_fpath, 'r', encoding='utf-8', errors='ignore') as _sf:
+                            _src = _sf.read()
+                    except Exception:
+                        continue
+                    cleaned = _sanitize_embedded_script(_src)
+                    if cleaned != _src:
+                        activation_scrubbed += 1
+                        with open(_fpath, 'w', encoding='utf-8') as _sf:
+                            _sf.write(cleaned)
+        if activation_scrubbed:
+            print(
+                f"  Scrubbed __activation__ artifacts from {activation_scrubbed} embedded script(s)"
+            )
+
+        # Detect embedded scripts that contain known decompiler artifacts.
+        # Do not mutate files here; fixes are applied in the retry loop using
+        # exact compiler-reported file/line diagnostics.
         _artifact_re = re.compile(
             r'new\s+\._[A-Za-z]'   # new ._ClassName() — private class ctor artifact
             r'|\b\d{4,}\.[a-zA-Z]',  # 12345.method() — numeric literal as object
             re.MULTILINE,
         )
-        _pkg_re  = re.compile(r'package\s+([\w.]+)\s*\{')
-        _cls_re  = re.compile(r'public\s+(?:class|interface)\s+(\w+)')
         sanitized_count = 0
+        sanitized_files: List[str] = []
         if os.path.isdir(embedded_dir):
             for _root, _dirs, _files in os.walk(embedded_dir):
                 for _fn in _files:
@@ -2836,25 +3658,12 @@ def compile_as3(
                         continue
                     if not _artifact_re.search(_src):
                         continue
-                    # Build a minimal empty stub preserving package + class name
-                    _pkg_m = _pkg_re.search(_src)
-                    _cls_m = _cls_re.search(_src)
-                    if _pkg_m and _cls_m:
-                        _stub = (
-                            f'package {_pkg_m.group(1)} {{\n'
-                            f'    public class {_cls_m.group(1)} {{\n'
-                            f'    }}\n'
-                            f'}}\n'
-                        )
-                    else:
-                        # Top-level or unparseable — write an empty default-pkg stub
-                        _bare = _fn[:-3]
-                        _stub = f'package {{\n    public class {_bare} {{\n    }}\n}}\n'
-                    with open(_fpath, 'w', encoding='utf-8') as _sf:
-                        _sf.write(_stub)
                     sanitized_count += 1
+                    sanitized_files.append(_fn)
         if sanitized_count:
-            print(f"  Sanitized {sanitized_count} embedded script(s) with decompiler artifacts")
+            print(f"  Found {sanitized_count} embedded script(s) with decompiler artifacts")
+            if sanitized_count <= 10:
+                print("  Candidate files: " + ", ".join(sorted(sanitized_files)))
 
         # Build class-name inventory from embedded scripts so we can avoid
         # generating synthetic stubs for classes that already have real
@@ -2884,6 +3693,9 @@ def compile_as3(
 
         env = os.environ.copy()
         env["FLEX_HOME"] = sdk_path
+        is_air = _is_air_sdk(sdk_path)
+        if is_air:
+            env["AIR_HOME"] = sdk_path
         player_home = os.path.join(sdk_path, "frameworks", "libs", "player")
         env["PLAYERGLOBAL_HOME"] = player_home
 
@@ -2986,7 +3798,28 @@ def compile_as3(
                     )
                 print(f"  Generated minimal {main_class}.as stub in stub_dir (not found in shared or embedded)")
 
-        cmd = _mxmlc_cmd_prefix + [
+        if ref_root:
+            _copy_ssf2_embed_assets(ref_root, embedded_dir)
+            companions = _inject_ssf2_reference_companions(ref_root, embedded_dir)
+            if companions:
+                print(
+                    "  SSF2 reference companions: "
+                    + ", ".join(companions)
+                )
+            idk_overlay = _apply_ssf2_compile_idk_overlay(embedded_dir, ref_root)
+            if idk_overlay:
+                print(
+                    f"  SSF2 compile IDK overlay: {len(idk_overlay)} file(s)"
+                )
+                if len(idk_overlay) <= 12:
+                    print("    " + ", ".join(os.path.basename(p) for p in idk_overlay))
+        cmd = list(_mxmlc_cmd_prefix)
+        if is_air:
+            air_global = os.path.join(sdk_path, "frameworks", "libs", "air", "airglobal.swc")
+            cmd.append("+configname=air")
+            cmd.append(f"-external-library-path+={air_global}")
+            print(f"  AIR compile: +configname=air, {air_global}")
+        cmd.extend([
             f"-source-path+={embedded_dir}",
             f"-source-path+={compile_shared_dir}",
             f"-source-path+={stub_dir}",
@@ -2994,8 +3827,29 @@ def compile_as3(
             "-static-link-runtime-shared-libraries",
             "-strict=false",
             f"-output={temp_swf}",
-        ]
-
+        ])
+        if ref_root and os.path.isfile(os.path.join(ref_root, "Logger.as")):
+            # Logger is a package-level function in the default package, not a class.
+            cmd.insert(-1, "-includes+=Logger")
+        if ref_root:
+            # Flex classes live under <idk_root>/fl/* but packages declare `package fl.*`.
+            # mxmlc resolves packages relative to the source-path root, so we must add the
+            # IDK root (not the fl/ subdirectory) for `fl.motion.AdjustColor` etc.
+            if os.path.isdir(os.path.join(ref_root, "fl")):
+                cmd.insert(-1, f"-source-path+={ref_root}")
+                print(f"  SSF2 idk-root source-path: {ref_root}")
+        ssf2_swc = _find_ssf2_swc()
+        if ssf2_swc:
+            cmd.insert(-1, f"-library-path+={ssf2_swc}")
+            print(f"  SSF2 library-path: {ssf2_swc}")
+        supplemental_swcs = _flex_supplemental_library_paths(sdk_path)
+        for fw_swc in supplemental_swcs:
+            cmd.insert(-1, f"-library-path+={fw_swc}")
+        if supplemental_swcs:
+            print(
+                "  Flex supplemental library-path: "
+                + ", ".join(os.path.basename(p) for p in supplemental_swcs)
+            )
         # Use a config file for includes to avoid command-line-too-long
         # Auto-discover framework-style AS3 packages in shared_dir
         # (e.g. fl/motion/*.as -> fl.motion.AdjustColor)
@@ -3110,6 +3964,10 @@ def compile_as3(
             # still become part of the emitted DoABC.
             for emb_top in embedded_top_level_classes:
                 cfg.write(f'    <symbol>{emb_top}</symbol>\n')
+            if ref_root:
+                for fn_sym in _SSF2_COMPANION_FUNCTIONS:
+                    if os.path.isfile(os.path.join(ref_root, f"{fn_sym}.as")):
+                        cfg.write(f'    <symbol>{fn_sym}</symbol>\n')
             cfg.write('  </includes>\n')
             cfg.write('</flex-config>\n')
         cmd.append(f"-load-config+={config_path}")
@@ -3130,7 +3988,7 @@ def compile_as3(
                 break
             if _attempt < 7:
                 error_text = (result.stderr or '') + '\n' + (result.stdout or '')
-                _fixed = _apply_mxmlc_error_fixes(error_text, stub_dir)
+                _fixed = _apply_mxmlc_error_fixes(error_text, stub_dir, ref_root)
                 if _fixed:
                     print(f"  Retrying mxmlc after auto-fixes (pass {_attempt+1})...")
                 else:
@@ -4399,6 +5257,35 @@ class N2DCompiler:
         # 2. SetBackgroundColor (before non-definition metadata, matching OG)
         all_tags.extend(build_set_background_color(r, g, b))
 
+        # 2b. Header passthrough — pure opaque-data global tags captured
+        #     verbatim during SWF parsing (ProductInfo, ScriptLimits,
+        #     EnableDebugger2, DebugId, JPEGTables, etc.).  These have no
+        #     character-ID dependencies, so they survive a roundtrip
+        #     unchanged.  See `swf_to_n2d.SWFToN2DBuilder.header_passthrough`
+        #     for the source-side capture and Ruffle's swf/src/read.rs
+        #     (MIT) for the per-tag pure-data confirmation.
+        header_pt = self.data.get("headerPassthrough") or []
+        if header_pt:
+            import base64 as _b64
+            for entry in header_pt:
+                try:
+                    tt = int(entry.get("type"))
+                    body = _b64.b64decode(entry.get("data") or "")
+                except Exception:
+                    continue
+                all_tags.extend(build_tag(tt, body))
+
+        # 2c. Metadata (tag 77) — captured into the structured `metadata`
+        #     n2d field by the parser.  Emit it before the definition section
+        #     so it lines up with where Animate/Flash place it.
+        meta_str = self.data.get("metadata")
+        if meta_str:
+            meta_bytes = meta_str.encode("utf-8")
+            # Spec: null-terminated UTF-8 string
+            if not meta_bytes.endswith(b"\x00"):
+                meta_bytes += b"\x00"
+            all_tags.extend(build_tag(77, meta_bytes, force_long=True))
+
         # 3. Auxiliary tags (Protect, SceneAndFrameLabel, SoundStreamHead2)
         if raw_aux_tags:
             all_tags.extend(raw_aux_tags)
@@ -4433,8 +5320,16 @@ class N2DCompiler:
             #    - Containers: use DefineSprite ID, class extends MovieClip
             symbol_pairs: List[Tuple[int, str]] = []
 
-            # Document class: character ID 0 → "Main"
-            symbol_pairs.append((0, "Main"))
+            # Document class — preserve FQCN from import (e.g. com.mcleodgaming.ssf2.Main)
+            doc_class = self.data.get('documentClassName') or 'Main'
+            doc_swf_id = None
+            for lib in self.libs:
+                if lib.get('swfCharId') == 0:
+                    doc_swf_id = self._lib_to_swf_id.get(lib['id'])
+                    break
+            if doc_swf_id is None:
+                doc_swf_id = self._lib_to_swf_id.get(0, 0)
+            symbol_pairs.append((doc_swf_id, doc_class))
 
             # All other exported symbols
             for lib in self.libs:

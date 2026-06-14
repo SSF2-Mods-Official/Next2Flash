@@ -148,6 +148,12 @@ class AS3Decompiler:
 
         class_name = abc.mn_name(inst.name_idx)
         pkg = abc.mn_ns(inst.name_idx)
+
+        from .shell_recovery import recover_class_source, embed_metadata_for_asset_class
+        recovered = recover_class_source(abc, class_idx, class_name, pkg)
+        if recovered:
+            return recovered
+
         super_full = abc.mn_full(inst.super_idx) if inst.super_idx else ''
         super_name = abc.mn_name(inst.super_idx) if inst.super_idx else ''
         is_interface = bool(inst.flags & INSTANCE_Interface)
@@ -158,6 +164,8 @@ class AS3Decompiler:
         imports: List[str] = []
         _imports_seen: Set[str] = set()
         def _add_import(fqn: str):
+            from .helpers import canonical_import_fqn
+            fqn = canonical_import_fqn(fqn)
             if '.' in fqn and fqn != '*' and fqn not in _imports_seen:
                 _imports_seen.add(fqn)
                 imports.append(fqn)
@@ -288,6 +296,9 @@ class AS3Decompiler:
                 seen_wild.add(w)
                 deduped_wild.append(w)
         wild_pkgs = deduped_wild
+        # SSF2 ships com.mcleodgaming.ssf2.util.Dictionary instead of flash.utils.Dictionary.
+        if any(imp.endswith(".util.Dictionary") and "mcleodgaming" in imp for imp in all_imports):
+            wild_pkgs = [w for w in wild_pkgs if w != "flash.utils"]
 
         # Remove wildcard packages that would shadow an explicitly imported class.
         # E.g. if we have `import flash.utils.Dictionary;` and wildcard
@@ -342,6 +353,10 @@ class AS3Decompiler:
             lines.append(f'    import {imp};')
         if all_imports or wild_list:
             lines.append('')
+
+        embed_meta = embed_metadata_for_asset_class(class_name, pkg)
+        if embed_meta:
+            lines.append(embed_meta.rstrip())
 
         # Class declaration
         decl_parts = ['    public']

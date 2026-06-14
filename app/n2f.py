@@ -381,6 +381,175 @@ def cmd_profiler(args):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  ssf2  —  SSF2 roundtrip + deploy + ADL (CLI)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def cmd_ssf2(args):
+    """Import PSB SSF2.swf, compile roundtrip, deploy, optionally launch ADL."""
+    log.info("cmd_ssf2: source=%s", args.source)
+    sys.path.insert(0, SCRIPT_DIR)
+    import ssf2_runner as ssf2
+    from conversion_service import ConversionService
+
+    source = args.source or ssf2.DEFAULT_SOURCE_SWF
+    if not os.path.isfile(source):
+        print(f"Error: source SWF not found: {source}", file=sys.stderr)
+        return 1
+
+    settings = ssf2.load_settings(SCRIPT_DIR)
+    if args.adl_root:
+        settings["adlRoot"] = args.adl_root
+    if args.game_root:
+        settings["gameRoot"] = args.game_root
+    if args.idk_root:
+        settings["idkSourceRoot"] = args.idk_root
+    if args.no_overlay:
+        settings["overlayIdkSources"] = False
+    if args.overlay_all_idk:
+        settings["overlayIdkStubsOnly"] = False
+    if getattr(args, "no_double_verify", False):
+        settings["doubleRoundtripVerify"] = False
+    if args.air_sdk:
+        settings["airSdk"] = args.air_sdk
+
+    svc = ConversionService()
+    t0 = time.time()
+    step = lambda msg: print(f"[{time.time()-t0:6.1f}s] {msg}", flush=True)
+
+    step("SSF2 roundtrip pipeline (import + compile + deploy)...")
+    max_attempts = max(1, int(getattr(args, "max_attempts", 1) or 1))
+    adl_probe = float(args.adl_probe or 30.0)
+    result = None
+    last_error = None
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            step(f"Retry attempt {attempt}/{max_attempts} (re-import + compile + verify)...")
+        try:
+            result = ssf2.roundtrip_pipeline(
+                SCRIPT_DIR,
+                source,
+                args.project_name or settings.get("projectName", "ssf2-roundtrip"),
+                svc,
+                lambda: __import__("swf_to_n2d"),
+                lambda: __import__("compile_n2d"),
+                overwrite_project=True,
+                deploy_adl=not args.no_deploy,
+                deploy_game=not args.no_deploy,
+                adl_root=settings.get("adlRoot", ""),
+                game_root=settings.get("gameRoot", ""),
+                settings=settings,
+            )
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            print(f"Error (attempt {attempt}): {e}", file=sys.stderr)
+            log.exception("cmd_ssf2 roundtrip attempt %d failed", attempt)
+            if attempt >= max_attempts:
+                return 1
+
+    if result is None:
+        return 1
+
+    step("Roundtrip finished")
+    cmp_pf = (result.get("preflight") or {}).get("compare") or {}
+    warns = cmp_pf.get("warnings") or []
+    overlay = result.get("idkOverlay") or {}
+    compile_info = result.get("compile") or {}
+
+    print(json.dumps({
+        "roundtripSwf": result.get("roundtripSwf"),
+        "projectDir": result.get("projectDir"),
+        "importMs": result.get("importMs"),
+        "compileMs": compile_info.get("compileMs"),
+        "compileSize": compile_info.get("size"),
+        "idkOverlayCount": overlay.get("overlaid"),
+        "preflightWarnings": warns,
+        "deploys": result.get("deploys"),
+    }, indent=2))
+
+    if warns:
+        print("\nPreflight warnings:", file=sys.stderr)
+        for w in warns:
+            print(f"  - {w}", file=sys.stderr)
+
+    boot_fatal = result.get("bootFatal") or []
+    if boot_fatal:
+        print("\nBoot-critical failures (deploy skipped):", file=sys.stderr)
+        for w in boot_fatal:
+            print(f"  - {w}", file=sys.stderr)
+
+    verify = result.get("doubleRoundtripVerify")
+    if verify:
+        print("\n" + ssf2.format_verify_report_summary(verify), file=sys.stderr)
+        if verify.get("reportPath"):
+            print(f"Full report: {verify['reportPath']}", file=sys.stderr)
+
+    doc_rt = ((result.get("preflight") or {}).get("roundtrip") or {}).get("documentClass")
+    doc_og = ((result.get("preflight") or {}).get("original") or {}).get("documentClass")
+    print(f"\nDocument class: {doc_og!r} -> {doc_rt!r}")
+
+    utils_path = os.path.join(
+        result.get("projectDir", ""),
+        "scripts",
+        "com",
+        "mcleodgaming",
+        "ssf2",
+        "util",
+        "Utils.as",
+    )
+    if os.path.isfile(utils_path):
+        with open(utils_path, "r", encoding="utf-8") as f:
+            utils_src = f.read()
+        has_init = "initializeUtilsClass" in utils_src
+        print(f"Utils.as has initializeUtilsClass: {has_init} ({len(utils_src.splitlines())} lines)")
+
+    if args.no_adl:
+        step("Skipping ADL (--no-adl)")
+        return 0 if not warns and not boot_fatal else 2
+
+    if boot_fatal:
+        step("Skipping ADL (boot-critical preflight failures)")
+        return 2
+
+    adl_root = settings.get("adlRoot") or ssf2.DEFAULT_ADL_ROOT
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            step(f"ADL retry attempt {attempt}/{max_attempts}...")
+        else:
+            step(f"Launching ADL (probe {adl_probe}s, realtime error intercept)...")
+
+        adl_res = ssf2.launch_adl_cli(
+            adl_root,
+            settings.get("airSdk"),
+            settings.get("adlExtDir"),
+            probe_seconds=adl_probe,
+            keep_running=not args.kill_adl,
+        )
+
+        print(json.dumps(adl_res, indent=2))
+
+        if adl_res.get("fatalErrors"):
+            print("\nADL fatal errors:", file=sys.stderr)
+            for e in adl_res["fatalErrors"]:
+                print(f"  - {e}", file=sys.stderr)
+
+        if adl_res.get("ok") and adl_res.get("running"):
+            step(f"ADL running (pid {adl_res.get('pid')}) — no fatal errors detected")
+            return 0 if not warns else 2
+
+        err = adl_res.get("error") or adl_res.get("stderr") or "ADL failed"
+        step(f"ADL attempt {attempt} failed: {str(err).splitlines()[0][:120]}")
+        if attempt >= max_attempts:
+            print("ADL failed after all attempts", file=sys.stderr)
+            return 1
+
+    return 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  open  —  Launch the desktop app
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -441,6 +610,8 @@ examples:
   n2f server --port 5000                   # Start HTTP server
   n2f profiler --seconds 60               # Capture 60s of profiler data
   n2f open                                 # Launch desktop app
+  n2f ssf2                                 # SSF2.swf roundtrip + deploy + ADL probe
+  n2f ssf2 --no-adl                        # Roundtrip only (no ADL launch)
 """,
     )
 
@@ -515,6 +686,42 @@ examples:
     p.add_argument("--wait", action="store_true",
                    help="Wait for app to exit")
     p.set_defaults(func=cmd_open)
+
+    # ── ssf2 ───────────────────────────────────────────────────────
+    p = sub.add_parser(
+        "ssf2",
+        help="SSF2.swf roundtrip, deploy to IDK paths, launch ADL",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Full SSF2 debug pipeline (same as Debug → SSF2 Roundtrip + ADL).",
+    )
+    p.add_argument(
+        "source",
+        nargs="?",
+        help="Source SSF2.swf (default: PSB build from ssf2_runner settings)",
+    )
+    p.add_argument("--project-name", default="ssf2-roundtrip", help="Converted project folder name")
+    p.add_argument("--adl-root", help="IDK AIR app folder (SSF2-app.xml + data/)")
+    p.add_argument("--game-root", help="PSB build folder for SSF2.swf deploy")
+    p.add_argument("--idk-root", help="IDK .as source root (default: adl-root)")
+    p.add_argument("--air-sdk", help="Flex/AIR SDK path (default: C:\\aflex_sdk)")
+    p.add_argument("--no-adl", action="store_true", help="Skip ADL launch after roundtrip")
+    p.add_argument("--no-deploy", action="store_true", help="Do not copy SWF to adl/game roots")
+    p.add_argument("--no-overlay", action="store_true", help="Do not overlay IDK .as sources before compile")
+    p.add_argument(
+        "--overlay-all-idk",
+        action="store_true",
+        help="Overlay every matching IDK .as (breaks mxmlc without SSF2.swc; for experiments)",
+    )
+    p.add_argument("--keep-project", action="store_true", help="Do not delete existing project folder first")
+    p.add_argument(
+        "--no-double-verify",
+        action="store_true",
+        help="Skip SWF→N2D→SWF→N2D re-import diff (faster; misses compile omissions like Logger)",
+    )
+    p.add_argument("--adl-probe", type=float, default=30.0, help="Seconds to monitor ADL for errors")
+    p.add_argument("--max-attempts", type=int, default=3, help="Roundtrip+ADL retries on failure")
+    p.add_argument("--kill-adl", action="store_true", help="Terminate ADL after probe (for CI)")
+    p.set_defaults(func=cmd_ssf2)
 
     args = parser.parse_args()
 

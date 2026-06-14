@@ -25,12 +25,27 @@ __all__ = [
     '_to_hex_if_int', '_fmt_uint', '_fmt_int', '_escape_str',
     '_expand_multiline_stmt', '_has_outer_parens', '_needs_ternary_wrap',
     '_find_op_outside_parens', '_wrap_for_logical', '_skip_operands', '_check_mn_ns_set',
-    '_check_mn_ns_set_typed', '_access_modifier',
+    '_check_mn_ns_set_typed',     '_access_modifier',
+    'canonical_import_fqn', '_IMPORT_FQN_CORRECTIONS',
 ]
 
 # Configurable indent unit used throughout the decompiler.
 # Change this single value to switch from 4-space to tab or 2-space, etc.
 INDENT_UNIT = '    '
+
+# QName → import FQN corrections when multiname/namespace resolution picks the
+# wrong package (common for AIR desktop APIs referenced from game code).
+_IMPORT_FQN_CORRECTIONS: Dict[str, str] = {
+    'flash.events.NativeWindowDisplayStateEvent': 'flash.desktop.NativeWindowDisplayStateEvent',
+    'flash.display.NativeWindowDisplayState': 'flash.desktop.NativeWindowDisplayState',
+    'flash.events.NativeWindow': 'flash.desktop.NativeWindow',
+    'flash.display.NativeWindow': 'flash.desktop.NativeWindow',
+}
+
+
+def canonical_import_fqn(fqn: str) -> str:
+    """Return the compile-correct import target for a decompiler-discovered FQN."""
+    return _IMPORT_FQN_CORRECTIONS.get(fqn, fqn)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
