@@ -1,0 +1,82 @@
+# Generated output
+app/converted/
+app/build_tmp/
+dist/
+build/
+Next2Flash Release/
+app/docs/_static/content.js
+
+# Leftover Flex SDK path. The compiler used now is toolchain/aflex_lite.
+app/flex_sdk/
+
+# Flash toolchain binaries. Worker Java sources stay tracked.
+toolchain/ffdec/
+toolchain/aflex_lite/
+toolchain/jre/
+toolchain/asconfigc/
+toolchain/flex_sdk/
+toolchain/ffdec-worker/out/
+
+# Server runtime files
+app/server.pid
+server.pid
+
+# Local scratch / one-off test scripts
+_test_export.py
+
+# Dependencies
+app/node_modules/
+app/electron/node_modules/
+node_modules/
+
+# Lock files
+app/package-lock.json
+app/electron/package-lock.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Python virtual environment
+.venv/
+
+# Test artifacts
+app/test_*.txt
+app/test_output.txt
+app/test_errors.txt
+app/test_results.txt
+app/test_full_output.txt
+app/test_final_run.txt
+app/test_sound.txt
+app/test_response.json
+app/final_test.txt
+
+# Dev / debug scripts and data (not needed for release)
+app/_dev/
+_dev_docs/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local agent notes and config
+.cursor/
+HANDOFF.md
+TODO.md
+.env
+.env.*
+
+# Logs and coverage
+*.log
+coverage/
+# Dev Wiki stays on the maintainer's machine
+app/docs/Dev Wiki/
+app/docs/_history/

@@ -1,0 +1,82 @@
+{
+  "name": "next2flash",
+  "version": "0.2.0",
+  "description": "Next2Flash — Desktop SWF authoring tool powered by Electron",
+  "main": "main.js",
+  "author": "Next2Flash",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build-app": "cd .. && npm run build",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "electron-is-dev": "^2.0.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.next2flash.app",
+    "electronLanguages": ["en-US"],
+    "productName": "Next2Flash",
+    "directories": {
+      "output": "../../dist/pack"
+    },
+    "files": [
+      "**/*",
+      "!node_modules/.cache"
+    ],
+    "extraResources": [
+      {
+        "from": "..",
+        "to": "app",
+        "filter": [
+          "index.html",
+          "editor.html",
+          "server.py",
+          "n2f.py",
+          "icon.png",
+          "assets/**/*",
+          "lib/**/*",
+          "flex_sdk/**/*"
+        ]
+      },
+      {
+        "from": "../../dist/python",
+        "to": "python"
+      },
+      {
+        "from": "../../toolchain",
+        "to": "toolchain"
+      },
+      {
+            "from": "../docs",
+            "to": "docs",
+            "filter": [
+              "**/*",
+              "!Dev Wiki/**",
+              "!_history/**",
+              "!_static/content.js"
+            ]
+          }
+    ],
+    "win": {
+      "icon": "../icon.png",
+      "signAndEditExecutable": false,
+      "target": [
+        { "target": "dir", "arch": ["x64"] }
+      ]
+    },
+    "mac": {
+      "target": ["dmg"]
+    },
+    "linux": {
+      "target": ["AppImage"]
+    }
+  }
+}

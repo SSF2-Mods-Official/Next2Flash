@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'">
+<title>N2F Server Console</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Consolas', 'Monaco', monospace;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+header {
+  background: #2d2d2d;
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid #3e3e3e;
+}
+header h1 { font-size: 14px; color: #4fc3f7; }
+header button {
+  background: #3e3e3e;
+  color: #d4d4d4;
+  border: 1px solid #555;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  border-radius: 3px;
+}
+header button:hover { background: #505050; }
+.tab {
+  border-color: #666;
+}
+.tab.active {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #fff;
+}
+#status {
+  margin-left: auto;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4caf50;
+}
+#status-dot.stopped { background: #f44336; }
+#status-dot.starting { background: #ff9800; }
+#status-text { color: #888; }
+
+#log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-line { }
+.log-line.hidden { display: none; }
+.log-stdout { color: #d4d4d4; }
+.log-stderr { color: #f48771; }
+.log-system { color: #4fc3f7; font-style: italic; }
+.log-error-highlight {
+  background: rgba(244, 67, 54, 0.2);
+  border-left: 3px solid #f44336;
+  padding-left: 8px;
+  animation: error-flash 1s ease-out;
+}
+@keyframes error-flash {
+  0% { background: rgba(244, 67, 54, 0.5); }
+  100% { background: rgba(244, 67, 54, 0.2); }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Server Console</h1>
+  <button id="btn-clear">Clear</button>
+  <button id="btn-copy">Copy</button>
+  <button id="tab-all" class="tab active">All</button>
+  <button id="tab-errors" class="tab">Errors</button>
+  <div id="status">
+    <div id="status-dot" class="starting"></div>
+    <span id="status-text">Starting...</span>
+  </div>
+</header>
+<div id="log"></div>
+
+<script>
+const logEl = document.getElementById('log');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const copyBtn = document.getElementById('btn-copy');
+const tabAll = document.getElementById('tab-all');
+const tabErrors = document.getElementById('tab-errors');
+const MAX_LINES = 5000;
+const ERROR_PATTERN = /(\berror\b|\bexception\b|\btraceback\b|\bfatal\b|\bfailed\b|\bcritical\b)/i;
+let lineCount = 0;
+let activeTab = 'all';
+let bootstrapped = false;
+const pendingLogs = [];
+const streamBuffers = {
+  stdout: '',
+  stderr: '',
+  system: ''
+};
+
+function scrollToBottomNow() {
+  logEl.scrollTop = logEl.scrollHeight;
+  requestAnimationFrame(() => {
+    logEl.scrollTop = logEl.scrollHeight;
+  });
+}
+
+function isIssueLine(text, stream) {
+  return stream === 'stderr' || ERROR_PATTERN.test(text);
+}
+
+function updateVisibleLines() {
+  const onlyErrors = activeTab === 'errors';
+  const children = logEl.children;
+  for (let idx = 0; idx < children.length; ++idx) {
+    const line = children[idx];
+    const show = !onlyErrors || line.dataset.issue === '1';
+    line.classList.toggle('hidden', !show);
+  }
+}
+
+function setTab(nextTab) {
+  activeTab = nextTab;
+  tabAll.classList.toggle('active', activeTab === 'all');
+  tabErrors.classList.toggle('active', activeTab === 'errors');
+  updateVisibleLines();
+  scrollToBottomNow();
+}
+
+function appendLine(text, stream, shouldScroll = true) {
+  if (!text) {
+    return;
+  }
+
+  const div = document.createElement('div');
+  div.className = 'log-line log-' + stream;
+  div.textContent = text;
+  div.dataset.issue = isIssueLine(text, stream) ? '1' : '0';
+  logEl.appendChild(div);
+  lineCount++;
+
+  if (activeTab === 'errors' && div.dataset.issue !== '1') {
+    div.classList.add('hidden');
+  }
+
+  // Trim old lines to avoid unbounded memory
+  while (lineCount > MAX_LINES) {
+    logEl.removeChild(logEl.firstChild);
+    lineCount--;
+  }
+
+  if (shouldScroll) {
+    scrollToBottomNow();
+  }
+}
+
+function appendChunk(text, stream, shouldScroll = true) {
+  const key = stream in streamBuffers ? stream : 'stdout';
+  streamBuffers[key] += String(text || '');
+
+  const parts = streamBuffers[key].split(/\r?\n/);
+  streamBuffers[key] = parts.pop();
+
+  for (let idx = 0; idx < parts.length; idx++) {
+    appendLine(parts[idx], key, false);
+  }
+
+  if (shouldScroll && parts.length > 0) {
+    scrollToBottomNow();
+  }
+}
+
+function appendIncomingLog(data) {
+  if (!data) {
+    return;
+  }
+
+  if (!bootstrapped) {
+    pendingLogs.push(data);
+    return;
+  }
+
+  appendChunk(data.text, data.stream, true);
+}
+
+function getVisibleLogText() {
+  const lines = [];
+  const children = logEl.children;
+  for (let idx = 0; idx < children.length; ++idx) {
+    const line = children[idx];
+    if (!line.classList.contains('hidden')) {
+      lines.push(line.textContent || '');
+    }
+  }
+  return lines.join('\n');
+}
+
+function setStatus(state, text) {
+  statusDot.className = 'stopped';
+  if (state === 'running') statusDot.className = '';
+  else if (state === 'starting') statusDot.className = 'starting';
+  statusText.textContent = text;
+}
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  logEl.innerHTML = '';
+  lineCount = 0;
+  streamBuffers.stdout = '';
+  streamBuffers.stderr = '';
+  streamBuffers.system = '';
+});
+
+copyBtn.addEventListener('click', () => {
+  const text = getVisibleLogText();
+  window.n2fConsole.copyText(text);
+
+  const prev = copyBtn.textContent;
+  copyBtn.textContent = 'Copied';
+  setTimeout(() => {
+    copyBtn.textContent = prev;
+  }, 900);
+});
+
+tabAll.addEventListener('click', () => {
+  setTab('all');
+});
+
+tabErrors.addEventListener('click', () => {
+  setTab('errors');
+});
+
+window.n2fConsole.onLog((data) => {
+  appendIncomingLog(data);
+});
+
+window.n2fConsole.onBootstrap((payload) => {
+  const entries = payload && Array.isArray(payload.entries)
+    ? payload.entries
+    : [];
+
+  // Keep the viewport stable while replaying backlog.
+  logEl.style.visibility = 'hidden';
+
+  for (let idx = 0; idx < entries.length; ++idx) {
+    const entry = entries[idx];
+    appendChunk(entry.text, entry.stream, false);
+  }
+
+  if (payload) {
+    setStatus(payload.state, payload.text);
+  }
+
+  bootstrapped = true;
+
+  for (let idx = 0; idx < pendingLogs.length; ++idx) {
+    const entry = pendingLogs[idx];
+    appendChunk(entry.text, entry.stream, false);
+  }
+  pendingLogs.length = 0;
+
+  requestAnimationFrame(() => {
+    scrollToBottomNow();
+    requestAnimationFrame(() => {
+      logEl.style.visibility = 'visible';
+    });
+  });
+});
+
+window.n2fConsole.onStatus((state, text) => {
+  setStatus(state, text);
+});
+
+window.n2fConsole.onScrollToError(() => {
+  scrollToBottomNow();
+  setTab('errors');
+
+  // Find and highlight stderr lines (errors)
+  const lines = logEl.querySelectorAll('.log-line[data-issue="1"]');
+  // Remove old highlights
+  logEl.querySelectorAll('.log-error-highlight').forEach(el => {
+    el.classList.remove('log-error-highlight');
+  });
+  if (lines.length > 0) {
+    // Highlight the last few error lines
+    const start = Math.max(0, lines.length - 5);
+    for (let i = start; i < lines.length; i++) {
+      lines[i].classList.add('log-error-highlight');
+    }
+    scrollToBottomNow();
+  }
+});
+
+setStatus('starting', 'Starting...');
+</script>
+</body>
+</html>

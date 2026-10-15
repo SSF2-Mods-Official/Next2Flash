@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lazy Loading Bitmap Unit Tests</title>
+    
+    <!-- Jasmine CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jasmine/4.5.0/jasmine.min.css">
+    
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .header h1 {
+            margin: 0 0 10px 0;
+        }
+        
+        .header p {
+            margin: 0;
+            opacity: 0.9;
+        }
+        
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .controls button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        
+        .controls button:hover {
+            background: #5568d3;
+        }
+        
+        .controls button:active {
+            transform: translateY(1px);
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .stat-card h3 {
+            margin: 0 0 5px 0;
+            font-size: 14px;
+            color: #666;
+            text-transform: uppercase;
+        }
+        
+        .stat-card .value {
+            font-size: 32px;
+            font-weight: bold;
+            margin: 0;
+        }
+        
+        .stat-card.passed .value {
+            color: #10b981;
+        }
+        
+        .stat-card.failed .value {
+            color: #ef4444;
+        }
+        
+        .stat-card.total .value {
+            color: #667eea;
+        }
+        
+        #jasmine-container {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🧪 Lazy Loading Bitmap Unit Tests</h1>
+        <p>Comprehensive test suite for lazy loading bitmap validation and error prevention</p>
+    </div>
+    
+    <div class="controls">
+        <button onclick="runTests()">▶ Run Tests</button>
+        <button onclick="location.reload()">🔄 Reload Page</button>
+        <button onclick="toggleDetails()">👁️ Toggle Details</button>
+        
+        <div class="stats" id="stats" style="display: none;">
+            <div class="stat-card total">
+                <h3>Total Tests</h3>
+                <p class="value" id="total-tests">0</p>
+            </div>
+            <div class="stat-card passed">
+                <h3>Passed</h3>
+                <p class="value" id="passed-tests">0</p>
+            </div>
+            <div class="stat-card failed">
+                <h3>Failed</h3>
+                <p class="value" id="failed-tests">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Duration</h3>
+                <p class="value" id="duration">0s</p>
+            </div>
+        </div>
+    </div>
+    
+    <div id="jasmine-container"></div>
+    
+    <!-- Jasmine JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jasmine/4.5.0/jasmine.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jasmine/4.5.0/jasmine-html.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jasmine/4.5.0/boot0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jasmine/4.5.0/boot1.min.js"></script>
+    
+    <!-- Next2D Player (required for tests) -->
+    <script src="https://cdn.jsdelivr.net/npm/@next2d/player@2/dist/Next2D.min.js"></script>
+    
+    <!-- Load application source files -->
+    <script src="../src/javascript/Util.replaced.js"></script>
+    <script src="../src/javascript/utils/CanvasValidator.js"></script>
+    <script src="../src/javascript/instance/Instance.js"></script>
+    <script src="../src/javascript/instance/Bitmap.js"></script>
+    <script src="../src/javascript/instance/Shape.js"></script>
+    <script src="../src/javascript/WorkSpace.js"></script>
+    
+    <!-- Load test file -->
+    <script src="javascript/instance/LazyLoadingBitmapTest.js"></script>
+    
+    <script>
+        let testStartTime;
+        let testStats = { total: 0, passed: 0, failed: 0 };
+        
+        function runTests() {
+            console.log('Starting test execution...');
+            testStartTime = Date.now();
+            
+            // Show stats panel
+            document.getElementById('stats').style.display = 'grid';
+            
+            // Reset Jasmine
+            jasmine.getEnv().execute();
+        }
+        
+        function toggleDetails() {
+            const specs = document.querySelectorAll('.jasmine-spec-detail');
+            specs.forEach(spec => {
+                spec.style.display = spec.style.display === 'none' ? 'block' : 'none';
+            });
+        }
+        
+        // Custom Jasmine reporter to update stats
+        const statsReporter = {
+            specDone: function(result) {
+                testStats.total++;
+                if (result.status === 'passed') {
+                    testStats.passed++;
+                } else if (result.status === 'failed') {
+                    testStats.failed++;
+                }
+                
+                updateStatsDisplay();
+            },
+            
+            jasmineDone: function() {
+                const duration = ((Date.now() - testStartTime) / 1000).toFixed(2);
+                document.getElementById('duration').textContent = duration + 's';
+                
+                console.log('='.repeat(70));
+                console.log('Test Execution Complete');
+                console.log('='.repeat(70));
+                console.log('Total:  ', testStats.total);
+                console.log('Passed: ', testStats.passed);
+                console.log('Failed: ', testStats.failed);
+                console.log('Duration:', duration + 's');
+                console.log('='.repeat(70));
+            }
+        };
+        
+        function updateStatsDisplay() {
+            document.getElementById('total-tests').textContent = testStats.total;
+            document.getElementById('passed-tests').textContent = testStats.passed;
+            document.getElementById('failed-tests').textContent = testStats.failed;
+        }
+        
+        // Add custom reporter
+        jasmine.getEnv().addReporter(statsReporter);
+        
+        // Auto-run tests on load
+        window.addEventListener('load', function() {
+            setTimeout(runTests, 500);
+        });
+    </script>
+</body>
+</html>
